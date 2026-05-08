@@ -7,6 +7,11 @@
 #include <WiFiS3.h>
 #include <ArduinoOTA.h>
 #include "Arduino_LED_Matrix.h"
+#include <WiFiUdp.h>
+#include <NTPClient.h>
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600); // 3600 = GMT+1
 
 // --- PINS & CONSTANTS ---
 #define RELAY_PIN 4
