@@ -6,174 +6,225 @@
 #include <MFRC522.h>
 #include <WiFiS3.h>
 #include <ArduinoOTA.h>
-#include "Arduino_LED_Matrix.h"
 #include <WiFiUdp.h>
 #include <NTPClient.h>
+#include <EEPROM.h> // Added for permanent storage
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600); // 3600 = GMT+1
-
-// --- PINS & CONSTANTS ---
+// --- PINS ---
 #define RELAY_PIN 4
-#define STATUS_LED 6
 #define BUTTON_PIN 5
+#define LED_GREEN 6 
+#define LED_RED 7   
 #define BUZZER_PIN 8
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
 #define RST_PIN 9
 #define SS_PIN 10
 
 // --- OBJECTS ---
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
 MFRC522 rfid(SS_PIN, RST_PIN);
-ArduinoLEDMatrix matrix;
 WiFiServer server(80);
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 3600); 
 
-// --- SETTINGS & DATA ---
+// --- DATA ---
 const char* ssid = "wifi_archer"; 
 const char* password = "kupsenetabiedaku1!"; 
-const char* admin_pass = "1234"; // Dashboard Password
+const char* admin_pass = "1234";
 
-// RFID Storage (Expanded to 10 slots)
-byte knownUIDs[10][4] = {
-  {0x8B, 0x86, 0x07, 0x05},
-  {0x06, 0x12, 0xAA, 0x02}
-};
-int totalCards = 2;
+byte knownUIDs[10][4]; // Now loaded from EEPROM
+int totalCards = 0;
 bool learningMode = false;
 
-// Logs
-String lastActions[5];
-int logIndex = 0;
+struct LogEntry { String time; String msg; };
+LogEntry lastActions[30];
+int logCount = 0;
 
 bool isAuthenticated = false;
 unsigned long accessEndTime = 0;
 bool doorOpen = false;
 
-// --- FUNCTIONS ---
+// --- STORAGE LOGIC ---
+
+void loadCards() {
+  EEPROM.get(0, totalCards);
+  if (totalCards < 0 || totalCards > 10) totalCards = 0;
+  for (int i = 0; i < totalCards; i++) {
+    for (int j = 0; j < 4; j++) {
+      knownUIDs[i][j] = EEPROM.read(10 + (i * 4) + j);
+    }
+  }
+}
+
+void saveNewCard(byte* uid) {
+  if (totalCards >= 10) return;
+  for (int j = 0; j < 4; j++) {
+    knownUIDs[totalCards][j] = uid[j];
+    EEPROM.write(10 + (totalCards * 4) + j, uid[j]);
+  }
+  totalCards++;
+  EEPROM.write(0, totalCards);
+}
+
+// --- SYSTEM FUNCTIONS ---
+
+void updateDisplay(String status, String info = "") {
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.setTextSize(1);
+  display.println("Zamek ver 2.0");
+  display.println("---------------------");
+  display.println("Status: " + status);
+  display.println(info);
+  display.display();
+}
 
 void addLog(String msg) {
-  lastActions[logIndex] = msg;
-  logIndex = (logIndex + 1) % 5;
-  Serial.println(msg);
+  timeClient.update();
+  String currentTime = (WiFi.status() == WL_CONNECTED) ? timeClient.getFormattedTime() : "00:00";
+  if (logCount < 30) {
+    lastActions[logCount++] = {currentTime, msg};
+  } else {
+    for (int i = 0; i < 29; i++) lastActions[i] = lastActions[i+1];
+    lastActions[29] = {currentTime, msg};
+  }
 }
 
 void openDoor(String source) {
   doorOpen = true;
   accessEndTime = millis() + 3000;
   digitalWrite(RELAY_PIN, LOW);
-  digitalWrite(STATUS_LED, LOW);
+  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(LED_RED, LOW);
+  tone(BUZZER_PIN, 1000, 200);
+  updateDisplay("OTWARTE", source);
   addLog("Otwarto: " + source);
-}
-
-// --- WEB SERVER PAGES ---
-
-void sendHeader(WiFiClient& client) {
-  client.println("HTTP/1.1 200 OK");
-  client.println("Content-type:text/html");
-  client.println("Connection: close");
-  client.println();
-  client.println("<!DOCTYPE html><html><head>");
-  client.println("<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>");
-  client.println("<style>body{font-family:sans-serif; background:#f4f4f4; text-align:center;} .card{background:white; margin:20px auto; padding:20px; border-radius:10px; max-width:400px; box-shadow:0 4px 8px rgba(0,0,0,0.1);}");
-  client.println(".btn{display:block; width:100%; padding:15px; margin:10px 0; border:none; border-radius:5px; font-size:18px; cursor:pointer;} .btn-open{background:#27ae60; color:white;} .btn-add{background:#2980b9; color:white;} .btn-logout{background:#c0392b; color:white;}</style>");
-  client.println("</head><body>");
 }
 
 void handleWebClient() {
   WiFiClient client = server.available();
   if (!client) return;
 
-  String request = client.readStringUntil('\r');
-  client.flush();
-
-  // Logic: Routing
-  if (request.indexOf("GET /login?pass=") != -1) {
-    if (request.indexOf("pass=" + String(admin_pass)) != -1) isAuthenticated = true;
-  } else if (request.indexOf("GET /logout") != -1) {
-    isAuthenticated = false;
-  } else if (isAuthenticated && request.indexOf("GET /unlock") != -1) {
-    openDoor("Zdalnie");
-  } else if (isAuthenticated && request.indexOf("GET /learn") != -1) {
-    learningMode = true;
+  String request = "";
+  unsigned long timeout = millis() + 100;
+  while (client.connected() && millis() < timeout) {
+    if (client.available()) {
+      char c = client.read();
+      request += c;
+      if (c == '\n') break; 
+    }
   }
 
-  sendHeader(client);
+  if (request.indexOf("pass=" + String(admin_pass)) != -1) isAuthenticated = true;
+  if (isAuthenticated) {
+    if (request.indexOf("/unlock") != -1) openDoor("Panel WWW");
+    if (request.indexOf("/learn") != -1) {
+      learningMode = true;
+      rfid.PCD_Init(); // Re-init RFID when entering learn mode
+    }
+    if (request.indexOf("/logout") != -1) isAuthenticated = false;
+  }
+
+  client.println("HTTP/1.1 200 OK\nContent-type:text/html\nConnection: close\n");
+  client.println("<!DOCTYPE html><html><head><meta charset='UTF-8'>");
+  client.println("<style>body{font-family:sans-serif; background:#f4f4f4; text-align:center;} .card{background:white; margin:20px auto; padding:20px; border-radius:10px; max-width:400px; box-shadow:0 4px 8px rgba(0,0,0,0.1);}");
+  client.println(".btn{display:block; width:100%; padding:15px; margin:10px 0; border-radius:5px; text-decoration:none; color:white; font-weight:bold;} .btn-open{background:#27ae60;} .btn-add{background:#2980b9;} .btn-logout{background:#c0392b;}</style></head><body>");
 
   if (!isAuthenticated) {
-    // LOGIN PAGE
-    client.println("<div class='card'><h1>🔐 Zamek Logowanie</h1>");
-    client.println("<form action='/login'><input type='password' name='pass' placeholder='Hasło' style='padding:10px; width:80%'><br><br>");
-    client.println("<input type='submit' value='Zaloguj' class='btn btn-open'></form></div>");
+    client.println("<div class='card'><h2>🔐 Logowanie</h2><form action='/login'><input type='password' name='pass'><br><br><input type='submit' value='Zaloguj' class='btn btn-open'></form></div>");
   } else {
-    // DASHBOARD
-    client.println("<div class='card'><h1>🏠 Panel Sterowania</h1>");
-    client.println("<p>Status: " + String(doorOpen ? "OTWARTE" : "ZAMKNIĘTE") + "</p>");
-    client.println("<a href='/unlock'><button class='btn btn-open'>OTWÓRZ ZDALNIE</button></a>");
-    client.println("<a href='/learn'><button class='btn btn-add'>" + String(learningMode ? "TRYB UCZENIA..." : "DODAJ NOWĄ KARTĘ") + "</button></a>");
-    
-    client.println("<h3>Ostatnie akcje:</h3><ul style='text-align:left;'>");
-    for(int i=0; i<5; i++) {
-      if(lastActions[i] != "") client.println("<li>" + lastActions[i] + "</li>");
+    client.println("<div class='card'><h2>🏠 Panel admin</h2><p>Drzwi: " + String(doorOpen ? "OTWARTE" : "ZAMKNIETE") + "</p>");
+    client.println("<a href='/unlock' class='btn btn-open'>OTWÓRZ</a>");
+    client.println("<a href='/learn' class='btn btn-add'>" + String(learningMode ? "!!! TRYB UCZENIA !!!" : "DODAJ KARTE") + "</a>");
+    client.println("<div style='text-align:left;'><h3>Logi:</h3>");
+    for(int i = logCount - 1; i >= 0; i--) {
+      client.println("<div style='font-size:0.8em; border-bottom:1px solid #eee;'>" + lastActions[i].time + " - " + lastActions[i].msg + "</div>");
     }
-    client.println("</ul>");
-    client.println("<a href='/logout' style='color:red;'>Wyloguj</a></div>");
+    client.println("</div><br><a href='/logout' style='color:red;'>Wyloguj</a></div>");
   }
-
   client.println("</body></html>");
   client.stop();
 }
 
 void setup() {
   Serial.begin(115200);
-  SPI.begin();
-  rfid.PCD_Init();
-  matrix.begin();
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  loadCards(); // Load cards from EEPROM
   
   pinMode(RELAY_PIN, OUTPUT);
-  pinMode(STATUS_LED, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
   digitalWrite(RELAY_PIN, HIGH);
-  digitalWrite(STATUS_LED, HIGH);
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_RED, HIGH);
+
+  SPI.begin();
+  rfid.PCD_Init();
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  updateDisplay("Laczenie WiFi...");
 
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(500);
+  unsigned long startWait = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startWait < 10000) { delay(500); }
   
-  server.begin();
-  ArduinoOTA.begin(WiFi.localIP(), "Zamek_R4", "password_ota", InternalStorage);
-  addLog("System uruchomiony");
+  if(WiFi.status() == WL_CONNECTED) {
+    server.begin();
+    timeClient.begin();
+    ArduinoOTA.begin(WiFi.localIP(), "Zamek_R4", "password_ota", InternalStorage);
+    updateDisplay("Gotowy", WiFi.localIP().toString());
+  }
 }
 
 void loop() {
   ArduinoOTA.handle();
-  handleWebClient();
 
-  // Close door timer
-  if (doorOpen && millis() > accessEndTime) {
-    doorOpen = false;
-    digitalWrite(RELAY_PIN, HIGH);
-    digitalWrite(STATUS_LED, HIGH);
+  // 1. Learning Mode Visual Indicator (Blinking)
+  if (learningMode && (millis() % 500 < 250)) {
+    digitalWrite(LED_RED, LOW);
+  } else if (!doorOpen) {
+    digitalWrite(LED_RED, HIGH);
   }
 
-  // RFID Logic
+  // 2. Physical Button
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    delay(50);
+    if(digitalRead(BUTTON_PIN) == LOW) {
+      openDoor("Przycisk");
+      while(digitalRead(BUTTON_PIN) == LOW) { ArduinoOTA.handle(); } 
+    }
+  }
+
+  // 3. RFID Check
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     if (learningMode) {
-      if (totalCards < 10) {
-        memcpy(knownUIDs[totalCards], rfid.uid.uidByte, 4);
-        totalCards++;
-        addLog("Dodano nową kartę!");
-        learningMode = false;
-      }
+      saveNewCard(rfid.uid.uidByte);
+      addLog("Dodano Karte!");
+      tone(BUZZER_PIN, 1500, 500);
+      learningMode = false;
+      updateDisplay("DODANO KARTE");
     } else {
       bool valid = false;
       for (int i = 0; i < totalCards; i++) {
         if (memcmp(rfid.uid.uidByte, knownUIDs[i], 4) == 0) valid = true;
       }
-      if (valid) openDoor("Karta RFID");
-      else addLog("Odmowa: Nieznana karta");
+      if (valid) openDoor("RFID");
+      else {
+        addLog("Odmowa RFID");
+        tone(BUZZER_PIN, 200, 500);
+      }
     }
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
   }
+
+  // 4. Timer
+  if (doorOpen && millis() > accessEndTime) {
+    doorOpen = false;
+    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(LED_GREEN, LOW);
+    digitalWrite(LED_RED, HIGH);
+    updateDisplay("Zamkniete");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) handleWebClient();
 }
