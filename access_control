@@ -9,11 +9,11 @@
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.2.2 - Stable RFID Engine";
+const char* app_version = "v2.2.3 - Hardware Watchdog Fix";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
-const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
-const char* pass = "kupsenetabiedaku1!";     // ⚠️ Change to your network password
+const char* ssid = "YOUR_WIFI_NAME";         // ⚠️ Change to your network name
+const char* pass = "YOUR_WIFI_PASSWORD";     // ⚠️ Change to your network password
 const String admin_password = "admin";       // 🔑 Your Web Panel access password
 
 // --- PINS ---
@@ -66,6 +66,16 @@ void saveNewCard(byte* uid) {
   EEPROM.write(0, totalCards);
 }
 
+// --- HARDWARE WATCHDOG RESET ---
+// Forces a complete electrical reboot of the MFRC522 reader module
+void forceHardwareRFIDReset() {
+  digitalWrite(RST_PIN, LOW);
+  delay(20);
+  digitalWrite(RST_PIN, HIGH);
+  delay(20);
+  rfid.PCD_Init(); 
+}
+
 // --- SYSTEM FUNCTIONS ---
 void updateDisplay(String status, String info = "") {
   display.clearDisplay();
@@ -82,7 +92,7 @@ void updateDisplay(String status, String info = "") {
 void addLog(String msg) {
   String currentTime = "00:00:00";
   if (WiFi.status() == WL_CONNECTED) {
-    currentTime = timeClient.getFormattedTime(); // Fast local read, no network blocking
+    currentTime = timeClient.getFormattedTime();
   }
   if (logCount < 10) {
     lastActions[logCount++] = {currentTime, msg};
@@ -127,7 +137,7 @@ void handleWebServer() {
     } else if (reqHeader.indexOf("/toggle_learn") != -1) {
       learningMode = !learningMode;
       if (learningMode) {
-        rfid.PCD_Init(); 
+        forceHardwareRFIDReset();
         updateDisplay("TRYB UCZENIA", "Zbliz karte...");
         addLog("Uczenie: Panel WWW");
         tone(BUZZER_PIN, 1500, 300);
@@ -177,6 +187,11 @@ void handleWebServer() {
     client.println("</table></div>");
   }
   
+  // 💻 --- WEB DISPLAY FOOTER ENGINE ---
+  client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
+  client.println("System Hardware ID: Renesas RA4M1 Core | " + String(app_version));
+  client.println("</div>");
+  
   client.println("</body></html>");
   delay(1);
   client.stop();
@@ -192,6 +207,7 @@ void setup() {
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_RED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(RST_PIN, OUTPUT); // Express pin mode allocation for clear hardware loops
   
   digitalWrite(RELAY_PIN, HIGH);
   digitalWrite(LED_GREEN, LOW);
@@ -233,7 +249,7 @@ void setup() {
 void loop() {
   handleWebServer(); 
 
-  // --- BACKGROUND NTP CLOCK UPDATE (Every 60 seconds, non-blocking) ---
+  // --- BACKGROUND NTP CLOCK UPDATE ---
   if (WiFi.status() == WL_CONNECTED && millis() - lastNTPUpdate > 60000) {
     timeClient.update();
     lastNTPUpdate = millis();
@@ -268,8 +284,6 @@ void loop() {
       tone(BUZZER_PIN, 2000, 400); delay(400);
       
       delay(1000); 
-      
-      // Learning Mode persists indefinitely until toggled from web or long-press
       updateDisplay("TRYB UCZENIA", "Zbliz kolejna...");
     } else {
       bool valid = false;
@@ -287,10 +301,8 @@ void loop() {
     // Put current card to sleep
     rfid.PICC_HaltA();
     
-    // 🛠️ THE FIX: Clear lingering states from the reader's hardware command register.
-    // We completely avoided PCD_StopCrypto1() because it causes clone chips to lock up.
-    rfid.PCD_WriteRegister(rfid.CommandReg, rfid.PCD_Idle);
-    rfid.PCD_WriteRegister(rfid.FIFODataReg, 0x00);
+    // 🔥 HARDWARE TRIGGER: Wipe chip registers entirely by cycling the physical reset pin 
+    forceHardwareRFIDReset();
   }
 
   // --- FIZYCZNY PRZYCISK ---
@@ -304,7 +316,7 @@ void loop() {
         learningMode = !learningMode; 
         
         if (learningMode) {
-          rfid.PCD_Init(); 
+          forceHardwareRFIDReset();
           updateDisplay("TRYB UCZENIA", "Zbliz karte...");
           tone(BUZZER_PIN, 1500, 400);
         } else {
