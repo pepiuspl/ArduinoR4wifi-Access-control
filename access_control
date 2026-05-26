@@ -9,7 +9,7 @@
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.2.1 - Patched Console";
+const char* app_version = "v2.2.2 - Stable RFID Engine";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
 const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
@@ -43,6 +43,7 @@ LogEntry lastActions[10];
 int logCount = 0;
 
 unsigned long accessEndTime = 0;
+unsigned long lastNTPUpdate = 0;
 
 // --- STORAGE LOGIC ---
 void loadCards() {
@@ -81,8 +82,7 @@ void updateDisplay(String status, String info = "") {
 void addLog(String msg) {
   String currentTime = "00:00:00";
   if (WiFi.status() == WL_CONNECTED) {
-    timeClient.update();
-    currentTime = timeClient.getFormattedTime();
+    currentTime = timeClient.getFormattedTime(); // Fast local read, no network blocking
   }
   if (logCount < 10) {
     lastActions[logCount++] = {currentTime, msg};
@@ -212,6 +212,9 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     timeClient.begin();
+    timeClient.update();
+    lastNTPUpdate = millis();
+    
     server.begin(); 
     updateDisplay("Gotowy", WiFi.localIP().toString());
     addLog("System online");
@@ -229,6 +232,12 @@ void setup() {
 
 void loop() {
   handleWebServer(); 
+
+  // --- BACKGROUND NTP CLOCK UPDATE (Every 60 seconds, non-blocking) ---
+  if (WiFi.status() == WL_CONNECTED && millis() - lastNTPUpdate > 60000) {
+    timeClient.update();
+    lastNTPUpdate = millis();
+  }
 
   // --- ZARZĄDZANIE DIODAMI ---
   if (learningMode) {
@@ -260,7 +269,7 @@ void loop() {
       
       delay(1000); 
       
-      // Fix 1: Removed 'learningMode = false;'. Mode now persists.
+      // Learning Mode persists indefinitely until toggled from web or long-press
       updateDisplay("TRYB UCZENIA", "Zbliz kolejna...");
     } else {
       bool valid = false;
@@ -275,13 +284,13 @@ void loop() {
       }
     }
     
-    // Clean up current card connection
+    // Put current card to sleep
     rfid.PICC_HaltA();
-    rfid.PCD_StopCrypto1();
     
-    // 🔥 Fix 2: HARDWARE WATCHDOG RESET FOR THE MFRC522 MODULE
-    // This wipes the chip registers and forces a clear start, preventing lockups.
-    rfid.PCD_Init(); 
+    // 🛠️ THE FIX: Clear lingering states from the reader's hardware command register.
+    // We completely avoided PCD_StopCrypto1() because it causes clone chips to lock up.
+    rfid.PCD_WriteRegister(rfid.CommandReg, rfid.PCD_Idle);
+    rfid.PCD_WriteRegister(rfid.FIFODataReg, 0x00);
   }
 
   // --- FIZYCZNY PRZYCISK ---
