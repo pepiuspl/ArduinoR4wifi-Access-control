@@ -7,12 +7,12 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <EEPROM.h>
-#include "RTC.h" // Native Uno R4 32-bit hardware Real-Time Clock drivers
+#include "RTC.h" 
 
 // --- VERSION ---
-const char* app_version = "v2.5.0 - Nexus Core Edition";
+const char* app_version = "v2.5.1 - Autonomous Master Patch";
 
-// --- FALLBACK DEFAULTS (Used if EEPROM config block is empty) ---
+// --- FALLBACK DEFAULTS ---
 char ssid[32] = "wifi_archer";         
 char pass[32] = "kupsenetabiedaku1!";     
 char admin_password[16] = "admin";       
@@ -42,6 +42,7 @@ struct User {
 // --- SYSTEM VARIABLES ---
 bool doorOpen = false;
 bool learningMode = false;
+bool autoExitLearn = false; // Smart tracker to decouple web bulk additions from standalone actions
 User users[10];       
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
@@ -168,7 +169,6 @@ void handleWebServer() {
 
   bool isAuthenticated = reqHeader.indexOf("pass=" + String(admin_password)) != -1;
 
-  // --- API ROUTE: LIVE STREAM JSON FEED ---
   if (reqHeader.indexOf("GET /api/data") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -209,7 +209,6 @@ void handleWebServer() {
     delay(1); client.stop(); return;
   }
 
-  // --- API EXECUTION FILTERS ---
   if (isAuthenticated) {
     if (reqHeader.indexOf("/api/unlock") != -1) {
       openDoor("Panel WWW");
@@ -218,6 +217,7 @@ void handleWebServer() {
     } 
     else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
       learningMode = !learningMode;
+      autoExitLearn = false; // Web toggle allows bulk enrollment tracking
       if (learningMode) {
         if (reqHeader.indexOf("username=") != -1) {
           int startIdx = reqHeader.indexOf("username=") + 9;
@@ -274,7 +274,6 @@ void handleWebServer() {
     }
   }
 
-  // --- HTML CONSOLE VIEW CONTAINER ---
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
   client.println("Connection: close");
@@ -287,15 +286,11 @@ void handleWebServer() {
   client.println("input[type=password], input[type=text]{padding:10px;width:75%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:12px;box-sizing:border-box;}");
   client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;} .hide{display:none;}</style>");
   
-  // CLIENT ASYNC JAVASCRIPT APP MODULE
   client.println("<script>var pass=''; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
   client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');return;} ");
-  
-  // 🛡️ Fixed Line 297: Properly outputting JavaScript formatting onto the client browser pipeline
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
-  
   client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
   client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
   client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong> ${u.idx==0?'<span style=\"color:#ff8f00;font-size:11px;\">[MASTER]</span>':''}<br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;\"><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
@@ -305,29 +300,24 @@ void handleWebServer() {
   client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); setInterval(updateData,2000);}; ");
   client.println("function saveCfg(){let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Zrestartuj urządzenie.');} </script></head><body>");
 
-  // LOGIN CONTAINER BLOCK
   client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
   client.println("<div class='box'><form method='GET' action='/'>");
   client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
   client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div></div>");
 
-  // CORE APPLICATION CONTAINER BLOCK
   client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania Access Control</h2>");
   client.println("<div class='box'><h3>Status Urządzenia</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Rygiel: <strong id='v-lock'>-</strong></p></div>");
   client.println("<div class='box'><h3>Działania Zdalne</h3><button onclick=\"runCmd('/api/unlock')\" class='btn btn-open'>🔓 Otwórz Zamek zdalnie</button>");
   client.println("<div style='margin-top:20px;'><input type='text' id='new-user-name' placeholder='Imię dla nowej karty' maxlength='15'><button onclick=\"runCmd('/api/toggle_learn?username='+encodeURIComponent(document.getElementById('new-user-name').value))\" class='btn btn-learn'>➕ Przełącz Tryb Uczenia</button></div></div>");
   
-  // User Registry Block
   client.println("<div class='box'><h3>👥 Baza Użytkowników</h3><table class='log-table' id='v-users'></table></div>");
   
-  // Persistent Settings Interface Block
   client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
   client.println("<input type='text' id='cfg-ssid' placeholder='Nowe WiFi SSID'><br>");
   client.println("<input type='password' id='cfg-pass' placeholder='Nowe WiFi Hasło'><br>");
   client.println("<input type='text' id='cfg-admin' placeholder='Nowe Hasło Web Panelu'><br>");
   client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
   
-  // System Log Feed Block
   client.println("<div class='box'><h3>Dziennik Zdarzeń (Logs)</h3><table class='log-table' id='v-logs'></table></div></div>");
 
   client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
@@ -383,7 +373,6 @@ void setup() {
     updateDisplay("Gotowy", WiFi.localIP().toString());
     addLog("System online");
 
-    // --- STARTUP MELODY ---
     tone(BUZZER_PIN, 800, 100);  delay(120);
     tone(BUZZER_PIN, 1000, 100); delay(120);
     tone(BUZZER_PIN, 1300, 120); delay(140);
@@ -434,17 +423,36 @@ void loop() {
     }
     uidStr.toUpperCase();
 
+    // Evaluate master key state beforehand to secure processing execution pipelines
+    bool isMasterScan = (totalCards > 0 && memcmp(rfid.uid.uidByte, users[0].uid, 4) == 0);
+
     if (learningMode) {
-      saveNewCard(rfid.uid.uidByte, pendingUsername);
-      addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
-      updateDisplay("DODANO KARTE", pendingUsername);
-      
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);
-      
-      tone(BUZZER_PIN, 1000, 150); delay(150);
-      tone(BUZZER_PIN, 1500, 150); delay(150);
-      tone(BUZZER_PIN, 2000, 400);
+      // 🔥 CRITICAL INTERCEPT PATCH: Master card cancel override sequence
+      if (isMasterScan) {
+        learningMode = false;
+        autoExitLearn = false;
+        updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+        addLog("Master: Odwolano");
+        tone(BUZZER_PIN, 800, 400);
+      } else {
+        // Enrolling standard new card entries
+        saveNewCard(rfid.uid.uidByte, pendingUsername);
+        addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
+        updateDisplay("DODANO KARTE", pendingUsername);
+        
+        digitalWrite(LED_RED, LOW);
+        digitalWrite(LED_GREEN, HIGH);
+        
+        tone(BUZZER_PIN, 1000, 150); delay(150);
+        tone(BUZZER_PIN, 1500, 150); delay(150);
+        tone(BUZZER_PIN, 2000, 400);
+        
+        // 🔥 CRITICAL AUTO-EXIT ACTION: Closes out physical session blocks autonomously 
+        if (autoExitLearn) {
+          learningMode = false;
+          autoExitLearn = false;
+        }
+      }
     } else {
       bool valid = false;
       int matchedIndex = -1;
@@ -459,7 +467,9 @@ void loop() {
       
       if (valid) {
         if (matchedIndex == 0) {
+          // Entering learning mode via Master Card assignment
           learningMode = !learningMode;
+          autoExitLearn = true; // Signals the chip to auto-close after 1 entry
           if (learningMode) {
             pendingUsername = "Karta Master";
             forceHardwareRFIDReset();
@@ -494,6 +504,7 @@ void loop() {
       if (millis() - pressTime > 3000) { 
         longPressed = true;
         learningMode = !learningMode; 
+        autoExitLearn = true; // Standalone physical triggers activate auto-close routine
         if (learningMode) {
           pendingUsername = "Przycisk Fiz."; 
           forceHardwareRFIDReset();
