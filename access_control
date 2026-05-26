@@ -9,7 +9,7 @@
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.3.0 - Watchdog Edition (Stable)";
+const char* app_version = "v2.3.1 - User Directory";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
 const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
@@ -32,11 +32,18 @@ WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200); 
 WiFiServer server(80); 
 
+// --- USER DATABASE STRUCTURE ---
+struct User {
+  byte uid[4];
+  char name[16]; // 15 characters + null terminator
+};
+
 // --- SYSTEM VARIABLES ---
 bool doorOpen = false;
 bool learningMode = false;
-byte knownUIDs[10][4]; 
+User users[10];       // Maximum database capacity of 10 named users
 int totalCards = 0;
+String pendingUsername = "Nowy Uzytkownik"; 
 
 struct LogEntry { String time; String msg; };
 LogEntry lastActions[10]; 
@@ -45,7 +52,7 @@ int logCount = 0;
 unsigned long accessEndTime = 0;
 unsigned long lastNTPUpdate = 0;
 
-// --- WATCHDOG SCHEDULER VARIABLES ---
+// --- WATCHDOG VARIABLES ---
 bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 
@@ -53,24 +60,39 @@ unsigned long lastScanTime = 0;
 void loadCards() {
   EEPROM.get(0, totalCards);
   if (totalCards < 0 || totalCards > 10) totalCards = 0;
+  
   for (int i = 0; i < totalCards; i++) {
-    for (int j = 0; j < 4; j++) {
-      knownUIDs[i][j] = EEPROM.read(10 + (i * 4) + j);
-    }
+    EEPROM.get(10 + (i * sizeof(User)), users[i]);
   }
 }
 
-void saveNewCard(byte* uid) {
+void saveNewCard(byte* uid, String nameStr) {
   if (totalCards >= 10) return;
-  for (int j = 0; j < 4; j++) {
-    knownUIDs[totalCards][j] = uid[j];
-    EEPROM.write(10 + (totalCards * 4) + j, uid[j]);
-  }
+  
+  memset(&users[totalCards], 0, sizeof(User));
+  
+  memcpy(users[totalCards].uid, uid, 4);
+  nameStr.toCharArray(users[totalCards].name, 16);
+  
+  EEPROM.put(10 + (totalCards * sizeof(User)), users[totalCards]);
+  
   totalCards++;
-  EEPROM.write(0, totalCards);
+  EEPROM.put(0, totalCards);
 }
 
-// --- HARDWARE WATCHDOG RESET ---
+void deleteUser(int index) {
+  if (index < 0 || index >= totalCards) return;
+  
+  for (int i = index; i < totalCards - 1; i++) {
+    users[i] = users[i + 1];
+    EEPROM.put(10 + (i * sizeof(User)), users[i]);
+  }
+  
+  totalCards--;
+  EEPROM.put(0, totalCards);
+}
+
+// --- SYSTEM FUNCTIONS ---
 void forceHardwareRFIDReset() {
   digitalWrite(RST_PIN, LOW);
   delay(30);
@@ -79,7 +101,6 @@ void forceHardwareRFIDReset() {
   rfid.PCD_Init(); 
 }
 
-// --- SYSTEM FUNCTIONS ---
 void updateDisplay(String status, String info = "") {
   display.clearDisplay();
   display.setCursor(0,0);
@@ -137,17 +158,40 @@ void handleWebServer() {
   if (isAuthenticated) {
     if (reqHeader.indexOf("/unlock") != -1) {
       openDoor("Panel WWW");
-    } else if (reqHeader.indexOf("/toggle_learn") != -1) {
+    } 
+    else if (reqHeader.indexOf("/toggle_learn") != -1) {
       learningMode = !learningMode;
       if (learningMode) {
+        if (reqHeader.indexOf("username=") != -1) {
+          int startIdx = reqHeader.indexOf("username=") + 9;
+          int endIdx = reqHeader.indexOf(" ", startIdx);
+          if (reqHeader.indexOf("&", startIdx) != -1 && reqHeader.indexOf("&", startIdx) < endIdx) {
+            endIdx = reqHeader.indexOf("&", startIdx);
+          }
+          pendingUsername = reqHeader.substring(startIdx, endIdx);
+          pendingUsername.replace("+", " "); 
+          if(pendingUsername.length() == 0) pendingUsername = "Uzytkownik R4";
+        }
         forceHardwareRFIDReset();
-        updateDisplay("TRYB UCZENIA", "Zbliz karte...");
-        addLog("Uczenie: Panel WWW");
+        updateDisplay("TRYB UCZENIA", pendingUsername);
+        addLog("Tryb Ucz. [" + pendingUsername + "]");
         tone(BUZZER_PIN, 1500, 300);
       } else {
         updateDisplay("Gotowy", WiFi.localIP().toString());
         addLog("Stop Ucz: Panel WWW");
         tone(BUZZER_PIN, 800, 300);
+      }
+    } 
+    else if (reqHeader.indexOf("/delete_user") != -1) {
+      int idxPos = reqHeader.indexOf("idx=");
+      if (idxPos != -1) {
+        int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
+        if (targetIdx >= 0 && targetIdx < totalCards) {
+          String deletedName = String(users[targetIdx].name);
+          deleteUser(targetIdx);
+          addLog("Usunieto: " + deletedName);
+          tone(BUZZER_PIN, 600, 400);
+        }
       }
     }
   }
@@ -159,9 +203,9 @@ void handleWebServer() {
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#e0e0e0;font-family:sans-serif;text-align:center;padding:20px;}");
   client.println(".box{background:#1e1e1e;border-radius:10px;padding:20px;max-width:500px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);}");
-  client.println(".btn{display:block;width:80%;margin:15px auto;padding:12px;color:#fff;font-weight:bold;border:none;border-radius:5px;cursor:pointer;text-decoration:none;font-size:16px;}");
-  client.println(".btn-open{background:#2e7d32;} .btn-learn{background:#1565c0;} .btn-login{background:#ff8f00;width:50%;}");
-  client.println("input[type=password]{padding:10px;width:60%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:10px;}");
+  client.println(".btn{display:block;width:80%;margin:15px auto;padding:12px;color:#fff;font-weight:bold;border:none;border-radius:5px;cursor:pointer;text-decoration:none;font-size:16px;box-sizing:border-box;}");
+  client.println(".btn-open{background:#2e7d32;} .btn-learn{background:#1565c0;} .btn-stop-learn{background:#cc3333;} .btn-login{background:#ff8f00;width:50%;}");
+  client.println("input[type=password], input[type=text]{padding:10px;width:75%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:12px;box-sizing:border-box;}");
   client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;}</style></head><body>");
 
   if (!isAuthenticated) {
@@ -171,207 +215,22 @@ void handleWebServer() {
     client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div>");
   } else {
     client.println("<h2>🛠️ Panel Sterowania Access Control</h2>");
+    
     client.println("<div class='box'><h3>Status Urządzenia</h3>");
     client.println("<p>Aktualny tryb: <strong>" + String(learningMode ? "<span style='color:#64b5f6;'>Tryb Uczenia Aktywny</span>" : "<span style='color:#81c784;'>Czuwanie Aktywne</span>") + "</strong></p>");
+    if (learningMode) {
+      client.println("<p>Oczekiwanie na przypisanie dla: <strong style='color:#ff8f00;'>" + pendingUsername + "</strong></p>");
+    }
     client.println("<p>Rygiel: <strong>" + String(doorOpen ? "<span style='color:#81c784;'>OTWARTY</span>" : "<span style='color:#e57373;'>ZAMKNIĘTY</span>") + "</strong></p></div>");
 
     client.println("<div class='box'><h3>Działania Zdalne</h3>");
     client.println("<a href='/unlock?pass=" + admin_password + "' class='btn btn-open'>🔓 Otwórz Zamek zdalnie</a>");
-    client.println("<a href='/toggle_learn?pass=" + admin_password + "' class='btn btn-learn'>🔄 " + String(learningMode ? "Wyłącz" : "Włącz") + " Tryb Uczenia</a></div>");
-
-    client.println("<div class='box'><h3>Dziennik Zdarzeń (System Logs)</h3><table class='log-table'>");
-    if (logCount == 0) {
-      client.println("<tr><td>Brak zarejestrowanych akcji.</td></tr>");
+    
+    if (!learningMode) {
+      client.println("<form method='GET' action='/toggle_learn' style='margin-top:20px;'>");
+      client.println("<input type='hidden' name='pass' value='" + admin_password + "'>");
+      client.println("<input type='text' name='username' placeholder='Imię i Nazwisko / Opis' maxlength='15' required><br>");
+      client.println("<input type='submit' class='btn btn-learn' value='➕ Włącz Tryb Uczenia'>");
+      client.println("</form>");
     } else {
-      for (int i = logCount - 1; i >= 0; i--) {
-        client.println("<tr><td class='time'>[" + lastActions[i].time + "]</td><td>" + lastActions[i].msg + "</td></tr>");
-      }
-    }
-    client.println("</table></div>");
-  }
-  
-  client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
-  client.println("System Hardware ID: Renesas RA4M1 Core | " + String(app_version));
-  client.println("</div>");
-  
-  client.println("</body></html>");
-  delay(1);
-  client.stop();
-}
-
-void setup() {
-  Serial.begin(9600);
-  delay(1500); 
-
-  loadCards();
-  
-  pinMode(RELAY_PIN, OUTPUT);
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_RED, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  
-  pinMode(RST_PIN, OUTPUT); 
-  digitalWrite(RST_PIN, HIGH);
-  delay(50);
-
-  digitalWrite(RELAY_PIN, HIGH);
-  digitalWrite(LED_GREEN, LOW);
-  digitalWrite(LED_RED, HIGH);
-
-  SPI.begin();
-  
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-  updateDisplay("Laczenie z WiFi... ");
-  
-  WiFi.begin(ssid, pass);
-  unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000) {
-    delay(500);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    timeClient.begin();
-    timeClient.update();
-    lastNTPUpdate = millis();
-    server.begin(); 
-    
-    forceHardwareRFIDReset();
-    
-    updateDisplay("Gotowy", WiFi.localIP().toString());
-    addLog("System online");
-
-    // --- STARTUP MELODY ---
-    tone(BUZZER_PIN, 800, 100);  delay(120);
-    tone(BUZZER_PIN, 1000, 100); delay(120);
-    tone(BUZZER_PIN, 1300, 120); delay(140);
-    tone(BUZZER_PIN, 1600, 300);
-  } else {
-    forceHardwareRFIDReset();
-    updateDisplay("Gotowy", "Tryb Offline");
-    tone(BUZZER_PIN, 300, 600);
-  }
-}
-
-void loop() {
-  handleWebServer(); 
-
-  // --- NON-BLOCKING WATCHDOG RESET (For Offline/Denied scans only) ---
-  // If the door wasn't opened, safely reset the reader 1 second later.
-  if (rfidResetPending && !doorOpen && (millis() - lastScanTime > 1000)) {
-    forceHardwareRFIDReset();
-    rfidResetPending = false;
-    
-    if (learningMode) {
-      updateDisplay("TRYB UCZENIA", "Zbliz karte...");
-    } else {
-      updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
-    }
-  }
-
-  // --- BACKGROUND NTP CLOCK UPDATE ---
-  if (WiFi.status() == WL_CONNECTED && millis() - lastNTPUpdate > 60000) {
-    timeClient.update();
-    lastNTPUpdate = millis();
-  }
-
-  // --- ZARZĄDZANIE DIODAMI ---
-  if (learningMode) {
-    if (millis() % 500 < 250) {
-      digitalWrite(LED_RED, HIGH);
-      digitalWrite(LED_GREEN, LOW);
-    } else {
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);
-    }
-  } else if (!doorOpen) {
-    digitalWrite(LED_RED, HIGH);
-    digitalWrite(LED_GREEN, LOW);
-  }
-
-  // --- SPRAWDZANIE RFID ---
-  if (!rfidResetPending && !doorOpen && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    
-    String uidStr = "";
-    for (byte i = 0; i < rfid.uid.size; i++) {
-      if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
-      uidStr += String(rfid.uid.uidByte[i], HEX);
-      if (i < rfid.uid.size - 1) uidStr += " ";
-    }
-    uidStr.toUpperCase();
-
-    if (learningMode) {
-      saveNewCard(rfid.uid.uidByte);
-      addLog("Dodano Karte [" + uidStr + "]"); 
-      updateDisplay("DODANO KARTE", "UID: " + uidStr);
-      
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);
-      
-      tone(BUZZER_PIN, 1000, 150); delay(150);
-      tone(BUZZER_PIN, 1500, 150); delay(150);
-      tone(BUZZER_PIN, 2000, 400);
-    } else {
-      bool valid = false;
-      for (int i = 0; i < totalCards; i++) {
-        if (memcmp(rfid.uid.uidByte, knownUIDs[i], 4) == 0) valid = true;
-      }
-      if (valid) {
-        openDoor("Karta [" + uidStr + "]"); 
-      } else {
-        addLog("Odmowa RFID [" + uidStr + "]");
-        tone(BUZZER_PIN, 200, 500);
-      }
-    }
-    
-    rfid.PICC_HaltA();
-    
-    rfidResetPending = true;
-    lastScanTime = millis();
-  }
-
-  // --- PRZYCISK FIZYCZNY ---
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    unsigned long pressTime = millis();
-    bool longPressed = false;
-
-    while (digitalRead(BUTTON_PIN) == LOW) {
-      if (millis() - pressTime > 3000) { 
-        longPressed = true;
-        learningMode = !learningMode; 
-        
-        if (learningMode) {
-          forceHardwareRFIDReset();
-          updateDisplay("TRYB UCZENIA", "Zbliz karte...");
-          tone(BUZZER_PIN, 1500, 400);
-        } else {
-          updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
-          tone(BUZZER_PIN, 800, 400);
-        }
-        while(digitalRead(BUTTON_PIN) == LOW); 
-        break;
-      }
-      delay(10);
-    }
-
-    if (!longPressed && (millis() - pressTime > 50)) {
-      openDoor("Przycisk");
-    }
-  }
-
-  // --- AUTO-ZAMYKANIE ---
-  if (doorOpen && millis() > accessEndTime) {
-    doorOpen = false;
-    digitalWrite(RELAY_PIN, HIGH); // Shut down relay
-    
-    // 🔥 THE ISOLATION FIXED STRATEGY:
-    // Delay exactly 100ms for the relay mechanical coil back-EMF burst to dissolve completely.
-    // Then reinitialize the software environment on clean voltage rails.
-    delay(100); 
-    forceHardwareRFIDReset();
-    rfidResetPending = false; 
-
-    digitalWrite(LED_GREEN, LOW);
-    digitalWrite(LED_RED, HIGH);
-    updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
-  }
-}
+      client.println("<a href='/toggle_learn?pass=" + admin_password + "' class='btn btn-stop-learn'>⏹️ Zatrzymaj Tryb Uczenia
