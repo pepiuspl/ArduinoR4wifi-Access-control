@@ -9,7 +9,7 @@
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.2.6 - Electrical Noise Patch";
+const char* app_version = "v2.3.0 - Watchdog Edition (Stable)";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
 const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
