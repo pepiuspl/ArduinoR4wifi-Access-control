@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION ---
-const char* app_version = "v2.6.3 - Log Engine Release";
+const char* app_version = "v2.6.3 - Watchdog Patch";
 
 // --- FALLBACK DEFAULTS ---
 char ssid[32] = "wifi_archer";         
@@ -27,7 +27,7 @@ char admin_password[16] = "admin";
 #define SS_PIN 10
 
 // --- CAPACITY CONFIGURATION ---
-#define MAX_LOGS 30 // 🔥 Expanded log memory capacity profile limit
+#define MAX_LOGS 30 
 
 // --- OBJECTS ---
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
@@ -53,7 +53,7 @@ String pendingUsername = "Nowy Uzytkownik";
 
 // --- SECURITY LOGS & BRUTE-FORCE WATCHDOG ---
 struct LogEntry { String time; String msg; };
-LogEntry lastActions[MAX_LOGS]; // Tracks the expanded data limits
+LogEntry lastActions[MAX_LOGS]; 
 int logCount = 0;
 
 int failedLoginAttempts = 0;
@@ -103,10 +103,8 @@ void saveNewCard(byte* uid, String nameStr) {
   memcpy(users[totalCards].uid, uid, 4);
   nameStr.toCharArray(users[totalCards].name, 16);
   EEPROM.put(10 + (totalCards * sizeof(User)), users[totalCards]);
-  
   isCardActive[totalCards] = true; 
   EEPROM.write(220 + totalCards, 0x01);
-  
   totalCards++;
   EEPROM.put(0, totalCards);
 }
@@ -156,7 +154,6 @@ void addLog(String msg) {
   if (logCount < MAX_LOGS) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
-    // Standard FIFO array shifting based on new MAX_LOGS parameter limits
     for (int i = 0; i < MAX_LOGS - 1; i++) lastActions[i] = lastActions[i+1];
     lastActions[MAX_LOGS - 1] = {currentTime, msg};
   }
@@ -188,22 +185,37 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
+  // Brute force lockout safety screen filter
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
     client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
     delay(1); client.stop(); return;
   }
 
-  bool isAuthenticated = reqHeader.indexOf("pass=" + String(admin_password)) != -1;
+  // 🔥 Fix: Parse explicit password payload metrics out of network packets safely
+  String attemptedPass = "";
+  int passPos = reqHeader.indexOf("pass=");
+  if (passPos != -1) {
+    int spacePos = reqHeader.indexOf(" ", passPos);
+    int ampPos = reqHeader.indexOf("&", passPos);
+    int endPos = spacePos;
+    if (ampPos != -1 && ampPos < spacePos) endPos = ampPos;
+    attemptedPass = reqHeader.substring(passPos + 5, endPos);
+  }
 
-  if (!isAuthenticated && reqHeader.indexOf("pass=") != -1) {
-    failedLoginAttempts++;
-    if (failedLoginAttempts >= 5) {
-      lockoutEndTime = millis() + 300000; 
-      addLog("ALARM: Atak BruteForce!");
-      updateDisplay("BLOKADA SYSTEMU", "Atak BruteForce");
+  bool isAuthenticated = (passPos != -1 && attemptedPass == String(admin_password));
+
+  // Only step up failure counters if a non-empty password parameter was actually input
+  if (passPos != -1) {
+    if (!isAuthenticated && attemptedPass.length() > 0) {
+      failedLoginAttempts++;
+      if (failedLoginAttempts >= 5) {
+        lockoutEndTime = millis() + 300000; 
+        addLog("ALARM: Atak BruteForce!");
+        updateDisplay("BLOKADA SYSTEMU", "Atak BruteForce");
+      }
+    } else if (isAuthenticated) {
+      failedLoginAttempts = 0; 
     }
-  } else if (isAuthenticated) {
-    failedLoginAttempts = 0; 
   }
 
   // --- API ROUTE: LIVE STREAM JSON FEED ---
@@ -327,11 +339,38 @@ void handleWebServer() {
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
-    // --- API ROUTE: CLEAR ACTIVE MEMORY LOG ARRAYS ---
     else if (reqHeader.indexOf("/api/clear_logs") != -1) {
-      logCount = 0;
-      addLog("Wyczyszczono dziennik zdarzen");
-      tone(BUZZER_PIN, 900, 150);
+      int tPos = reqHeader.indexOf("time=");
+      if (tPos != -1) {
+        int spaceIdx = reqHeader.indexOf(" ", tPos);
+        String cutoffVal = reqHeader.substring(tPos + 5, spaceIdx);
+        cutoffVal.replace("%3A", ":"); 
+        
+        if (cutoffVal == "all") {
+          logCount = 0;
+          addLog("Wyczyszczono caly dziennik");
+        } else if (cutoffVal.indexOf(":") != -1) {
+          int targetH = cutoffVal.substring(0, cutoffVal.indexOf(":")).toInt();
+          int targetM = cutoffVal.substring(cutoffVal.indexOf(":") + 1).toInt();
+          int targetMinutesWeight = (targetH * 60) + targetM;
+          int i = 0;
+          while (i < logCount) {
+            int logH = lastActions[i].time.substring(0, 2).toInt();
+            int logM = lastActions[i].time.substring(3, 5).toInt();
+            int logMinutesWeight = (logH * 60) + logM;
+            if (logMinutesWeight < targetMinutesWeight) {
+              for (int j = i; j < logCount - 1; j++) {
+                lastActions[j] = lastActions[j + 1];
+              }
+              logCount--;
+            } else {
+              i++; 
+            }
+          }
+          addLog("Usunieto logi starsze niz " + cutoffVal);
+        }
+        tone(BUZZER_PIN, 900, 150);
+      }
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
@@ -370,10 +409,8 @@ void handleWebServer() {
   client.println("<script>var pass=''; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
-  
-  // 💾 CLIENT-SIDE ASYNCHRONOUS EXPORTER CORE: Offloads data conversion work safely to the user's local web browser engine
   client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
-  
+  client.println("function handleClearLogs(){ let v=prompt('Wpisz godzinę w formacie HH:MM (np. 18:00), aby usunąć logi STARSZE niż podany czas, lub wpisz \"all\" aby wyczyścić cały dziennik:', 'all'); if(v && v.trim().length > 0){ runCmd('/api/clear_logs?time='+encodeURIComponent(v.trim())); } } ");
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
   client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');return;} ");
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
@@ -404,10 +441,9 @@ void handleWebServer() {
   client.println("<input type='text' id='cfg-admin' placeholder='Nowe Hasło Web Panelu'><br>");
   client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
   
-  // 📊 LOG MANAGEMENT VIEW CONTAINER
   client.println("<div class='box'><h3>Dziennik Zdarzeń (Max 30 wpisów)</h3>");
   client.println("<button onclick='downloadCSV()' class='btn' style='background:#0288d1;margin-bottom:10px;'>📥 Pobierz jako plik Excel (CSV)</button>");
-  client.println("<button onclick=\"runCmd('/api/clear_logs')\" class='btn' style='background:#b71c1c;'>🗑️ Wyczyść Dziennik</button>");
+  client.println("<button onclick='handleClearLogs()' class='btn' style='background:#b71c1c;'>🗑️ Wyczyść Dziennik</button>");
   client.println("<table class='log-table' id='v-logs'></table></div></div>");
 
   client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
