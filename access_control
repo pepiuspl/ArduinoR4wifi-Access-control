@@ -7,14 +7,15 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <EEPROM.h>
+#include "RTC.h" // Native Uno R4 32-bit hardware Real-Time Clock drivers
 
 // --- VERSION ---
-const char* app_version = "v2.4.0 - Identity Core";
+const char* app_version = "v2.5.0 - Nexus Core Edition";
 
-// --- WI-FI & SECURITY CONFIGURATION ---
-const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
-const char* pass = "kupsenetabiedaku1!";     // ⚠️ Change to your network password
-const String admin_password = "admin";       // 🔑 Your Web Panel access password
+// --- FALLBACK DEFAULTS (Used if EEPROM config block is empty) ---
+char ssid[32] = "wifi_archer";         
+char pass[32] = "kupsenetabiedaku1!";     
+char admin_password[16] = "admin";       
 
 // --- PINS ---
 #define RELAY_PIN 4
@@ -35,13 +36,13 @@ WiFiServer server(80);
 // --- USER DATABASE STRUCTURE ---
 struct User {
   byte uid[4];
-  char name[16]; // 15 characters + null terminator
+  char name[16]; 
 };
 
 // --- SYSTEM VARIABLES ---
 bool doorOpen = false;
 bool learningMode = false;
-User users[10];       // Maximum database capacity of 10 named users
+User users[10];       
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
 
@@ -50,17 +51,34 @@ LogEntry lastActions[10];
 int logCount = 0;
 
 unsigned long accessEndTime = 0;
-unsigned long lastNTPUpdate = 0;
 
 // --- WATCHDOG VARIABLES ---
 bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 
-// --- STORAGE LOGIC ---
+// --- STORAGE MANAGEMENT ENGINE ---
+void loadConfiguration() {
+  if (EEPROM.read(250) == 0x55) {
+    EEPROM.get(260, ssid);
+    EEPROM.get(292, pass);
+    EEPROM.get(324, admin_password);
+  }
+}
+
+void saveConfiguration(String newSSID, String newPass, String newAdmin) {
+  newSSID.toCharArray(ssid, 32);
+  newPass.toCharArray(pass, 32);
+  newAdmin.toCharArray(admin_password, 16);
+  
+  EEPROM.put(260, ssid);
+  EEPROM.put(292, pass);
+  EEPROM.put(324, admin_password);
+  EEPROM.write(250, 0x55); 
+}
+
 void loadCards() {
   EEPROM.get(0, totalCards);
   if (totalCards < 0 || totalCards > 10) totalCards = 0;
-  
   for (int i = 0; i < totalCards; i++) {
     EEPROM.get(10 + (i * sizeof(User)), users[i]);
   }
@@ -68,31 +86,25 @@ void loadCards() {
 
 void saveNewCard(byte* uid, String nameStr) {
   if (totalCards >= 10) return;
-  
   memset(&users[totalCards], 0, sizeof(User));
-  
   memcpy(users[totalCards].uid, uid, 4);
   nameStr.toCharArray(users[totalCards].name, 16);
-  
   EEPROM.put(10 + (totalCards * sizeof(User)), users[totalCards]);
-  
   totalCards++;
   EEPROM.put(0, totalCards);
 }
 
 void deleteUser(int index) {
   if (index < 0 || index >= totalCards) return;
-  
   for (int i = index; i < totalCards - 1; i++) {
     users[i] = users[i + 1];
     EEPROM.put(10 + (i * sizeof(User)), users[i]);
   }
-  
   totalCards--;
   EEPROM.put(0, totalCards);
 }
 
-// --- SYSTEM FUNCTIONS ---
+// --- SYSTEM UTILITIES ---
 void forceHardwareRFIDReset() {
   digitalWrite(RST_PIN, LOW);
   delay(30);
@@ -114,10 +126,12 @@ void updateDisplay(String status, String info = "") {
 }
 
 void addLog(String msg) {
-  String currentTime = "00:00:00";
-  if (WiFi.status() == WL_CONNECTED) {
-    currentTime = timeClient.getFormattedTime();
-  }
+  RTCTime currentRTCTime;
+  RTC.getTime(currentRTCTime);
+  char timeBuffer[12];
+  sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
+  String currentTime = String(timeBuffer);
+
   if (logCount < 10) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
@@ -137,7 +151,7 @@ void openDoor(String source) {
   addLog("Otwarto: " + source);
 }
 
-// --- WEB SERVER INTERFACE HANDLER ---
+// --- ASYNCHRONOUS DATA ROUTER ENGINE ---
 void handleWebServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -150,16 +164,59 @@ void handleWebServer() {
       if (c == '\n') break; 
     }
   }
-  
   while (client.available()) { client.read(); }
 
-  bool isAuthenticated = reqHeader.indexOf("pass=" + admin_password) != -1;
+  bool isAuthenticated = reqHeader.indexOf("pass=" + String(admin_password)) != -1;
 
+  // --- API ROUTE: LIVE STREAM JSON FEED ---
+  if (reqHeader.indexOf("GET /api/data") != -1) {
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+    
+    if (!isAuthenticated) {
+      client.println("{\"auth\":false}");
+    } else {
+      client.print("{\"auth\":true,\"mode\":\"");
+      client.print(learningMode ? "Uczenie" : "Czuwanie");
+      client.print("\",\"pending\":\""); client.print(pendingUsername);
+      client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
+      client.print(",\"total\":"); client.print(totalCards);
+      
+      client.print(",\"users\":[");
+      for (int i = 0; i < totalCards; i++) {
+        client.print("{\"idx\":"); client.print(i);
+        client.print(",\"name\":\""); client.print(users[i].name);
+        client.print("\",\"uid\":\"");
+        for(int j=0; j<4; j++) {
+          if(users[i].uid[j]<0x10) client.print("0");
+          client.print(users[i].uid[j], HEX);
+          if(j<3) client.print(" ");
+        }
+        client.print("\"}");
+        if (i < totalCards - 1) client.print(",");
+      }
+      client.print("],\"logs\":[");
+      for (int i = logCount - 1; i >= 0; i--) {
+        client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\"");
+        if (i > 0) client.print(",");
+      }
+      client.print("],\"ssid\":\""); client.print(ssid);
+      client.print("\",\"admin_pass\":\""); client.print(admin_password);
+      client.print("\"}");
+    }
+    delay(1); client.stop(); return;
+  }
+
+  // --- API EXECUTION FILTERS ---
   if (isAuthenticated) {
-    if (reqHeader.indexOf("/unlock") != -1) {
+    if (reqHeader.indexOf("/api/unlock") != -1) {
       openDoor("Panel WWW");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
     } 
-    else if (reqHeader.indexOf("/toggle_learn") != -1) {
+    else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
       learningMode = !learningMode;
       if (learningMode) {
         if (reqHeader.indexOf("username=") != -1) {
@@ -181,8 +238,10 @@ void handleWebServer() {
         addLog("Stop Ucz: Panel WWW");
         tone(BUZZER_PIN, 800, 300);
       }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
     } 
-    else if (reqHeader.indexOf("/delete_user") != -1) {
+    else if (reqHeader.indexOf("/api/delete_user") != -1) {
       int idxPos = reqHeader.indexOf("idx=");
       if (idxPos != -1) {
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
@@ -193,9 +252,29 @@ void handleWebServer() {
           tone(BUZZER_PIN, 600, 400);
         }
       }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    }
+    else if (reqHeader.indexOf("/api/save_settings") != -1) {
+      int sIdx = reqHeader.indexOf("s=") + 2;
+      int pIdx = reqHeader.indexOf("&p=") + 3;
+      int aIdx = reqHeader.indexOf("&a=") + 3;
+      int spaceIdx = reqHeader.indexOf(" ", sIdx);
+      
+      String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
+      String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
+      String nAdmin = reqHeader.substring(aIdx, spaceIdx);
+      
+      nSSID.replace("+", " "); nPass.replace("+", " ");
+      saveConfiguration(nSSID, nPass, nAdmin);
+      addLog("Zapisano ustawienia");
+      
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
     }
   }
 
+  // --- HTML CONSOLE VIEW CONTAINER ---
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
   client.println("Connection: close");
@@ -206,82 +285,63 @@ void handleWebServer() {
   client.println(".btn{display:block;width:80%;margin:15px auto;padding:12px;color:#fff;font-weight:bold;border:none;border-radius:5px;cursor:pointer;text-decoration:none;font-size:16px;box-sizing:border-box;}");
   client.println(".btn-open{background:#2e7d32;} .btn-learn{background:#1565c0;} .btn-stop-learn{background:#cc3333;} .btn-login{background:#ff8f00;width:50%;}");
   client.println("input[type=password], input[type=text]{padding:10px;width:75%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:12px;box-sizing:border-box;}");
-  client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;}</style></head><body>");
-
-  if (!isAuthenticated) {
-    client.println("<h2>🔒 Autoryzacja Zamku R4</h2>");
-    client.println("<div class='box'><form method='GET' action='/'>");
-    client.println("<input type='password' name='pass' placeholder='Wpisz hasło klucza' required><br>");
-    client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div>");
-  } else {
-    client.println("<h2>🛠️ Panel Sterowania Access Control</h2>");
-    
-    client.println("<div class='box'><h3>Status Urządzenia</h3>");
-    client.println("<p>Aktualny tryb: <strong>" + String(learningMode ? "<span style='color:#64b5f6;'>Tryb Uczenia Aktywny</span>" : "<span style='color:#81c784;'>Czuwanie Aktywne</span>") + "</strong></p>");
-    if (learningMode) {
-      client.println("<p>Oczekiwanie na przypisanie dla: <strong style='color:#ff8f00;'>" + pendingUsername + "</strong></p>");
-    }
-    client.println("<p>Rygiel: <strong>" + String(doorOpen ? "<span style='color:#81c784;'>OTWARTY</span>" : "<span style='color:#e57373;'>ZAMKNIĘTY</span>") + "</strong></p></div>");
-
-    client.println("<div class='box'><h3>Działania Zdalne</h3>");
-    client.println("<a href='/unlock?pass=" + admin_password + "' class='btn btn-open'>🔓 Otwórz Zamek zdalnie</a>");
-    
-    if (!learningMode) {
-      client.println("<form method='GET' action='/toggle_learn' style='margin-top:20px;'>");
-      client.println("<input type='hidden' name='pass' value='" + admin_password + "'>");
-      client.println("<input type='text' name='username' placeholder='Imię i Nazwisko / Opis' maxlength='15' required><br>");
-      client.println("<input type='submit' class='btn btn-learn' value='➕ Włącz Tryb Uczenia'>");
-      client.println("</form>");
-    } else {
-      client.println("<a href='/toggle_learn?pass=" + admin_password + "' class='btn btn-stop-learn'>⏹️ Zatrzymaj Tryb Uczenia</a>");
-    }
-    client.println("</div>");
-
-    client.println("<div class='box'><h3>👥 Baza Użytkowników (" + String(totalCards) + "/10)</h3>");
-    if (totalCards == 0) {
-      client.println("<p style='color:#777; font-style:italic;'>Baza danych jest pusta. Dodaj pierwszą kartę.</p>");
-    } else {
-      client.println("<table class='log-table' style='font-size:14px;'>");
-      for (int i = 0; i < totalCards; i++) {
-        String hexUID = "";
-        for (int j = 0; j < 4; j++) {
-          if (users[i].uid[j] < 0x10) hexUID += "0";
-          hexUID += String(users[i].uid[j], HEX);
-          if (j < 3) hexUID += " ";
-        }
-        hexUID.toUpperCase();
-        
-        client.println("<tr><td><strong>" + String(users[i].name) + "</strong><br><span style='font-size:11px;color:#666;'>" + hexUID + "</span></td>");
-        client.println("<td style='text-align:right;vertical-align:middle;'><a href='/delete_user?pass=" + admin_password + "&idx=" + String(i) + "' style='color:#e57373;text-decoration:none;font-weight:bold;'>❌ Usuń</a></td></tr>");
-      }
-      client.println("</table>");
-    }
-    client.println("</div>");
-
-    client.println("<div class='box'><h3>Dziennik Zdarzeń (Logs)</h3><table class='log-table'>");
-    if (logCount == 0) {
-      client.println("<tr><td>Brak zarejestrowanych akcji.</td></tr>");
-    } else {
-      for (int i = logCount - 1; i >= 0; i--) {
-        client.println("<tr><td class='time'>[" + lastActions[i].time + "]</td><td>" + lastActions[i].msg + "</td></tr>");
-      }
-    }
-    client.println("</table></div>");
-  }
+  client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;} .hide{display:none;}</style>");
   
+  // CLIENT ASYNC JAVASCRIPT APP MODULE
+  client.println("<script>var pass=''; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
+  client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
+  client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
+  client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');return;} ");
+  
+  // 🛡️ Fixed Line 297: Properly outputting JavaScript formatting onto the client browser pipeline
+  client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
+  
+  client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
+  client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
+  client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong> ${u.idx==0?'<span style=\"color:#ff8f00;font-size:11px;\">[MASTER]</span>':''}<br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;\"><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
+  client.println("document.getElementById('v-users').innerHTML=uH?uH:'<tr><td>Baza pusta</td></tr>'; ");
+  client.println("let lH=''; d.logs.forEach(l=>{ lH+=`<tr><td>${l}</td></tr>`; }); document.getElementById('v-logs').innerHTML=lH; ");
+  client.println("document.getElementById('cfg-ssid').value=d.ssid; });} ");
+  client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); setInterval(updateData,2000);}; ");
+  client.println("function saveCfg(){let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Zrestartuj urządzenie.');} </script></head><body>");
+
+  // LOGIN CONTAINER BLOCK
+  client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
+  client.println("<div class='box'><form method='GET' action='/'>");
+  client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
+  client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div></div>");
+
+  // CORE APPLICATION CONTAINER BLOCK
+  client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania Access Control</h2>");
+  client.println("<div class='box'><h3>Status Urządzenia</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Rygiel: <strong id='v-lock'>-</strong></p></div>");
+  client.println("<div class='box'><h3>Działania Zdalne</h3><button onclick=\"runCmd('/api/unlock')\" class='btn btn-open'>🔓 Otwórz Zamek zdalnie</button>");
+  client.println("<div style='margin-top:20px;'><input type='text' id='new-user-name' placeholder='Imię dla nowej karty' maxlength='15'><button onclick=\"runCmd('/api/toggle_learn?username='+encodeURIComponent(document.getElementById('new-user-name').value))\" class='btn btn-learn'>➕ Przełącz Tryb Uczenia</button></div></div>");
+  
+  // User Registry Block
+  client.println("<div class='box'><h3>👥 Baza Użytkowników</h3><table class='log-table' id='v-users'></table></div>");
+  
+  // Persistent Settings Interface Block
+  client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
+  client.println("<input type='text' id='cfg-ssid' placeholder='Nowe WiFi SSID'><br>");
+  client.println("<input type='password' id='cfg-pass' placeholder='Nowe WiFi Hasło'><br>");
+  client.println("<input type='text' id='cfg-admin' placeholder='Nowe Hasło Web Panelu'><br>");
+  client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
+  
+  // System Log Feed Block
+  client.println("<div class='box'><h3>Dziennik Zdarzeń (Logs)</h3><table class='log-table' id='v-logs'></table></div></div>");
+
   client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
   client.println("System Hardware ID: Renesas RA4M1 Core | " + String(app_version));
-  client.println("</div>");
+  client.println("</div></body></html>");
   
-  client.println("</body></html>");
-  delay(1);
-  client.stop();
+  delay(1); client.stop();
 }
 
 void setup() {
   Serial.begin(9600);
   delay(1500); 
 
+  loadConfiguration(); 
   loadCards();
   
   pinMode(RELAY_PIN, OUTPUT);
@@ -298,6 +358,7 @@ void setup() {
   digitalWrite(LED_RED, HIGH);
 
   SPI.begin();
+  RTC.begin(); 
   
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   updateDisplay("Laczenie z WiFi... ");
@@ -311,9 +372,12 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     timeClient.begin();
     timeClient.update();
-    lastNTPUpdate = millis();
-    server.begin(); 
     
+    unsigned long epochTime = timeClient.getEpochTime();
+    RTCTime localTime(epochTime);
+    RTC.setTime(localTime);
+    
+    server.begin(); 
     forceHardwareRFIDReset();
     
     updateDisplay("Gotowy", WiFi.localIP().toString());
@@ -338,18 +402,11 @@ void loop() {
   if (rfidResetPending && !doorOpen && (millis() - lastScanTime > 1000)) {
     forceHardwareRFIDReset();
     rfidResetPending = false;
-    
     if (learningMode) {
       updateDisplay("TRYB UCZENIA", pendingUsername);
     } else {
       updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
     }
-  }
-
-  // --- BACKGROUND NTP CLOCK UPDATE ---
-  if (WiFi.status() == WL_CONNECTED && millis() - lastNTPUpdate > 60000) {
-    timeClient.update();
-    lastNTPUpdate = millis();
   }
 
   // --- ZARZĄDZANIE DIODAMI ---
@@ -401,7 +458,22 @@ void loop() {
       }
       
       if (valid) {
-        openDoor(String(users[matchedIndex].name) + " [" + uidStr + "]"); 
+        if (matchedIndex == 0) {
+          learningMode = !learningMode;
+          if (learningMode) {
+            pendingUsername = "Karta Master";
+            forceHardwareRFIDReset();
+            updateDisplay("TRYB UCZENIA", pendingUsername);
+            addLog("Master: Tryb Ucz ON");
+            tone(BUZZER_PIN, 1500, 400);
+          } else {
+            updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+            addLog("Master: Tryb Ucz OFF");
+            tone(BUZZER_PIN, 800, 400);
+          }
+        } else {
+          openDoor(String(users[matchedIndex].name) + " [" + uidStr + "]"); 
+        }
       } else {
         addLog("Odmowa: Nieznany [" + uidStr + "]");
         tone(BUZZER_PIN, 200, 500);
@@ -409,7 +481,6 @@ void loop() {
     }
     
     rfid.PICC_HaltA();
-    
     rfidResetPending = true;
     lastScanTime = millis();
   }
@@ -423,7 +494,6 @@ void loop() {
       if (millis() - pressTime > 3000) { 
         longPressed = true;
         learningMode = !learningMode; 
-        
         if (learningMode) {
           pendingUsername = "Przycisk Fiz."; 
           forceHardwareRFIDReset();
@@ -448,7 +518,6 @@ void loop() {
   if (doorOpen && millis() > accessEndTime) {
     doorOpen = false;
     digitalWrite(RELAY_PIN, HIGH); 
-    
     delay(100); 
     forceHardwareRFIDReset();
     rfidResetPending = false; 
