@@ -3,12 +3,17 @@
 #include <Adafruit_SSD1306.h>
 #include <SPI.h>
 #include <MFRC522.h>
+#include <WiFiS3.h> // Added native Uno R4 Wi-Fi drivers
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.0.1 - IoT Cloud";
+const char* app_version = "v2.1.0 - Local Offline";
+
+// --- WI-FI CREDENTIALS ---
+const char* ssid = "YOUR_WIFI_NAME";     // Change to your network name
+const char* pass = "YOUR_WIFI_PASSWORD"; // Change to your network password
 
 // --- PINS ---
 #define RELAY_PIN 4
@@ -25,12 +30,14 @@ MFRC522 rfid(SS_PIN, RST_PIN);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200); 
 
-// --- DATA ---
+// --- LOCAL SYSTEM VARIABLES ---
+bool doorOpen = false;
+bool learningMode = false;
 byte knownUIDs[10][4]; 
 int totalCards = 0;
 
 struct LogEntry { String time; String msg; };
-LogEntry lastActions[10]; // Reduced size slightly for memory stability
+LogEntry lastActions[10]; 
 int logCount = 0;
 
 unsigned long accessEndTime = 0;
@@ -70,18 +77,20 @@ void updateDisplay(String status, String info = "") {
 }
 
 void addLog(String msg) {
-  timeClient.update();
-  String currentTime = timeClient.getFormattedTime();
-  if (logCount < 10) {
-    lastActions[logCount++] = {currentTime, msg};
-  } else {
-    for (int i = 0; i < 9; i++) lastActions[i] = lastActions[i+1];
-    lastActions[9] = {currentTime, msg};
+  if (WiFi.status() == WL_CONNECTED) {
+    timeClient.update();
+    String currentTime = timeClient.getFormattedTime();
+    if (logCount < 10) {
+      lastActions[logCount++] = {currentTime, msg};
+    } else {
+      for (int i = 0; i < 9; i++) lastActions[i] = lastActions[i+1];
+      lastActions[9] = {currentTime, msg};
+    }
   }
 }
 
 void openDoor(String source) {
-  doorOpen = true; // This updates the Cloud Dashboard switch automatically
+  doorOpen = true; 
   accessEndTime = millis() + 3000;
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(LED_GREEN, HIGH);
@@ -110,26 +119,28 @@ void setup() {
   rfid.PCD_Init();
   
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-  updateDisplay("Laczenie Cloud...");
-
-  // Defined in thingProperties.h
-  initProperties();
-
-  // Connect to Arduino IoT Cloud
-  ArduinoCloud.begin(ArduinoIoTPreferredConnection);
   
-  setDebugMessageLevel(2);
-  ArduinoCloud.printDebugInfo();
+  // Connect to Wi-Fi locally
+  updateDisplay("Laczenie z WiFi...");
+  WiFi.begin(ssid, pass);
   
-  timeClient.begin();
+  // Give it up to 10 seconds to connect
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    timeClient.begin();
+    updateDisplay("Gotowy", WiFi.localIP().toString());
+  } else {
+    updateDisplay("Gotowy", "Tryb Offline");
+  }
 }
 
 void loop() {
-  ArduinoCloud.update(); // Synchronizes your variables with the dashboard
-  
   // --- ZARZĄDZANIE DIODAMI ---
   if (learningMode) {
-    // W trybie uczenia: miganie na przemian co 250ms
     if (millis() % 500 < 250) {
       digitalWrite(LED_RED, HIGH);
       digitalWrite(LED_GREEN, LOW);
@@ -138,7 +149,6 @@ void loop() {
       digitalWrite(LED_GREEN, HIGH);
     }
   } else if (!doorOpen) {
-    // W normalnym stanie spoczynku: czerwona świeci, zielona zgaszona
     digitalWrite(LED_RED, HIGH);
     digitalWrite(LED_GREEN, LOW);
   }
@@ -146,26 +156,21 @@ void loop() {
   // --- SPRAWDZANIE RFID ---
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     if (learningMode) {
-      // 1. Zapis do pamięci i logów
       saveNewCard(rfid.uid.uidByte);
       addLog("Dodano Karte!");
       updateDisplay("DODANO KARTE", "Sukces!");
       
-      // 2. Zgaszenie czerwonej i zapalenie zielonej diody
       digitalWrite(LED_RED, LOW);
       digitalWrite(LED_GREEN, HIGH);
       
-      // 3. Melodyjka sukcesu (rosnące dźwięki)
       tone(BUZZER_PIN, 1000, 150); delay(150);
       tone(BUZZER_PIN, 1500, 150); delay(150);
       tone(BUZZER_PIN, 2000, 400); 
       
-      // 4. Przytrzymanie zielonej diody przez 2 sekundy
       delay(2000); 
       
-      // 5. Wyjście z trybu uczenia i przywrócenie ekranu "Gotowy"
       learningMode = false; 
-      updateDisplay("Gotowy", WiFi.localIP().toString());
+      updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
     } else {
       bool valid = false;
       for (int i = 0; i < totalCards; i++) {
@@ -181,10 +186,31 @@ void loop() {
     rfid.PCD_StopCrypto1();
   }
 
-  // --- FIZYCZNY PRZYCISK ---
+  // --- FIZYCZNY PRZYCISK (Quick press = Open / Hold 3s = Learning Mode) ---
   if (digitalRead(BUTTON_PIN) == LOW) {
-    delay(50);
-    if(digitalRead(BUTTON_PIN) == LOW) {
+    unsigned long pressTime = millis();
+    bool longPressed = false;
+
+    while (digitalRead(BUTTON_PIN) == LOW) {
+      if (millis() - pressTime > 3000) { 
+        longPressed = true;
+        learningMode = !learningMode; // Toggle mode
+        
+        if (learningMode) {
+          rfid.PCD_Init(); 
+          updateDisplay("TRYB UCZENIA", "Zbliz karte...");
+          tone(BUZZER_PIN, 1500, 400);
+        } else {
+          updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+          tone(BUZZER_PIN, 800, 400);
+        }
+        while(digitalRead(BUTTON_PIN) == LOW); // Wait until button is released
+        break;
+      }
+      delay(10);
+    }
+
+    if (!longPressed && (millis() - pressTime > 50)) {
       openDoor("Przycisk");
     }
   }
@@ -195,37 +221,6 @@ void loop() {
     digitalWrite(RELAY_PIN, HIGH);
     digitalWrite(LED_GREEN, LOW);
     digitalWrite(LED_RED, HIGH);
-    updateDisplay("Gotowy", WiFi.localIP().toString());
-  }
-}
-
-/*
-  The following function is called whenever the 'doorOpen' 
-  variable is changed from the Cloud Dashboard.
-*/
-void onDoorOpenChange()  {
-  if (doorOpen) {
-    openDoor("Cloud Dash");
-  } else {
-    // Manually locking from dashboard
-    digitalWrite(RELAY_PIN, HIGH);
-    digitalWrite(LED_GREEN, LOW);
-    digitalWrite(LED_RED, HIGH);
-    updateDisplay("ZABLOKOWANE");
-  }
-}
-
-/*
-  Since LearningMode is READ_WRITE variable, onLearningModeChange() is
-  executed every time a new value is received from IoT Cloud.
-*/
-void onLearningModeChange()  {
-  if (learningMode) {
-    rfid.PCD_Init(); 
-    updateDisplay("TRYB UCZENIA", "Zbliz karte...");
-    addLog("Tryb Uczenia ON");
-  } else {
-    updateDisplay("Gotowy", WiFi.localIP().toString());
-    addLog("Tryb Uczenia OFF");
+    updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
   }
 }
