@@ -9,7 +9,7 @@
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.2.5 - Delayed Watchdog Engine";
+const char* app_version = "v2.2.6 - Electrical Noise Patch";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
 const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
@@ -235,7 +235,6 @@ void setup() {
     lastNTPUpdate = millis();
     server.begin(); 
     
-    // Wakes up the card reader cleanly with an explicit hardware reset right at boot time
     forceHardwareRFIDReset();
     
     updateDisplay("Gotowy", WiFi.localIP().toString());
@@ -256,16 +255,15 @@ void setup() {
 void loop() {
   handleWebServer(); 
 
-  // --- DELAYED HARDWARE WATCHDOG RESET ---
-  // Fires an electrical reset 2 seconds after any scan activity to guarantee 
-  // that the user has pulled the card clear from the antenna field before re-initialization.
-  if (rfidResetPending && (millis() - lastScanTime > 2000)) {
+  // --- NON-BLOCKING WATCHDOG RESET (For Offline/Denied scans only) ---
+  // If the door wasn't opened, safely reset the reader 1 second later.
+  if (rfidResetPending && !doorOpen && (millis() - lastScanTime > 1000)) {
     forceHardwareRFIDReset();
     rfidResetPending = false;
     
     if (learningMode) {
       updateDisplay("TRYB UCZENIA", "Zbliz karte...");
-    } else if (!doorOpen) {
+    } else {
       updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
     }
   }
@@ -291,9 +289,8 @@ void loop() {
   }
 
   // --- SPRAWDZANIE RFID ---
-  if (!rfidResetPending && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+  if (!rfidResetPending && !doorOpen && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     
-    // Formats the card serial array into an easily readable Hex identifier string
     String uidStr = "";
     for (byte i = 0; i < rfid.uid.size; i++) {
       if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
@@ -327,14 +324,12 @@ void loop() {
     }
     
     rfid.PICC_HaltA();
-    rfid.PCD_StopCrypto1();
     
-    // Mark a reset request and freeze active sensing until the card is cleared
     rfidResetPending = true;
     lastScanTime = millis();
   }
 
-  // --- FIZYCZNY PRZYCISK ---
+  // --- PRZYCISK FIZYCZNY ---
   if (digitalRead(BUTTON_PIN) == LOW) {
     unsigned long pressTime = millis();
     bool longPressed = false;
@@ -366,7 +361,15 @@ void loop() {
   // --- AUTO-ZAMYKANIE ---
   if (doorOpen && millis() > accessEndTime) {
     doorOpen = false;
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(RELAY_PIN, HIGH); // Shut down relay
+    
+    // 🔥 THE ISOLATION FIXED STRATEGY:
+    // Delay exactly 100ms for the relay mechanical coil back-EMF burst to dissolve completely.
+    // Then reinitialize the software environment on clean voltage rails.
+    delay(100); 
+    forceHardwareRFIDReset();
+    rfidResetPending = false; 
+
     digitalWrite(LED_GREEN, LOW);
     digitalWrite(LED_RED, HIGH);
     updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
