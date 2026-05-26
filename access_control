@@ -9,7 +9,7 @@
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.2.3 - Hardware Watchdog Fix";
+const char* app_version = "v2.2.4 - Hex Log & Anti-Freeze Engine";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
 const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
@@ -64,16 +64,6 @@ void saveNewCard(byte* uid) {
   }
   totalCards++;
   EEPROM.write(0, totalCards);
-}
-
-// --- HARDWARE WATCHDOG RESET ---
-// Forces a complete electrical reboot of the MFRC522 reader module
-void forceHardwareRFIDReset() {
-  digitalWrite(RST_PIN, LOW);
-  delay(20);
-  digitalWrite(RST_PIN, HIGH);
-  delay(20);
-  rfid.PCD_Init(); 
 }
 
 // --- SYSTEM FUNCTIONS ---
@@ -137,7 +127,7 @@ void handleWebServer() {
     } else if (reqHeader.indexOf("/toggle_learn") != -1) {
       learningMode = !learningMode;
       if (learningMode) {
-        forceHardwareRFIDReset();
+        rfid.PCD_Init(); 
         updateDisplay("TRYB UCZENIA", "Zbliz karte...");
         addLog("Uczenie: Panel WWW");
         tone(BUZZER_PIN, 1500, 300);
@@ -187,7 +177,6 @@ void handleWebServer() {
     client.println("</table></div>");
   }
   
-  // 💻 --- WEB DISPLAY FOOTER ENGINE ---
   client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
   client.println("System Hardware ID: Renesas RA4M1 Core | " + String(app_version));
   client.println("</div>");
@@ -207,8 +196,12 @@ void setup() {
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_RED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(RST_PIN, OUTPUT); // Express pin mode allocation for clear hardware loops
   
+  // 🔥 Fix 1: Pull RST pin high immediately during power allocation to wake the reader up
+  pinMode(RST_PIN, OUTPUT); 
+  digitalWrite(RST_PIN, HIGH);
+  delay(50);
+
   digitalWrite(RELAY_PIN, HIGH);
   digitalWrite(LED_GREEN, LOW);
   digitalWrite(LED_RED, HIGH);
@@ -222,7 +215,7 @@ void setup() {
   WiFi.begin(ssid, pass);
   
   unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000) {
     delay(500);
   }
 
@@ -269,40 +262,59 @@ void loop() {
     digitalWrite(LED_GREEN, LOW);
   }
 
-  // --- SPRAWDZANIE RFID ---
-  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    if (learningMode) {
-      saveNewCard(rfid.uid.uidByte);
-      addLog("Dodano Karte!");
-      updateDisplay("DODANO KARTE", "Skanuj kolejna...");
+  // --- SPRAWDZANIE RFID (Defensive Anti-Freeze Restructure) ---
+  if (rfid.PICC_IsNewCardPresent()) {
+    // If card is present, attempt to extract its serial data
+    if (rfid.PICC_ReadCardSerial()) {
       
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);
-      
-      tone(BUZZER_PIN, 1000, 150); delay(150);
-      tone(BUZZER_PIN, 1500, 150); delay(150);
-      tone(BUZZER_PIN, 2000, 400); delay(400);
-      
-      delay(1000); 
-      updateDisplay("TRYB UCZENIA", "Zbliz kolejna...");
-    } else {
-      bool valid = false;
-      for (int i = 0; i < totalCards; i++) {
-        if (memcmp(rfid.uid.uidByte, knownUIDs[i], 4) == 0) valid = true;
+      // 💾 Fix 4: Extract and format Card UID array into a clean hex string
+      String uidStr = "";
+      for (byte i = 0; i < rfid.uid.size; i++) {
+        if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
+        uidStr += String(rfid.uid.uidByte[i], HEX);
+        if (i < rfid.uid.size - 1) uidStr += " ";
       }
-      if (valid) openDoor("RFID");
-      else {
-        addLog("Odmowa RFID");
-        tone(BUZZER_PIN, 200, 500);
-        delay(500);
+      uidStr.toUpperCase();
+
+      if (learningMode) {
+        saveNewCard(rfid.uid.uidByte);
+        addLog("Dodano Karte [" + uidStr + "]"); // Injects UID to website logs
+        updateDisplay("DODANO KARTE", "UID: " + uidStr);
+        
+        digitalWrite(LED_RED, LOW);
+        digitalWrite(LED_GREEN, HIGH);
+        
+        tone(BUZZER_PIN, 1000, 150); delay(150);
+        tone(BUZZER_PIN, 1500, 150); delay(150);
+        tone(BUZZER_PIN, 2000, 400); delay(400);
+        
+        delay(1000); 
+        updateDisplay("TRYB UCZENIA", "Zbliz kolejna...");
+      } else {
+        bool valid = false;
+        for (int i = 0; i < totalCards; i++) {
+          if (memcmp(rfid.uid.uidByte, knownUIDs[i], 4) == 0) valid = true;
+        }
+        if (valid) {
+          // Fix 3 & 4: Append UID cleanly to source description to guarantee logging
+          openDoor("Karta [" + uidStr + "]"); 
+        } else {
+          addLog("Odmowa RFID [" + uidStr + "]");
+          tone(BUZZER_PIN, 200, 500);
+          delay(500);
+        }
       }
+      
+      // Terminate connection cleanly with the processed card
+      rfid.PICC_HaltA();
     }
     
-    // Put current card to sleep
-    rfid.PICC_HaltA();
-    
-    // 🔥 HARDWARE TRIGGER: Wipe chip registers entirely by cycling the physical reset pin 
-    forceHardwareRFIDReset();
+    // 🔥 Fix 2: Proactive register maintenance. 
+    // Soft-flushes internal queues instantly whenever card excitation is detected,
+    // protecting clone readers from signal jamming.
+    rfid.PCD_Reset();
+    delay(10);
+    rfid.PCD_Init();
   }
 
   // --- FIZYCZNY PRZYCISK ---
@@ -316,7 +328,7 @@ void loop() {
         learningMode = !learningMode; 
         
         if (learningMode) {
-          forceHardwareRFIDReset();
+          rfid.PCD_Init(); 
           updateDisplay("TRYB UCZENIA", "Zbliz karte...");
           tone(BUZZER_PIN, 1500, 400);
         } else {
