@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION ---
-const char* app_version = "v2.5.2 - Dynamic Master";
+const char* app_version = "v2.6.2 - Card Activation Core";
 
 // --- FALLBACK DEFAULTS ---
 char ssid[32] = "wifi_archer";         
@@ -43,9 +43,8 @@ struct User {
 bool doorOpen = false;
 bool learningMode = false;
 bool autoExitLearn = false; 
-bool masterCardEnabled = true; 
 User users[10];       
-bool isMasterSlot[10] = {false}; // Dynamic Master map tracking arrays
+bool isCardActive[10] = {true}; // Tracks active/inactive execution flags per slot
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
 
@@ -67,7 +66,6 @@ void loadConfiguration() {
     EEPROM.get(260, ssid);
     EEPROM.get(292, pass);
     EEPROM.get(324, admin_password);
-    masterCardEnabled = (EEPROM.read(251) != 0x00); 
   }
 }
 
@@ -92,7 +90,8 @@ void loadCards() {
   if (totalCards < 0 || totalCards > 10) totalCards = 0;
   for (int i = 0; i < totalCards; i++) {
     EEPROM.get(10 + (i * sizeof(User)), users[i]);
-    isMasterSlot[i] = (EEPROM.read(220 + i) == 0x01); // Read role configuration from block 220
+    // Read individual card state (0x00 = Inactive, anything else/0xFF = Active)
+    isCardActive[i] = (EEPROM.read(220 + i) != 0x00); 
   }
 }
 
@@ -103,8 +102,8 @@ void saveNewCard(byte* uid, String nameStr) {
   nameStr.toCharArray(users[totalCards].name, 16);
   EEPROM.put(10 + (totalCards * sizeof(User)), users[totalCards]);
   
-  isMasterSlot[totalCards] = false; // New cards default to standard authorization levels
-  EEPROM.write(220 + totalCards, 0x00);
+  isCardActive[totalCards] = true; // Newly enrolled cards default to active state
+  EEPROM.write(220 + totalCards, 0x01);
   
   totalCards++;
   EEPROM.put(0, totalCards);
@@ -116,11 +115,11 @@ void deleteUser(int index) {
     users[i] = users[i + 1];
     EEPROM.put(10 + (i * sizeof(User)), users[i]);
     
-    isMasterSlot[i] = isMasterSlot[i + 1]; // Shift configuration metadata bytes alongside profiles
-    EEPROM.write(220 + i, isMasterSlot[i] ? 0x01 : 0x00);
+    isCardActive[i] = isCardActive[i + 1]; // Shift active flag mappings along with user blocks
+    EEPROM.write(220 + i, isCardActive[i] ? 0x01 : 0x00);
   }
-  isMasterSlot[totalCards - 1] = false;
-  EEPROM.write(220 + totalCards - 1, 0x00);
+  isCardActive[totalCards - 1] = true;
+  EEPROM.write(220 + totalCards - 1, 0x01);
   
   totalCards--;
   EEPROM.put(0, totalCards);
@@ -221,13 +220,12 @@ void handleWebServer() {
       client.print("\",\"pending\":\""); client.print(pendingUsername);
       client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
       client.print(",\"total\":"); client.print(totalCards);
-      client.print(",\"masterEnabled\":"); client.print(masterCardEnabled ? "true" : "false");
       
       client.print(",\"users\":[");
       for (int i = 0; i < totalCards; i++) {
         client.print("{\"idx\":"); client.print(i);
         client.print(",\"name\":\""); client.print(users[i].name);
-        client.print("\",\"master\":"); client.print(isMasterSlot[i] ? "true" : "false"); // Map master flags to output stream JSON array
+        client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false"); // Output active status metrics via JSON parameters
         client.print(",\"uid\":\"");
         for(byte j=0; j<4; j++) {
           if(users[i].uid[j]<0x10) client.print("0");
@@ -314,26 +312,18 @@ void handleWebServer() {
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
-    // --- API ROUTE: DYNAMIC ROLE TOGGLING (STANDARD <=> MASTER MANAGER) ---
-    else if (reqHeader.indexOf("/api/toggle_user_master") != -1) {
+    // --- API ROUTE: TOGGLE DYNAMIC CARD ACTIVATION FLAGS ---
+    else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
       int idxPos = reqHeader.indexOf("idx=");
       if (idxPos != -1) {
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
         if (targetIdx >= 0 && targetIdx < totalCards) {
-          isMasterSlot[targetIdx] = !isMasterSlot[targetIdx];
-          EEPROM.write(220 + targetIdx, isMasterSlot[targetIdx] ? 0x01 : 0x00); // Write dynamic status byte to storage block
-          addLog("Rola slot [" + String(targetIdx) + "] zmiana");
+          isCardActive[targetIdx] = !isCardActive[targetIdx];
+          EEPROM.write(220 + targetIdx, isCardActive[targetIdx] ? 0x01 : 0x00); // Write state byte directly to storage block
+          addLog(isCardActive[targetIdx] ? "Aktywowano: " + String(users[targetIdx].name) : "Zablokowano: " + String(users[targetIdx].name));
           tone(BUZZER_PIN, 1100, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
-      delay(1); client.stop(); return;
-    }
-    else if (reqHeader.indexOf("/api/toggle_master_safety") != -1) {
-      masterCardEnabled = !masterCardEnabled;
-      EEPROM.write(251, masterCardEnabled ? 0x01 : 0x00); 
-      addLog(masterCardEnabled ? "Master global: ON" : "Master global: OFF");
-      tone(BUZZER_PIN, 1000, 200);
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
@@ -377,11 +367,9 @@ void handleWebServer() {
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
   client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
   client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
-  client.println("document.getElementById('m-btn').innerHTML=d.masterEnabled?'🔒 Zablokuj kartę Master':'🔓 Aktywuj kartę Master'; ");
-  client.println("document.getElementById('m-btn').style.background=d.masterEnabled?'#d84315':'#37474f'; ");
   
-  // ⚡ Javascript Dynamic UI Table Renderer: Outputs inline edit, toggle-master role buttons, and delete controls
-  client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong> ${u.master?'<span style=\"color:#ff8f00;font-size:11px;\">[MASTER]</span>':''}<br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;white-space:nowrap;\"><a href=\"#\" onclick=\"runCmd('/api/toggle_user_master?idx='+${u.idx})\" style=\"color:${u.master?'#ff8f00':'#888'};text-decoration:none;margin-right:12px;font-weight:bold;\">${u.master?'⭐ Odbierz':'☆ Nadaj Master'}</a><a href=\"#\" onclick=\"renameUser(${u.idx},'${u.name}')\" style=\"color:#64b5f6;text-decoration:none;margin-right:12px;\">✏️ Edytuj</a><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
+  // 🟢 Javascript Table Row Generator: Adds status active/inactive toggle buttons directly into user directory cells
+  client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong><br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;white-space:nowrap;\"><a href=\"#\" onclick=\"runCmd('/api/toggle_user_active?idx='+${u.idx})\" style=\"color:${u.active?'#81c784':'#ffb300'};text-decoration:none;margin-right:16px;font-weight:bold;\">${u.active?'🟢 Aktywna':'🔴 Zablokowana'}</a><a href=\"#\" onclick=\"renameUser(${u.idx},'${u.name}')\" style=\"color:#64b5f6;text-decoration:none;margin-right:12px;\">✏️ Edytuj</a><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
   
   client.println("document.getElementById('v-users').innerHTML=uH?uH:'<tr><td>Baza pusta</td></tr>'; ");
   client.println("let lH=''; d.logs.forEach(l=>{ lH+=`<tr><td>${l}</td></tr>`; }); document.getElementById('v-logs').innerHTML=lH; ");
@@ -394,15 +382,13 @@ void handleWebServer() {
   client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
   client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div></div>");
 
-  client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania</h2>");
-  client.println("<div class='box'><h3>Status</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Zamek: <strong id='v-lock'>-</strong></p></div>");
-  client.println("<div class='box'><h3>Działania Zdalne</h3><button onclick=\"runCmd('/api/unlock')\" class='btn btn-open'>🔓 Otwórz zamek zdalnie</button>");
+  client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania Access Control</h2>");
+  client.println("<div class='box'><h3>Status Urządzenia</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Rygiel: <strong id='v-lock'>-</strong></p></div>");
+  client.println("<div class='box'><h3>Działania Zdalne</h3><button onclick=\"runCmd('/api/unlock')\" class='btn btn-open'>🔓 Otwórz Zamek zdalnie</button>");
   client.println("<div style='margin-top:20px;'><input type='text' id='new-user-name' placeholder='Imię dla nowej karty' maxlength='15'><button onclick=\"runCmd('/api/toggle_learn?username='+encodeURIComponent(document.getElementById('new-user-name').value))\" class='btn btn-learn'>➕ Przełącz Tryb Uczenia</button></div></div>");
   
   client.println("<div class='box'><h3>👥 Baza Użytkowników</h3><table class='log-table' id='v-users'></table></div>");
   
-  client.println("<div class='box'><h3>🛡️ Bezpieczeństwo</h3><button id='m-btn' onclick=\"runCmd('/api/toggle_master_safety')\" class='btn'>-</button></div>");
-
   client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
   client.println("<input type='text' id='cfg-ssid' placeholder='Nowe WiFi SSID'><br>");
   client.println("<input type='password' id='cfg-pass' placeholder='Nowe WiFi Hasło'><br>");
@@ -528,66 +514,42 @@ void loop() {
     }
     uidStr.toUpperCase();
 
-    bool valid = false;
-    int matchedIndex = -1;
-    
-    for (int i = 0; i < totalCards; i++) {
-      if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) {
-        valid = true;
-        matchedIndex = i;
-        break;
-      }
-    }
-
     if (learningMode) {
-      // Check if the card being scanned is explicitly marked as a master card
-      if (valid && isMasterSlot[matchedIndex]) {
+      saveNewCard(rfid.uid.uidByte, pendingUsername);
+      addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
+      updateDisplay("DODANO KARTE", pendingUsername);
+      
+      digitalWrite(LED_RED, LOW);
+      digitalWrite(LED_GREEN, HIGH);
+      
+      tone(BUZZER_PIN, 1000, 150); delay(150);
+      tone(BUZZER_PIN, 1500, 150); delay(150);
+      tone(BUZZER_PIN, 2000, 400);
+      
+      if (autoExitLearn) {
         learningMode = false;
         autoExitLearn = false;
-        updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
-        addLog("Master: Odwolano");
-        tone(BUZZER_PIN, 800, 400);
-      } else {
-        saveNewCard(rfid.uid.uidByte, pendingUsername);
-        addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
-        updateDisplay("DODANO KARTE", pendingUsername);
-        
-        digitalWrite(LED_RED, LOW);
-        digitalWrite(LED_GREEN, HIGH);
-        
-        tone(BUZZER_PIN, 1000, 150); delay(150);
-        tone(BUZZER_PIN, 1500, 150); delay(150);
-        tone(BUZZER_PIN, 2000, 400);
-        
-        if (autoExitLearn) {
-          learningMode = false;
-          autoExitLearn = false;
-        }
       }
     } else {
+      bool valid = false;
+      int matchedIndex = -1;
+      
+      for (int i = 0; i < totalCards; i++) {
+        if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) {
+          valid = true;
+          matchedIndex = i;
+          break;
+        }
+      }
+      
       if (valid) {
-        // 🔥 DYNAMIC ROLE ROUTER FILTER: Inspects card properties from the live metadata flags
-        if (isMasterSlot[matchedIndex]) {
-          if (masterCardEnabled) {
-            learningMode = !learningMode;
-            autoExitLearn = true; 
-            if (learningMode) {
-              pendingUsername = "Karta Master";
-              forceHardwareRFIDReset();
-              updateDisplay("TRYB UCZENIA", pendingUsername);
-              addLog("Master: Tryb Ucz ON");
-              tone(BUZZER_PIN, 1500, 400);
-            } else {
-              updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
-              addLog("Master: Tryb Ucz OFF");
-              tone(BUZZER_PIN, 800, 400);
-            }
-          } else {
-            addLog("Master: Odrzucono (Blokada)");
-            tone(BUZZER_PIN, 200, 600);
-          }
-        } else {
+        // 🔥 DEFENSIVE EXECUTION FILTER: Check the dynamic activation boolean state
+        if (isCardActive[matchedIndex]) {
           openDoor(String(users[matchedIndex].name) + " [" + uidStr + "]"); 
+        } else {
+          // If deactivated, log explicitly by name and fire an access denied buzz alert
+          addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
+          tone(BUZZER_PIN, 200, 600);
         }
       } else {
         addLog("Odmowa: Nieznany [" + uidStr + "]");
