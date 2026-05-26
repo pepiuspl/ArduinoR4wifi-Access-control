@@ -12,8 +12,8 @@
 const char* app_version = "v2.1.0 - Local Offline";
 
 // --- WI-FI CREDENTIALS ---
-const char* ssid = "YOUR_WIFI_NAME";     // Change to your network name
-const char* pass = "YOUR_WIFI_PASSWORD"; // Change to your network password
+const char* ssid = "wifi_archer";     // Change to your network name
+const char* pass = "kupsenetabiedaku1!"; // Change to your network password
 
 // --- PINS ---
 #define RELAY_PIN 4
