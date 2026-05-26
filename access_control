@@ -3,17 +3,18 @@
 #include <Adafruit_SSD1306.h>
 #include <SPI.h>
 #include <MFRC522.h>
-#include <WiFiS3.h> // Added native Uno R4 Wi-Fi drivers
+#include <WiFiS3.h> 
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <EEPROM.h>
 
 // --- VERSION ---
-const char* app_version = "v2.1.0 - Local Offline";
+const char* app_version = "v2.2.0 - Web & Local Console";
 
-// --- WI-FI CREDENTIALS ---
-const char* ssid = "wifi_archer";     // Change to your network name
-const char* pass = "kupsenetabiedaku1!"; // Change to your network password
+// --- WI-FI & SECURITY CONFIGURATION ---
+const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
+const char* pass = "kupsenetabiedaku1!";     // ⚠️ Change to your network password
+const String admin_password = "admin";       // 🔑 Your Web Panel access password
 
 // --- PINS ---
 #define RELAY_PIN 4
@@ -29,8 +30,9 @@ Adafruit_SSD1306 display(128, 64, &Wire, -1);
 MFRC522 rfid(SS_PIN, RST_PIN);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200); 
+WiFiServer server(80); // Initializes web server engine on port 80
 
-// --- LOCAL SYSTEM VARIABLES ---
+// --- SYSTEM VARIABLES ---
 bool doorOpen = false;
 bool learningMode = false;
 byte knownUIDs[10][4]; 
@@ -77,15 +79,16 @@ void updateDisplay(String status, String info = "") {
 }
 
 void addLog(String msg) {
+  String currentTime = "00:00:00";
   if (WiFi.status() == WL_CONNECTED) {
     timeClient.update();
-    String currentTime = timeClient.getFormattedTime();
-    if (logCount < 10) {
-      lastActions[logCount++] = {currentTime, msg};
-    } else {
-      for (int i = 0; i < 9; i++) lastActions[i] = lastActions[i+1];
-      lastActions[9] = {currentTime, msg};
-    }
+    currentTime = timeClient.getFormattedTime();
+  }
+  if (logCount < 10) {
+    lastActions[logCount++] = {currentTime, msg};
+  } else {
+    for (int i = 0; i < 9; i++) lastActions[i] = lastActions[i+1];
+    lastActions[9] = {currentTime, msg};
   }
 }
 
@@ -98,6 +101,91 @@ void openDoor(String source) {
   tone(BUZZER_PIN, 1000, 200);
   updateDisplay("OTWARTE", source);
   addLog("Otwarto: " + source);
+}
+
+// --- WEB SERVER INTERFACE HANDLER ---
+void handleWebServer() {
+  WiFiClient client = server.available();
+  if (!client) return;
+
+  String reqHeader = "";
+  while (client.connected()) {
+    if (client.available()) {
+      char c = client.read();
+      reqHeader += c;
+      if (c == '\n') break; // Read only the first configuration line for speed
+    }
+  }
+  
+  // Flush out remaining stream buffers
+  while (client.available()) { client.read(); }
+
+  // Check if password query parameter matches
+  bool isAuthenticated = reqHeader.indexOf("pass=" + admin_password) != -1;
+
+  // Process Actions if Authenticated
+  if (isAuthenticated) {
+    if (reqHeader.indexOf("/unlock") != -1) {
+      openDoor("Panel WWW");
+    } else if (reqHeader.indexOf("/toggle_learn") != -1) {
+      learningMode = !learningMode;
+      if (learningMode) {
+        rfid.PCD_Init(); 
+        updateDisplay("TRYB UCZENIA", "Zbliz karte...");
+        addLog("Uczenie: Panel WWW");
+        tone(BUZZER_PIN, 1500, 300);
+      } else {
+        updateDisplay("Gotowy", WiFi.localIP().toString());
+        addLog("Stop Ucz: Panel WWW");
+        tone(BUZZER_PIN, 800, 300);
+      }
+    }
+  }
+
+  // Generate HTML output streams line-by-line for RAM optimization
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+  client.println("<style>body{background:#121212;color:#e0e0e0;font-family:sans-serif;text-align:center;padding:20px;}");
+  client.println(".box{background:#1e1e1e;border-radius:10px;padding:20px;max-width:500px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);}");
+  client.println(".btn{display:block;width:80%;margin:15px auto;padding:12px;color:#fff;font-weight:bold;border:none;border-radius:5px;cursor:pointer;text-decoration:none;font-size:16px;}");
+  client.println(".btn-open{background:#2e7d32;} .btn-learn{background:#1565c0;} .btn-login{background:#ff8f00;width:50%;}");
+  client.println("input[type=password]{padding:10px;width:60%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:10px;}");
+  client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;}</style></head><body>");
+
+  if (!isAuthenticated) {
+    // SECURITY LOGIN INTERFACE
+    client.println("<h2>🔒 Autoryzacja Zamku R4</h2>");
+    client.println("<div class='box'><form method='GET' action='/'>");
+    client.println("<input type='password' name='pass' placeholder='Wpisz hasło klucza' required><br>");
+    client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div>");
+  } else {
+    // ADMIN PANEL CONTROL CONSOLE
+    client.println("<h2>🛠️ Panel Sterowania Access Control</h2>");
+    client.println("<div class='box'><h3>Status Urządzenia</h3>");
+    client.println("<p>Aktualny tryb: <strong>" + String(learningMode ? "<span style='color:#64b5f6;'>Tryb Uczenia</span>" : "<span style='color:#81c784;'>Czuwanie Aktywne</span>") + "</strong></p>");
+    client.println("<p>Rygiel: <strong>" + String(doorOpen ? "<span style='color:#81c784;'>OTWARTY</span>" : "<span style='color:#e57373;'>ZAMKNIĘTY</span>") + "</strong></p></div>");
+
+    client.println("<div class='box'><h3>Działania Zdalne</h3>");
+    client.println("<a href='/unlock?pass=" + admin_password + "' class='btn btn-open'>🔓 Otwórz Zamek zdalnie</a>");
+    client.println("<a href='/toggle_learn?pass=" + admin_password + "' class='btn btn-learn'>🔄 Przełącz Tryb Uczenia</a></div>");
+
+    client.println("<div class='box'><h3>Dziennik Zdarzeń (System Logs)</h3><table class='log-table'>");
+    if (logCount == 0) {
+      client.println("<tr><td>Brak zarejestrowanych akcji.</td></tr>");
+    } else {
+      for (int i = logCount - 1; i >= 0; i--) {
+        client.println("<tr><td class='time'>[" + lastActions[i].time + "]</td><td>" + lastActions[i].msg + "</td></tr>");
+      }
+    }
+    client.println("</table></div>");
+  }
+  
+  client.println("</body></html>");
+  delay(1);
+  client.stop();
 }
 
 void setup() {
@@ -120,11 +208,9 @@ void setup() {
   
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   
-  // Connect to Wi-Fi locally
   updateDisplay("Laczenie z WiFi...");
   WiFi.begin(ssid, pass);
   
-  // Give it up to 10 seconds to connect
   unsigned long startAttempt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
     delay(500);
@@ -132,13 +218,25 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     timeClient.begin();
+    server.begin(); // Web server engine turns on here
     updateDisplay("Gotowy", WiFi.localIP().toString());
+    addLog("System online");
+
+    // 🎉 --- STARTUP SOUND MELODY ---
+    tone(BUZZER_PIN, 800, 100);  delay(120);
+    tone(BUZZER_PIN, 1000, 100); delay(120);
+    tone(BUZZER_PIN, 1300, 120); delay(140);
+    tone(BUZZER_PIN, 1600, 300);
   } else {
     updateDisplay("Gotowy", "Tryb Offline");
+    // Dull buzz alert for Offline warning
+    tone(BUZZER_PIN, 300, 600);
   }
 }
 
 void loop() {
+  handleWebServer(); // Instantly checks and serves local web client requests
+
   // --- ZARZĄDZANIE DIODAMI ---
   if (learningMode) {
     if (millis() % 500 < 250) {
@@ -186,7 +284,7 @@ void loop() {
     rfid.PCD_StopCrypto1();
   }
 
-  // --- FIZYCZNY PRZYCISK (Quick press = Open / Hold 3s = Learning Mode) ---
+  // --- FIZYCZNY PRZYCISK ---
   if (digitalRead(BUTTON_PIN) == LOW) {
     unsigned long pressTime = millis();
     bool longPressed = false;
@@ -194,7 +292,7 @@ void loop() {
     while (digitalRead(BUTTON_PIN) == LOW) {
       if (millis() - pressTime > 3000) { 
         longPressed = true;
-        learningMode = !learningMode; // Toggle mode
+        learningMode = !learningMode; 
         
         if (learningMode) {
           rfid.PCD_Init(); 
@@ -204,7 +302,7 @@ void loop() {
           updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
           tone(BUZZER_PIN, 800, 400);
         }
-        while(digitalRead(BUTTON_PIN) == LOW); // Wait until button is released
+        while(digitalRead(BUTTON_PIN) == LOW); 
         break;
       }
       delay(10);
