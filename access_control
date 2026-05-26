@@ -12,8 +12,8 @@
 const char* app_version = "v2.3.1 - User Directory";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
-const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
-const char* pass = "kupsenetabiedaku1!";     // ⚠️ Change to your network password
+const char* ssid = "YOUR_WIFI_NAME";         // ⚠️ Change to your network name
+const char* pass = "YOUR_WIFI_PASSWORD";     // ⚠️ Change to your network password
 const String admin_password = "admin";       // 🔑 Your Web Panel access password
 
 // --- PINS ---
@@ -233,4 +233,228 @@ void handleWebServer() {
       client.println("<input type='submit' class='btn btn-learn' value='➕ Włącz Tryb Uczenia'>");
       client.println("</form>");
     } else {
-      client.println("<a href='/toggle_learn?pass=" + admin_password + "' class='btn btn-stop-learn'>⏹️ Zatrzymaj Tryb Uczenia
+      client.println("<a href='/toggle_learn?pass=" + admin_password + "' class='btn btn-stop-learn'>⏹️ Zatrzymaj Tryb Uczenia</a>");
+    }
+    client.println("</div>");
+
+    client.println("<div class='box'><h3>👥 Baza Użytkowników (" + String(totalCards) + "/10)</h3>");
+    if (totalCards == 0) {
+      client.println("<p style='color:#777; font-style:italic;'>Baza danych jest pusta. Dodaj pierwszą kartę.</p>");
+    } else {
+      client.println("<table class='log-table' style='font-size:14px;'>");
+      for (int i = 0; i < totalCards; i++) {
+        String hexUID = "";
+        for (int j = 0; j < 4; j++) {
+          if (users[i].uid[j] < 0x10) hexUID += "0";
+          hexUID += String(users[i].uid[j], HEX);
+          if (j < 3) hexUID += " ";
+        }
+        hexUID.toUpperCase();
+        
+        client.println("<tr><td><strong>" + String(users[i].name) + "</strong><br><span style='font-size:11px;color:#666;'>" + hexUID + "</span></td>");
+        client.println("<td style='text-align:right;vertical-align:middle;'><a href='/delete_user?pass=" + admin_password + "&idx=" + String(i) + "' style='color:#e57373;text-decoration:none;font-weight:bold;'>❌ Usuń</a></td></tr>");
+      }
+      client.println("</table>");
+    }
+    client.println("</div>");
+
+    client.println("<div class='box'><h3>Dziennik Zdarzeń (Logs)</h3><table class='log-table'>");
+    if (logCount == 0) {
+      client.println("<tr><td>Brak zarejestrowanych akcji.</td></tr>");
+    } else {
+      for (int i = logCount - 1; i >= 0; i--) {
+        client.println("<tr><td class='time'>[" + lastActions[i].time + "]</td><td>" + lastActions[i].msg + "</td></tr>");
+      }
+    }
+    client.println("</table></div>");
+  }
+  
+  client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
+  client.println("System Hardware ID: Renesas RA4M1 Core | " + String(app_version));
+  client.println("</div>");
+  
+  client.println("</body></html>");
+  delay(1);
+  client.stop();
+}
+
+void setup() {
+  Serial.begin(9600);
+  delay(1500); 
+
+  loadCards();
+  
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  pinMode(RST_PIN, OUTPUT); 
+  digitalWrite(RST_PIN, HIGH);
+  delay(50);
+
+  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_RED, HIGH);
+
+  SPI.begin();
+  
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  updateDisplay("Laczenie z WiFi... ");
+  
+  WiFi.begin(ssid, pass);
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000) {
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    timeClient.begin();
+    timeClient.update();
+    lastNTPUpdate = millis();
+    server.begin(); 
+    
+    forceHardwareRFIDReset();
+    
+    updateDisplay("Gotowy", WiFi.localIP().toString());
+    addLog("System online");
+
+    // --- STARTUP MELODY ---
+    tone(BUZZER_PIN, 800, 100);  delay(120);
+    tone(BUZZER_PIN, 1000, 100); delay(120);
+    tone(BUZZER_PIN, 1300, 120); delay(140);
+    tone(BUZZER_PIN, 1600, 300);
+  } else {
+    forceHardwareRFIDReset();
+    updateDisplay("Gotowy", "Tryb Offline");
+    tone(BUZZER_PIN, 300, 600);
+  }
+}
+
+void loop() {
+  handleWebServer(); 
+
+  // --- NON-BLOCKING WATCHDOG RESET ---
+  if (rfidResetPending && !doorOpen && (millis() - lastScanTime > 1000)) {
+    forceHardwareRFIDReset();
+    rfidResetPending = false;
+    
+    if (learningMode) {
+      updateDisplay("TRYB UCZENIA", pendingUsername);
+    } else {
+      updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+    }
+  }
+
+  // --- BACKGROUND NTP CLOCK UPDATE ---
+  if (WiFi.status() == WL_CONNECTED && millis() - lastNTPUpdate > 60000) {
+    timeClient.update();
+    lastNTPUpdate = millis();
+  }
+
+  // --- ZARZĄDZANIE DIODAMI ---
+  if (learningMode) {
+    if (millis() % 500 < 250) {
+      digitalWrite(LED_RED, HIGH);
+      digitalWrite(LED_GREEN, LOW);
+    } else {
+      digitalWrite(LED_RED, LOW);
+      digitalWrite(LED_GREEN, HIGH);
+    }
+  } else if (!doorOpen) {
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_GREEN, LOW);
+  }
+
+  // --- SPRAWDZANIE RFID ---
+  if (!rfidResetPending && !doorOpen && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    
+    String uidStr = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
+      uidStr += String(rfid.uid.uidByte[i], HEX);
+      if (i < rfid.uid.size - 1) uidStr += " ";
+    }
+    uidStr.toUpperCase();
+
+    if (learningMode) {
+      saveNewCard(rfid.uid.uidByte, pendingUsername);
+      addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
+      updateDisplay("DODANO KARTE", pendingUsername);
+      
+      digitalWrite(LED_RED, LOW);
+      digitalWrite(LED_GREEN, HIGH);
+      
+      tone(BUZZER_PIN, 1000, 150); delay(150);
+      tone(BUZZER_PIN, 1500, 150); delay(150);
+      tone(BUZZER_PIN, 2000, 400);
+    } else {
+      bool valid = false;
+      int matchedIndex = -1;
+      
+      for (int i = 0; i < totalCards; i++) {
+        if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) {
+          valid = true;
+          matchedIndex = i;
+          break;
+        }
+      }
+      
+      if (valid) {
+        openDoor(String(users[matchedIndex].name) + " [" + uidStr + "]"); 
+      } else {
+        addLog("Odmowa: Nieznany [" + uidStr + "]");
+        tone(BUZZER_PIN, 200, 500);
+      }
+    }
+    
+    rfid.PICC_HaltA();
+    
+    rfidResetPending = true;
+    lastScanTime = millis();
+  }
+
+  // --- PRZYCISK FIZYCZNY ---
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    unsigned long pressTime = millis();
+    bool longPressed = false;
+
+    while (digitalRead(BUTTON_PIN) == LOW) {
+      if (millis() - pressTime > 3000) { 
+        longPressed = true;
+        learningMode = !learningMode; 
+        
+        if (learningMode) {
+          pendingUsername = "Przycisk Fiz."; 
+          forceHardwareRFIDReset();
+          updateDisplay("TRYB UCZENIA", pendingUsername);
+          tone(BUZZER_PIN, 1500, 400);
+        } else {
+          updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+          tone(BUZZER_PIN, 800, 400);
+        }
+        while(digitalRead(BUTTON_PIN) == LOW); 
+        break;
+      }
+      delay(10);
+    }
+
+    if (!longPressed && (millis() - pressTime > 50)) {
+      openDoor("Przycisk");
+    }
+  }
+
+  // --- AUTO-ZAMYKANIE ---
+  if (doorOpen && millis() > accessEndTime) {
+    doorOpen = false;
+    digitalWrite(RELAY_PIN, HIGH); 
+    
+    delay(100); 
+    forceHardwareRFIDReset();
+    rfidResetPending = false; 
+
+    digitalWrite(LED_GREEN, LOW);
+    digitalWrite(LED_RED, HIGH);
+    updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+  }
+}
