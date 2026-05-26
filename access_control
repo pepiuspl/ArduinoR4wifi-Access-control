@@ -1,9 +1,3 @@
-/* Sketch adjusted for Arduino IoT Cloud.
-  Make sure you have created your "Thing" and added your variables (like 'doorOpen' and 'learningMode') 
-  on the Cloud dashboard before uploading.
-*/
-
-#include "thingProperties.h"
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
