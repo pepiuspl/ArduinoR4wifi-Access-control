@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION ---
-const char* app_version = "v2.6.2 - Card Activation Core";
+const char* app_version = "v2.6.3 - Log Engine Release";
 
 // --- FALLBACK DEFAULTS ---
 char ssid[32] = "wifi_archer";         
@@ -25,6 +25,9 @@ char admin_password[16] = "admin";
 #define BUZZER_PIN 8
 #define RST_PIN 9
 #define SS_PIN 10
+
+// --- CAPACITY CONFIGURATION ---
+#define MAX_LOGS 30 // 🔥 Expanded log memory capacity profile limit
 
 // --- OBJECTS ---
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
@@ -44,13 +47,13 @@ bool doorOpen = false;
 bool learningMode = false;
 bool autoExitLearn = false; 
 User users[10];       
-bool isCardActive[10] = {true}; // Tracks active/inactive execution flags per slot
+bool isCardActive[10] = {true}; 
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
 
 // --- SECURITY LOGS & BRUTE-FORCE WATCHDOG ---
 struct LogEntry { String time; String msg; };
-LogEntry lastActions[10]; 
+LogEntry lastActions[MAX_LOGS]; // Tracks the expanded data limits
 int logCount = 0;
 
 int failedLoginAttempts = 0;
@@ -90,7 +93,6 @@ void loadCards() {
   if (totalCards < 0 || totalCards > 10) totalCards = 0;
   for (int i = 0; i < totalCards; i++) {
     EEPROM.get(10 + (i * sizeof(User)), users[i]);
-    // Read individual card state (0x00 = Inactive, anything else/0xFF = Active)
     isCardActive[i] = (EEPROM.read(220 + i) != 0x00); 
   }
 }
@@ -102,7 +104,7 @@ void saveNewCard(byte* uid, String nameStr) {
   nameStr.toCharArray(users[totalCards].name, 16);
   EEPROM.put(10 + (totalCards * sizeof(User)), users[totalCards]);
   
-  isCardActive[totalCards] = true; // Newly enrolled cards default to active state
+  isCardActive[totalCards] = true; 
   EEPROM.write(220 + totalCards, 0x01);
   
   totalCards++;
@@ -114,13 +116,11 @@ void deleteUser(int index) {
   for (int i = index; i < totalCards - 1; i++) {
     users[i] = users[i + 1];
     EEPROM.put(10 + (i * sizeof(User)), users[i]);
-    
-    isCardActive[i] = isCardActive[i + 1]; // Shift active flag mappings along with user blocks
+    isCardActive[i] = isCardActive[i + 1]; 
     EEPROM.write(220 + i, isCardActive[i] ? 0x01 : 0x00);
   }
   isCardActive[totalCards - 1] = true;
   EEPROM.write(220 + totalCards - 1, 0x01);
-  
   totalCards--;
   EEPROM.put(0, totalCards);
 }
@@ -153,11 +153,12 @@ void addLog(String msg) {
   sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
   String currentTime = String(timeBuffer);
 
-  if (logCount < 10) {
+  if (logCount < MAX_LOGS) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
-    for (int i = 0; i < 9; i++) lastActions[i] = lastActions[i+1];
-    lastActions[9] = {currentTime, msg};
+    // Standard FIFO array shifting based on new MAX_LOGS parameter limits
+    for (int i = 0; i < MAX_LOGS - 1; i++) lastActions[i] = lastActions[i+1];
+    lastActions[MAX_LOGS - 1] = {currentTime, msg};
   }
 }
 
@@ -225,7 +226,7 @@ void handleWebServer() {
       for (int i = 0; i < totalCards; i++) {
         client.print("{\"idx\":"); client.print(i);
         client.print(",\"name\":\""); client.print(users[i].name);
-        client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false"); // Output active status metrics via JSON parameters
+        client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false"); 
         client.print(",\"uid\":\"");
         for(byte j=0; j<4; j++) {
           if(users[i].uid[j]<0x10) client.print("0");
@@ -312,18 +313,25 @@ void handleWebServer() {
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
-    // --- API ROUTE: TOGGLE DYNAMIC CARD ACTIVATION FLAGS ---
     else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
       int idxPos = reqHeader.indexOf("idx=");
       if (idxPos != -1) {
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
         if (targetIdx >= 0 && targetIdx < totalCards) {
           isCardActive[targetIdx] = !isCardActive[targetIdx];
-          EEPROM.write(220 + targetIdx, isCardActive[targetIdx] ? 0x01 : 0x00); // Write state byte directly to storage block
+          EEPROM.write(220 + targetIdx, isCardActive[targetIdx] ? 0x01 : 0x00); 
           addLog(isCardActive[targetIdx] ? "Aktywowano: " + String(users[targetIdx].name) : "Zablokowano: " + String(users[targetIdx].name));
           tone(BUZZER_PIN, 1100, 150);
         }
       }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    }
+    // --- API ROUTE: CLEAR ACTIVE MEMORY LOG ARRAYS ---
+    else if (reqHeader.indexOf("/api/clear_logs") != -1) {
+      logCount = 0;
+      addLog("Wyczyszczono dziennik zdarzen");
+      tone(BUZZER_PIN, 900, 150);
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
@@ -362,15 +370,16 @@ void handleWebServer() {
   client.println("<script>var pass=''; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
+  
+  // 💾 CLIENT-SIDE ASYNCHRONOUS EXPORTER CORE: Offloads data conversion work safely to the user's local web browser engine
+  client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
+  
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
   client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');return;} ");
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
   client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
   client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
-  
-  // 🟢 Javascript Table Row Generator: Adds status active/inactive toggle buttons directly into user directory cells
   client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong><br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;white-space:nowrap;\"><a href=\"#\" onclick=\"runCmd('/api/toggle_user_active?idx='+${u.idx})\" style=\"color:${u.active?'#81c784':'#ffb300'};text-decoration:none;margin-right:16px;font-weight:bold;\">${u.active?'🟢 Aktywna':'🔴 Zablokowana'}</a><a href=\"#\" onclick=\"renameUser(${u.idx},'${u.name}')\" style=\"color:#64b5f6;text-decoration:none;margin-right:12px;\">✏️ Edytuj</a><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
-  
   client.println("document.getElementById('v-users').innerHTML=uH?uH:'<tr><td>Baza pusta</td></tr>'; ");
   client.println("let lH=''; d.logs.forEach(l=>{ lH+=`<tr><td>${l}</td></tr>`; }); document.getElementById('v-logs').innerHTML=lH; ");
   client.println("document.getElementById('cfg-ssid').value=d.ssid; });} ");
@@ -395,7 +404,11 @@ void handleWebServer() {
   client.println("<input type='text' id='cfg-admin' placeholder='Nowe Hasło Web Panelu'><br>");
   client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
   
-  client.println("<div class='box'><h3>Dziennik Zdarzeń (Logs)</h3><table class='log-table' id='v-logs'></table></div></div>");
+  // 📊 LOG MANAGEMENT VIEW CONTAINER
+  client.println("<div class='box'><h3>Dziennik Zdarzeń (Max 30 wpisów)</h3>");
+  client.println("<button onclick='downloadCSV()' class='btn' style='background:#0288d1;margin-bottom:10px;'>📥 Pobierz jako plik Excel (CSV)</button>");
+  client.println("<button onclick=\"runCmd('/api/clear_logs')\" class='btn' style='background:#b71c1c;'>🗑️ Wyczyść Dziennik</button>");
+  client.println("<table class='log-table' id='v-logs'></table></div></div>");
 
   client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
   client.println("System Hardware ID: Renesas RA4M1 Core | " + String(app_version));
@@ -543,11 +556,9 @@ void loop() {
       }
       
       if (valid) {
-        // 🔥 DEFENSIVE EXECUTION FILTER: Check the dynamic activation boolean state
         if (isCardActive[matchedIndex]) {
           openDoor(String(users[matchedIndex].name) + " [" + uidStr + "]"); 
         } else {
-          // If deactivated, log explicitly by name and fire an access denied buzz alert
           addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
           tone(BUZZER_PIN, 200, 600);
         }
