@@ -12,8 +12,8 @@
 const char* app_version = "v2.3.1 - User Directory";
 
 // --- WI-FI & SECURITY CONFIGURATION ---
-const char* ssid = "YOUR_WIFI_NAME";         // ⚠️ Change to your network name
-const char* pass = "YOUR_WIFI_PASSWORD";     // ⚠️ Change to your network password
+const char* ssid = "wifi_archer";         // ⚠️ Change to your network name
+const char* pass = "kupsenetabiedaku1!";     // ⚠️ Change to your network password
 const String admin_password = "admin";       // 🔑 Your Web Panel access password
 
 // --- PINS ---
