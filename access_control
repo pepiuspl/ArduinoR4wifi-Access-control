@@ -377,7 +377,7 @@ void handleWebServer() {
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
   client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
   client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
-  client.println("document.getElementById('m-btn').innerHTML=d.masterEnabled?'🔒 Zablokuj Master Card z pozycji Czytnika':'🔓 Aktywuj Master Card z pozycji Czytnika'; ");
+  client.println("document.getElementById('m-btn').innerHTML=d.masterEnabled?'🔒 Zablokuj kartę Master':'🔓 Aktywuj kartę Master'; ");
   client.println("document.getElementById('m-btn').style.background=d.masterEnabled?'#d84315':'#37474f'; ");
   
   // ⚡ Javascript Dynamic UI Table Renderer: Outputs inline edit, toggle-master role buttons, and delete controls
@@ -394,14 +394,14 @@ void handleWebServer() {
   client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
   client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div></div>");
 
-  client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania Access Control</h2>");
-  client.println("<div class='box'><h3>Status Urządzenia</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Rygiel: <strong id='v-lock'>-</strong></p></div>");
-  client.println("<div class='box'><h3>Działania Zdalne</h3><button onclick=\"runCmd('/api/unlock')\" class='btn btn-open'>🔓 Otwórz Zamek zdalnie</button>");
+  client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania</h2>");
+  client.println("<div class='box'><h3>Status</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Zamek: <strong id='v-lock'>-</strong></p></div>");
+  client.println("<div class='box'><h3>Działania Zdalne</h3><button onclick=\"runCmd('/api/unlock')\" class='btn btn-open'>🔓 Otwórz zamek zdalnie</button>");
   client.println("<div style='margin-top:20px;'><input type='text' id='new-user-name' placeholder='Imię dla nowej karty' maxlength='15'><button onclick=\"runCmd('/api/toggle_learn?username='+encodeURIComponent(document.getElementById('new-user-name').value))\" class='btn btn-learn'>➕ Przełącz Tryb Uczenia</button></div></div>");
   
   client.println("<div class='box'><h3>👥 Baza Użytkowników</h3><table class='log-table' id='v-users'></table></div>");
   
-  client.println("<div class='box'><h3>🛡️ Bezpieczeństwo Fizyczne</h3><button id='m-btn' onclick=\"runCmd('/api/toggle_master_safety')\" class='btn'>-</button></div>");
+  client.println("<div class='box'><h3>🛡️ Bezpieczeństwo</h3><button id='m-btn' onclick=\"runCmd('/api/toggle_master_safety')\" class='btn'>-</button></div>");
 
   client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
   client.println("<input type='text' id='cfg-ssid' placeholder='Nowe WiFi SSID'><br>");
