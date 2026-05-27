@@ -370,6 +370,61 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
+  // 🧪 INTERCEPT FLOW FOR DEVELOPMENT RECONFIGURATION SIMULATIONS
+  if (reqHeader.indexOf("GET /init") != -1) {
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
+    client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+    client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);} input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#7b1fa2;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;} .desc{font-size:12px;color:#888;margin-top:-5px;margin-bottom:10px;display:block;}</style>");
+    client.println("<script>function togglePassVisibility(id){var x=document.getElementById(id); if(x.type==='password'){x.type='text';}else{x.type='password';}}</script></head><body>");
+    client.println("<h2>⚙️ [SANDBOX] Kreator Konfiguracji</h2><div style='color:#ff8f00; font-size:13px;'>PROFIL TESTOWY INTERFEJSU</div>");
+    client.println("<div class='box'><form method='GET' action='/save_setup'>");
+    client.print("<h3>1. Siec Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
+    client.print("<input type='password' id='wifi-pass-field' name='p' placeholder='Haslo do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
+    client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"wifi-pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
+    client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='password' id='admin-pass-field' name='a' placeholder='Hasło Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
+    client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"admin-pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
+    client.print("<h3>3. Telemetria Serwera</h3><input type='text' name='ti' placeholder='IP Serwera Logow' value='"); client.print(proxmox_log_server); client.print("'><br>");
+    client.print("<input type='text' name='tp' placeholder='Port Telemetrii' value='"); client.print(proxmox_log_port); client.print("'><br>");
+    client.print("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' "); client.print(telemetryEnabled ? "checked" : ""); client.println("> Wlacz automatyczna wysylke telemetryczna</label><br>");
+    client.println("<input type='submit' class='btn' value='Zapisz i Zrestartuj Urządzenie'></form></div></body></html>");
+    delay(1); client.stop(); return;
+  }
+
+  // Allow sandbox setup saves to execute natively inside standard daemon listeners
+  if (reqHeader.indexOf("/save_setup") != -1) {
+    int sIdx = reqHeader.indexOf("s=") + 2;
+    int pIdx = reqHeader.indexOf("&p=") + 3;
+    int aIdx = reqHeader.indexOf("&a=") + 3;
+    int tiIdx = reqHeader.indexOf("&ti=") + 4;
+    int tpIdx = reqHeader.indexOf("&tp=") + 4;
+    int teIdx = reqHeader.indexOf("&te=");
+    
+    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
+    String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
+    
+    int nextAmpA = reqHeader.indexOf("&", aIdx);
+    int spaceIdxA = reqHeader.indexOf(" ", aIdx);
+    int endAdminPos = (nextAmpA != -1 && nextAmpA < spaceIdxA) ? nextAmpA : spaceIdxA;
+    String rawAdmin = reqHeader.substring(aIdx, endAdminPos);
+    String rawTeleIP = (tiIdx != -1) ? reqHeader.substring(tiIdx, reqHeader.indexOf("&tp=")) : "";
+    
+    int spacePos = reqHeader.indexOf(" ", tpIdx);
+    int nextAmp = reqHeader.indexOf("&", tpIdx);
+    int endPortPos = (nextAmp != -1 && nextAmp < spacePos) ? nextAmp : spacePos;
+    String nTelePort = (tpIdx != -1) ? reqHeader.substring(tpIdx, endPortPos) : "5000";
+    bool runTele = (teIdx != -1);
+
+    String decodedSSID = urlDecode(rawSSID); String decodedPass = urlDecode(rawPass);
+    String decodedAdmin = urlDecode(rawAdmin); String decodedTeleIP = urlDecode(rawTeleIP);
+    
+    saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Zapisano w EEPROM!</h2><p>Uruchamianie ponowne...</p></body></html>");
+    delay(500); client.stop();
+    tone(BUZZER_PIN, 2000, 800); delay(1000);
+    NVIC_SystemReset();
+    return;
+  }
+
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
     sprintf(temporary_password, "%ld", tokenNum);
@@ -605,17 +660,13 @@ void handleWebServer() {
   client.println(".btn-open{background:#2e7d32;} .btn-learn{background:#1565c0;} .btn-stop-learn{background:#cc3333;} .btn-login{background:#ff8f00;width:50%;}");
   client.println("input[type=password], input[type=text]{padding:10px;width:75%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:12px;box-sizing:border-box;}");
   client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;} .hide{display:none;}</style>");
-  
-  // 🔥 Global JS Visibility Handler injected right at the head layout configuration bounds
   client.println("<script>function togglePassVisibility(id){var x=document.getElementById(id); if(x.type==='password'){x.type='text';}else{x.type='password';}}</script>");
-  
   client.println("<script>var pass=''; var dataTimer; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
   client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
   client.println("function handleClearLogs(){ let v=prompt('Wpisz godzinę w formacie HH:MM (np. 18:00), aby usunąć logi STARSZE niż podany czas, lub wpisz \"all\" aby wyczyścić cały dziennik:', 'all'); if(v && v.trim().length > 0){ runCmd('/api/clear_logs?time='+encodeURIComponent(v.trim())); } } ");
   client.println("function triggerReset(){ if(confirm('Wygenerować jednorazowe hasło ratunkowe? Zostanie ono zapisane w logach systemowych.')){ fetch('/api/forgot_password').then(()=>alert('Hasło tymczasowe wygenerowane! Sprawdź ekran OLED lub logi Proxmox.')); } } ");
-
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
   client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');pass='';return;} ");
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
@@ -632,11 +683,8 @@ void handleWebServer() {
 
   client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
   client.println("<div class='box'><form method='GET' action='/'>");
-  
-  // 👁️ Added visibility toggle to the lock screen login interface panel
   client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
   client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
-  
   client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form>");
   client.println("<br><a href='#' onclick='triggerReset()' style='color:#e57373;text-decoration:none;font-size:13px;letter-spacing:0.3px;'>Nie pamiętasz hasła? Wygeneruj klucz tymczasowy</a></div></div>");
 
@@ -649,14 +697,10 @@ void handleWebServer() {
   
   client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
   client.println("<input type='text' id='cfg-ssid' placeholder='WiFi SSID'><br>");
-  
-  // 👁️ Added visibility checkbox options cleanly alongside the main system administration configuration inputs
   client.println("<input type='password' id='cfg-pass' placeholder='Wpisz nowe hasło do Wi-Fi (opcjonalnie)'><br>");
   client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-pass\")'> 👁️ Pokaz wpisane haslo</label>");
-  
   client.println("<input type='password' id='cfg-admin' placeholder='Hasło Panelu Administratora'><br>");
   client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-admin\")'> 👁️ Pokaz wpisane haslo</label>");
-  
   client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
   
   client.println("<div class='box'><h3>Dziennik Zdarzeń (Max 30 wpisów)</h3>");
