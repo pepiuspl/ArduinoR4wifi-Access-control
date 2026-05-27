@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION ---
-const char* app_version = "v2.6.3 - Watchdog Patch";
+const char* app_version = "v2.6.3 - Log Engine Release";
 
 // --- FALLBACK DEFAULTS ---
 char ssid[32] = "wifi_archer";         
