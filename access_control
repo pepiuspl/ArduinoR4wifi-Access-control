@@ -12,7 +12,7 @@
 // --- VERSION CONTROL SNAPSHOT ---
 const char* app_version = "v2.7.0 - Genesis Core";
 
-// --- USER DATABASE STRUCTURE ---
+// --- USER DATABASE STRUCTURES (Declared first to avoid compilation quirks) ---
 struct User {
   byte uid[4];
   char name[16]; 
@@ -87,7 +87,7 @@ void loadConfiguration() {
     provisioningMode = true; 
     hasSavedConfig = false;
     strcpy(admin_password, "admin");
-    strcpy(proxmox_log_server, "192.168.4.1");
+    strcpy(proxmox_log_server, "192.168.1.100");
   }
 }
 
@@ -183,7 +183,6 @@ void displayProvisioningInstructions(String errorContext = "") {
   display.println("   SSID: ZAMEK_SETUP");
   display.println("2. Otworz przegladarke");
   display.println("3. Wejdz na adres IP:");
-  // 🔥 Patched: Update instruction text to point to the stable default address
   display.println("   192.168.4.1");
   display.display();
 }
@@ -296,7 +295,7 @@ void handleProvisioningServer() {
   client.println("<div class='box'><form method='GET' action='/save_setup'>");
   client.print("<h3>1. Siec Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
   client.print("<input type='password' name='p' placeholder='Haslo do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
-  client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='text' name='a' placeholder='Hasło Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
+  client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='text' name='a' placeholder='Haslo Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
   client.println("<span class='desc'>Bedziesz uzywac tego hasla do zarzadzania kartami i otwierania zamku przez przegladarke.</span>");
   client.print("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logow' value='"); client.print(proxmox_log_server); client.print("'><br>");
   client.print("<input type='text' name='tp' placeholder='Port Telemetrii' value='"); client.print(proxmox_log_port); client.print("'><br>");
@@ -618,7 +617,6 @@ void setup() {
   // 🛠️ TRUE FIRST TIME OUT-OF-THE-BOX INITIALIZATION
   if (provisioningMode) {
     displayProvisioningInstructions(); 
-    // 🔥 Fixed: Drop WiFi.config() to avoid freezing the ESP32 module coprocessor layout
     WiFi.beginAP("ZAMEK_SETUP");
     server.begin();
     while (true) {
@@ -665,10 +663,12 @@ void setup() {
     displayProvisioningInstructions("ERR: BLAD LACZENIA!");
     
     WiFi.disconnect();
-    // 🔥 Fixed: Dropped the static configuration bounds, forcing native radio channel setups
+    delay(1000); // 🌟 CRITICAL DELAY: Gives the internal bridge time to clean up state logs before shifting roles
     WiFi.beginAP("ZAMEK_SETUP");
+    delay(500);
     server.begin();
     tone(BUZZER_PIN, 300, 600);
+    lastWifiRetryTime = millis(); // Safely anchor your initial loop baseline timestamp tracking keys
   }
 }
 
@@ -676,21 +676,39 @@ void loop() {
   if (isOfflineStandby) {
     handleProvisioningServer();
     
-    // Non-blocking background recovery check loop executes silently every 45 seconds
-    if (millis() - lastWifiRetryTime > 45000) {
+    // 🔥 Watchdog check runs every 60 seconds to keep the radio stable and responsive
+    if (millis() - lastWifiRetryTime > 60000) {
       lastWifiRetryTime = millis();
       
+      updateDisplay("RESCUE WATCHDOG", "Sprawdzam Wi-Fi...");
+      
+      // Attempt a background connection attempt with an adequate 6-second handshake window
       WiFi.begin(ssid, pass);
-      delay(200); 
+      unsigned long checkStart = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) {
+        delay(200);
+      }
+      
       if (WiFi.status() == WL_CONNECTED) {
         isOfflineStandby = false;
+        timeClient.begin();
+        timeClient.update();
+        unsigned long epochTime = timeClient.getEpochTime();
+        RTCTime localTime(epochTime);
+        RTC.setTime(localTime);
+        
         server.begin();
         updateDisplay("Gotowy", WiFi.localIP().toString());
         addLog("Polaczenie Wi-Fi przywrocone");
         tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
       } else {
+        // Fall back cleanly to the rescue hotspot without flooding the driver with commands
         WiFi.disconnect();
+        delay(1000); 
         WiFi.beginAP("ZAMEK_SETUP");
+        delay(500);
+        server.begin();
+        displayProvisioningInstructions("ERR: REKONEKCJA FAIL");
       }
     }
   } else {
