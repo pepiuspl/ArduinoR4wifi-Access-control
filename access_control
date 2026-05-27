@@ -12,6 +12,17 @@
 // --- VERSION CONTROL SNAPSHOT ---
 const char* app_version = "v2.7.0 - Genesis Core";
 
+// --- USER DATABASE STRUCTURE (Declared first to fix compile order) ---
+struct User {
+  byte uid[4];
+  char name[16]; 
+};
+
+struct LogEntry { 
+  String time; 
+  String msg; 
+};
+
 // --- DYNAMIC CONFIGURATION HOLDER STRINGS ---
 char ssid[32] = "";         
 char pass[32] = "";     
@@ -50,7 +61,6 @@ bool isCardActive[10] = {true};
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
 
-struct LogEntry { String time; String msg; };
 LogEntry lastActions[MAX_LOGS]; 
 int logCount = 0;
 
@@ -61,12 +71,6 @@ unsigned long accessEndTime = 0;
 bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 unsigned long lastWifiRetryTime = 0; 
-
-// --- USER DATABASE STRUCTURE ---
-struct User {
-  byte uid[4];
-  char name[16]; 
-};
 
 // --- STORAGE MANAGEMENT ENGINE ---
 void loadConfiguration() {
@@ -82,7 +86,6 @@ void loadConfiguration() {
   } else {
     provisioningMode = true; 
     hasSavedConfig = false;
-    // Set out-of-the-box defaults for form fields if memory is blank
     strcpy(admin_password, "admin");
     strcpy(proxmox_log_server, "192.168.1.100");
   }
@@ -269,7 +272,7 @@ void handleProvisioningServer() {
     
     saveConfiguration(nSSID, nPass, nAdmin, nTeleIP, nTelePort.toInt(), runTele);
     
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyślnie!</h2><p>Urządzenie restartuje się i spróbuje połączyć z Twoją siecią domową...</p></body></html>");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2><p>Urzadzenie restartuje sie i sprobuje polaczyc z Twoja siecia domowa...</p></body></html>");
     delay(500); client.stop();
     
     tone(BUZZER_PIN, 2000, 800);
@@ -284,20 +287,19 @@ void handleProvisioningServer() {
   client.println("input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#2e7d32;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;} .desc{font-size:12px;color:#888;margin-top:-5px;margin-bottom:10px;display:block;} .warn{background:#b71c1c;padding:12px;border-radius:5px;font-size:14px;margin-bottom:15px;line-height:1.4;}</style></head><body>");
   client.println("<h2>⚙️ Kreator Pierwszej Konfiguracji</h2>");
   
-  // 🟢 Dynamic Form Intercept Notice: Warns user of typo values retained in active state variables
   if (hasSavedConfig) {
-    client.print("<div class='box' style='border:2px solid #b71c1c;'><div class='warn'>⚠️ <strong>BŁĄD POŁĄCZENIA!</strong><br>Urządzenie nie mogło połączyć się z siecią: ");
-    client.print(ssid); client.println("<br>Sprawdź czy nazwa i hasło są poprawne. Formularz poniżej został uzupełniony błędnymi danymi w celu poprawki.</div></div>");
+    client.print("<div class='box' style='border:2px solid #b71c1c;'><div class='warn'>⚠️ <strong>BLAD POLACZENIA!</strong><br>Urzadzenie nie moglo polaczyc sie z siecia: ");
+    client.print(ssid); client.println("<br>Sprawdz czy nazwa i haslo sa poprawne. Formularz ponizej zostal uzupełniony blednymi danymi w celu poprawki.</div></div>");
   }
 
   client.println("<div class='box'><form method='GET' action='/save_setup'>");
-  client.print("<h3>1. Sieć Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
-  client.print("<input type='password' name='p' placeholder='Hasło do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
-  client.print("<h3>2. Bezpieczeństwo Panelu</h3><input type='text' name='a' placeholder='Hasło Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
-  client.println("<span class='desc'>Będziesz używać tego hasła do zarządzania kartami i otwierania zamku przez przeglądarkę.</span>");
-  client.print("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logów' value='"); client.print(proxmox_log_server); client.print("'><br>");
+  client.print("<h3>1. Siec Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
+  client.print("<input type='password' name='p' placeholder='Haslo do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
+  client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='text' name='a' placeholder='Haslo Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
+  client.println("<span class='desc'>Bedziesz uzywac tego hasla do zarzadzania kartami i otwierania zamku przez przegladarke.</span>");
+  client.print("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logow' value='"); client.print(proxmox_log_server); client.print("'><br>");
   client.print("<input type='text' name='tp' placeholder='Port Telemetrii' value='"); client.print(proxmox_log_port); client.print("'><br>");
-  client.print("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' "); client.print(telemetryEnabled ? "checked" : ""); client.println("> Włącz automatyczną wysyłkę telemetryczną</label><br>");
+  client.print("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' "); client.print(telemetryEnabled ? "checked" : ""); client.println("> Wlacz automatyczna wysylke telemetryczna</label><br>");
   client.println("<input type='submit' class='btn' value='Zapisz Ustawienia i Uruchom'></form></div></body></html>");
   delay(1); client.stop();
 }
@@ -534,7 +536,7 @@ void handleWebServer() {
   client.println("<script>var pass=''; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
-  client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/html;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
+  client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
   client.println("function handleClearLogs(){ let v=prompt('Wpisz godzinę w formacie HH:MM (np. 18:00), aby usunąć logi STARSZE niż podany czas, lub wpisz \"all\" aby wyczyścić cały dziennik:', 'all'); if(v && v.trim().length > 0){ runCmd('/api/clear_logs?time='+encodeURIComponent(v.trim())); } } ");
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
   client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');return;} ");
@@ -612,7 +614,7 @@ void setup() {
   
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
 
-  // 🛠️ TRUE FIRST TIME OUT-OF-THE-BOX INITIALIZATION
+  // 🛠| INITIAL OUT-OF-THE-BOX SETUP PORTAL INTERCEPT
   if (provisioningMode) {
     displayProvisioningInstructions(); 
     WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
@@ -630,11 +632,11 @@ void setup() {
   
   unsigned long startAttempt = millis();
   int counter = 0;
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) {
     delay(500);
     counter++;
-    if (counter == 10) updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [......]");
-    if (counter == 20) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
+    if (counter == 8)  updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [======]");
+    if (counter == 16) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [========]");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -656,8 +658,8 @@ void setup() {
     tone(BUZZER_PIN, 1300, 120); delay(140);
     tone(BUZZER_PIN, 1600, 300);
   } else {
-    // 🔥 DYNAMIC ACTIVE HOTSPOT LIFELINE
-    // If a power surge lag happens or user makes a typo, keep the hotspot alive at 192.168.1.100 as a rescue line!
+    // 🔥 ACTIVE RECOVERY RESCUE PORTAL OVERRIDE
+    // Home router missing or typo detected. Keep the configuration portal alive!
     isOfflineStandby = true;
     forceHardwareRFIDReset();
     displayProvisioningInstructions("ERR: BLAD LACZENIA!");
@@ -671,27 +673,23 @@ void setup() {
 }
 
 void loop() {
-  // If offline hotspot rescue line is running, keep handling the provisioning server
   if (isOfflineStandby) {
     handleProvisioningServer();
     
-    // Non-blocking self-healing background check runs every 45 seconds to check if home router has appeared
+    // Non-blocking self-healing retry block runs quietly in background every 45 seconds
     if (millis() - lastWifiRetryTime > 45000) {
       lastWifiRetryTime = millis();
       
-      // Attempt a quick scan to check if home network is reachable
       WiFi.begin(ssid, pass);
       delay(200); 
       if (WiFi.status() == WL_CONNECTED) {
-        // Router found! Tear down emergency hotspot and go online smoothly
         isOfflineStandby = false;
-        WiFi.endAP(); 
+        // In WiFiS3 calling begin() gracefully overrides AP mode automatically without explicit teardown methods
         server.begin();
         updateDisplay("Gotowy", WiFi.localIP().toString());
         addLog("Polaczenie Wi-Fi przywrocone");
         tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
       } else {
-        // Still no router, fall back immediately to hosting the rescue portal
         WiFi.disconnect();
         WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
         WiFi.beginAP("ZAMEK_SETUP");
@@ -727,7 +725,6 @@ void loop() {
       digitalWrite(LED_GREEN, LOW);
     } else {
       if (isOfflineStandby) {
-        // Flash red status indicating it is hosted on emergency recovery mode
         digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH);
       } else {
         digitalWrite(LED_RED, HIGH);
