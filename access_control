@@ -13,9 +13,13 @@
 const char* app_version = "v2.6.3 - Log Engine Release";
 
 // --- FALLBACK DEFAULTS ---
-char ssid[32] = "wifi_archer";         
-char pass[32] = "kupsenetabiedaku1!";     
+char ssid[32] = "YOUR_WIFI_NAME";         
+char pass[32] = "YOUR_WIFI_PASSWORD";     
 char admin_password[16] = "admin";       
+
+// --- TELEMETRY SERVER ENGINE (PROXMOX TARGET) ---
+const char* proxmox_log_server = "192.168.0.XX"; // 👈 Type your Debian CT / Docker IP address here
+const int proxmox_log_port = 5000;
 
 // --- PINS ---
 #define RELAY_PIN 4
@@ -26,7 +30,6 @@ char admin_password[16] = "admin";
 #define RST_PIN 9
 #define SS_PIN 10
 
-// --- CAPACITY CONFIGURATION ---
 #define MAX_LOGS 30 
 
 // --- OBJECTS ---
@@ -51,7 +54,6 @@ bool isCardActive[10] = {true};
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
 
-// --- SECURITY LOGS & BRUTE-FORCE WATCHDOG ---
 struct LogEntry { String time; String msg; };
 LogEntry lastActions[MAX_LOGS]; 
 int logCount = 0;
@@ -144,6 +146,28 @@ void updateDisplay(String status, String info = "") {
   display.display();
 }
 
+// 🔥 ASYNCHRONOUS PACKET BROKER: Sends explicit HTTP POST logs to your Proxmox server
+void sendExternalTelemetry(String logData) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  WiFiClient telemetryClient;
+  telemetryClient.setTimeout(150); // Aggressive execution timeout bounds prevent loops from stuttering
+  
+  if (telemetryClient.connect(proxmox_log_server, proxmox_log_port)) {
+    telemetryClient.println("POST /log HTTP/1.1");
+    telemetryClient.print("Host: "); telemetryClient.println(proxmox_log_server);
+    telemetryClient.println("Content-Type: text/plain; charset=utf-8");
+    telemetryClient.print("Content-Length: "); telemetryClient.println(logData.length());
+    telemetryClient.println("Connection: close");
+    telemetryClient.println();
+    telemetryClient.print(logData);
+    
+    // Quick flush sequence 
+    telemetryClient.flush();
+    telemetryClient.stop();
+  }
+}
+
 void addLog(String msg) {
   RTCTime currentRTCTime;
   RTC.getTime(currentRTCTime);
@@ -151,12 +175,16 @@ void addLog(String msg) {
   sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
   String currentTime = String(timeBuffer);
 
+  // 1. Write to local scrolling UI array buffer limits
   if (logCount < MAX_LOGS) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
     for (int i = 0; i < MAX_LOGS - 1; i++) lastActions[i] = lastActions[i+1];
     lastActions[MAX_LOGS - 1] = {currentTime, msg};
   }
+
+  // 2. 🔥 Fire off permanent logging event straight to your Proxmox cluster
+  sendExternalTelemetry(msg);
 }
 
 void openDoor(String source) {
@@ -185,13 +213,11 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
-  // Brute force lockout safety screen filter
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
     client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
     delay(1); client.stop(); return;
   }
 
-  // 🔥 Fix: Parse explicit password payload metrics out of network packets safely
   String attemptedPass = "";
   int passPos = reqHeader.indexOf("pass=");
   if (passPos != -1) {
@@ -204,7 +230,6 @@ void handleWebServer() {
 
   bool isAuthenticated = (passPos != -1 && attemptedPass == String(admin_password));
 
-  // Only step up failure counters if a non-empty password parameter was actually input
   if (passPos != -1) {
     if (!isAuthenticated && attemptedPass.length() > 0) {
       failedLoginAttempts++;
@@ -218,7 +243,6 @@ void handleWebServer() {
     }
   }
 
-  // --- API ROUTE: LIVE STREAM JSON FEED ---
   if (reqHeader.indexOf("GET /api/data") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -260,7 +284,6 @@ void handleWebServer() {
     delay(1); client.stop(); return;
   }
 
-  // --- API EXECUTION FILTERS ---
   if (isAuthenticated) {
     if (reqHeader.indexOf("/api/unlock") != -1) {
       openDoor("Panel WWW");
