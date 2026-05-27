@@ -148,7 +148,6 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
   EEPROM.write(250, 0x55); 
 
-  // Clean out tracking values to prevent token reuse vulnerabilities
   hasTemporaryPassword = false;
   memset(temporary_password, 0, sizeof(temporary_password));
 }
@@ -371,7 +370,6 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
-  // 🔥 UN-AUTHENTICATED API INTERCEPT: Generates and channels recovery tokens securely to logfiles
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
     sprintf(temporary_password, "%ld", tokenNum);
@@ -402,7 +400,6 @@ void handleWebServer() {
 
   String decodedAttempt = urlDecode(attemptedPass);
   
-  // Accept standard master keys or active recovery tokens symmetrically
   bool authPermanent = (passPos != -1 && decodedAttempt == String(admin_password));
   bool authTemporary = (passPos != -1 && hasTemporaryPassword && decodedAttempt == String(temporary_password));
   bool isAuthenticated = (authPermanent || authTemporary);
@@ -609,13 +606,11 @@ void handleWebServer() {
   client.println("input[type=password], input[type=text]{padding:10px;width:75%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:12px;box-sizing:border-box;}");
   client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;} .hide{display:none;}</style>");
   
-  client.println("<script>var pass=''; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
+  client.println("<script>var pass=''; var dataTimer; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
   client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
   client.println("function handleClearLogs(){ let v=prompt('Wpisz godzinę w formacie HH:MM (np. 18:00), aby usunąć logi STARSZE niż podany czas, lub wpisz \"all\" aby wyczyścić cały dziennik:', 'all'); if(v && v.trim().length > 0){ runCmd('/api/clear_logs?time='+encodeURIComponent(v.trim())); } } ");
-  
-  // 🔘 Form Recovery Link Trigger Handler
   client.println("function triggerReset(){ if(confirm('Wygenerować jednorazowe hasło ratunkowe? Zostanie ono zapisane w logach systemowych.')){ fetch('/api/forgot_password').then(()=>alert('Hasło tymczasowe wygenerowane! Sprawdź ekran OLED lub logi Proxmox.')); } } ");
 
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
@@ -629,15 +624,15 @@ void handleWebServer() {
   client.println("if(document.activeElement.id !== 'cfg-ssid') document.getElementById('cfg-ssid').value=d.ssid; ");
   client.println("if(document.activeElement.id !== 'cfg-admin') document.getElementById('cfg-admin').value=d.admin_pass; ");
   client.println("});} ");
-  client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); setInterval(updateData,2000);}; ");
-  client.println("function saveCfg(){let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Urządzenie zostanie zaktualizowane.');} </script></head><body>");
+  client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); dataTimer=setInterval(updateData,2000);}; ");
+  
+  // 🔥 Patched save sequence forces data timer clear cycles immediately to insulate transaction handshakes
+  client.println("function saveCfg(){ clearInterval(dataTimer); let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Urządzenie zostanie zaktualizowane.');} </script></head><body>");
 
   client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
   client.println("<div class='box'><form method='GET' action='/'>");
   client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
   client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form>");
-  
-  // Render explicit Recovery link option to the login dialog container box
   client.println("<br><a href='#' onclick='triggerReset()' style='color:#e57373;text-decoration:none;font-size:13px;letter-spacing:0.3px;'>Nie pamiętasz hasła? Wygeneruj klucz tymczasowy</a></div></div>");
 
   client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania Access Control</h2>");
@@ -697,7 +692,6 @@ void setup() {
   SPI.begin();
   RTC.begin(); 
   
-  // 🎲 Random Seed Initialization: Read electrical noise from raw pins to randomize tokens dynamically
   randomSeed(analogRead(0));
 
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
