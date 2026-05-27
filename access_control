@@ -9,17 +9,16 @@
 #include <EEPROM.h>
 #include "RTC.h" 
 
-// --- VERSION ---
-const char* app_version = "v2.6.3 - Log Engine Release";
+// --- VERSION CONTROL SNAPSHOT ---
+const char* app_version = "v2.7.0 - Genesis Core";
 
-// --- FALLBACK DEFAULTS ---
-char ssid[32] = "wifi_archer";         
-char pass[32] = "kupsenetabiedaku1!";     
-char admin_password[16] = "admin";       
-
-// --- TELEMETRY SERVER ENGINE (PROXMOX TARGET) ---
-const char* proxmox_log_server = "192.168.0.47";
-const int proxmox_log_port = 5000;
+// --- DYNAMIC CONFIGURATION HOLDER STRINGS ---
+char ssid[32] = "";         
+char pass[32] = "";     
+char admin_password[16] = "";       
+char proxmox_log_server[16] = ""; 
+int proxmox_log_port = 5000;
+bool telemetryEnabled = false;
 
 // --- PINS ---
 #define RELAY_PIN 4
@@ -49,6 +48,8 @@ struct User {
 bool doorOpen = false;
 bool learningMode = false;
 bool autoExitLearn = false; 
+bool provisioningMode = false; 
+bool isOfflineStandby = false; 
 User users[10];       
 bool isCardActive[10] = {true}; 
 int totalCards = 0;
@@ -64,6 +65,7 @@ unsigned long lockoutEndTime = 0;
 unsigned long accessEndTime = 0;
 bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
+unsigned long lastWifiRetryTime = 0; 
 
 // --- STORAGE MANAGEMENT ENGINE ---
 void loadConfiguration() {
@@ -71,17 +73,29 @@ void loadConfiguration() {
     EEPROM.get(260, ssid);
     EEPROM.get(292, pass);
     EEPROM.get(324, admin_password);
+    EEPROM.get(340, proxmox_log_server);
+    EEPROM.get(356, proxmox_log_port);
+    telemetryEnabled = (EEPROM.read(251) == 0x01);
+    provisioningMode = false; 
+  } else {
+    provisioningMode = true; 
   }
 }
 
-void saveConfiguration(String newSSID, String newPass, String newAdmin) {
+void saveConfiguration(String newSSID, String newPass, String newAdmin, String newTeleIP, int newTelePort, bool enableTele) {
   newSSID.toCharArray(ssid, 32);
   newPass.toCharArray(pass, 32);
   newAdmin.toCharArray(admin_password, 16);
+  newTeleIP.toCharArray(proxmox_log_server, 16);
+  proxmox_log_port = newTelePort;
+  telemetryEnabled = enableTele;
   
   EEPROM.put(260, ssid);
   EEPROM.put(292, pass);
   EEPROM.put(324, admin_password);
+  EEPROM.put(340, proxmox_log_server);
+  EEPROM.put(356, proxmox_log_port);
+  EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
   EEPROM.write(250, 0x55); 
 }
 
@@ -146,12 +160,26 @@ void updateDisplay(String status, String info = "") {
   display.display();
 }
 
-// 🔥 ASYNCHRONOUS PACKET BROKER: Sends explicit HTTP POST logs to your Proxmox server
+void displayProvisioningInstructions() {
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.setTextSize(1);
+  display.println("!!! PIERWSZA KONFIG !!!");
+  display.println("---------------------");
+  display.println("1. Polacz sie z Wi-Fi");
+  display.println("   SSID: ZAMEK_SETUP");
+  display.println("2. Otworz przegladarke");
+  display.println("3. Wejdz na adres IP:");
+  display.setTextSize(1);
+  display.println("   192.168.1.100");
+  display.display();
+}
+
 void sendExternalTelemetry(String logData) {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (!telemetryEnabled || WiFi.status() != WL_CONNECTED) return;
   
   WiFiClient telemetryClient;
-  telemetryClient.setTimeout(150); // Aggressive execution timeout bounds prevent loops from stuttering
+  telemetryClient.setTimeout(150); 
   
   if (telemetryClient.connect(proxmox_log_server, proxmox_log_port)) {
     telemetryClient.println("POST /log HTTP/1.1");
@@ -161,8 +189,6 @@ void sendExternalTelemetry(String logData) {
     telemetryClient.println("Connection: close");
     telemetryClient.println();
     telemetryClient.print(logData);
-    
-    // Quick flush sequence 
     telemetryClient.flush();
     telemetryClient.stop();
   }
@@ -175,15 +201,12 @@ void addLog(String msg) {
   sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
   String currentTime = String(timeBuffer);
 
-  // 1. Write to local scrolling UI array buffer limits
   if (logCount < MAX_LOGS) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
     for (int i = 0; i < MAX_LOGS - 1; i++) lastActions[i] = lastActions[i+1];
     lastActions[MAX_LOGS - 1] = {currentTime, msg};
   }
-
-  // 2. 🔥 Fire off permanent logging event straight to your Proxmox cluster
   sendExternalTelemetry(msg);
 }
 
@@ -198,8 +221,73 @@ void openDoor(String source) {
   addLog("Otwarto: " + source);
 }
 
-// --- ASYNCHRONOUS DATA ROUTER ENGINE ---
+// --- OUT-OF-THE-BOX CAPTIVE PROVISIONING ROUTER SERVICE ---
+void handleProvisioningServer() {
+  WiFiClient client = server.available();
+  if (!client) return;
+
+  String reqHeader = "";
+  while (client.connected()) {
+    if (client.available()) {
+      char c = client.read();
+      reqHeader += c;
+      if (c == '\n') break; 
+    }
+  }
+  while (client.available()) { client.read(); }
+
+  if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) {
+    int sIdx = reqHeader.indexOf("s=") + 2;
+    int pIdx = reqHeader.indexOf("&p=") + 3;
+    int aIdx = reqHeader.indexOf("&a=") + 3;
+    int tiIdx = reqHeader.indexOf("&ti=") + 4;
+    int tpIdx = reqHeader.indexOf("&tp=") + 4;
+    int teIdx = reqHeader.indexOf("&te=");
+    
+    String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
+    String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
+    String nAdmin = reqHeader.substring(aIdx, reqHeader.indexOf("&ti="));
+    String nTeleIP = reqHeader.substring(tiIdx, reqHeader.indexOf("&tp="));
+    
+    int spacePos = reqHeader.indexOf(" ", tpIdx);
+    int nextAmp = reqHeader.indexOf("&", tpIdx);
+    int endPortPos = (nextAmp != -1 && nextAmp < spacePos) ? nextAmp : spacePos;
+    String nTelePort = reqHeader.substring(tpIdx, endPortPos);
+    
+    bool runTele = (teIdx != -1);
+
+    nSSID.replace("+", " "); nPass.replace("+", " "); nAdmin.replace("+", " "); nTeleIP.replace("+", " ");
+    
+    saveConfiguration(nSSID, nPass, nAdmin, nTeleIP, nTelePort.toInt(), runTele);
+    
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyślnie!</h2><p>Urządzenie restartuje się i spróbuje połączyć z Twoją siecią domową...</p></body></html>");
+    delay(500); client.stop();
+    
+    tone(BUZZER_PIN, 2000, 800);
+    delay(1000);
+    NVIC_SystemReset(); 
+    return;
+  }
+
+  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
+  client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+  client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);}");
+  client.println("input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#2e7d32;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;} .desc{font-size:12px;color:#888;margin-top:-5px;margin-bottom:10px;display:block;}</style></head><body>");
+  client.println("<h2>⚙️ Kreator Pierwszej Konfiguracji</h2><div class='box'><form method='GET' action='/save_setup'>");
+  client.println("<h3>1. Sieć Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' required><br>");
+  client.println("<input type='password' name='p' placeholder='Hasło do Wi-Fi' required><br>");
+  client.println("<h3>2. Bezpieczeństwo Panelu</h3><input type='text' name='a' placeholder='Hasło Administratora WWW' maxlength='15' required><br>");
+  client.println("<span class='desc'>Będziesz używać tego hasła do zarządzania kartami i otwierania zamku przez przeglądarkę.</span>");
+  client.println("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logów (np. Proxmox)' value='192.168.1.100'><br>");
+  client.println("<input type='text' name='tp' placeholder='Port Telemetrii' value='5000'><br>");
+  client.println("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' checked> Włącz automatyczną wysyłkę telemetryczną</label><br>");
+  client.println("<input type='submit' class='btn' value='Zapisz Ustawienia i Uruchom'></form></div></body></html>");
+  delay(1); client.stop();
+}
+
 void handleWebServer() {
+  if (isOfflineStandby) return; 
+
   WiFiClient client = server.available();
   if (!client) return;
 
@@ -408,7 +496,7 @@ void handleWebServer() {
       String nAdmin = reqHeader.substring(aIdx, spaceIdx);
       
       nSSID.replace("+", " "); nPass.replace("+", " ");
-      saveConfiguration(nSSID, nPass, nAdmin);
+      saveConfiguration(nSSID, nPass, nAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled);
       addLog("Zapisano ustawienia");
       
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
@@ -416,7 +504,6 @@ void handleWebServer() {
     }
   }
 
-  // --- HTML CONSOLE VIEW CONTAINER ---
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
   client.println("Connection: close");
@@ -432,7 +519,7 @@ void handleWebServer() {
   client.println("<script>var pass=''; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
-  client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
+  client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/html;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
   client.println("function handleClearLogs(){ let v=prompt('Wpisz godzinę w formacie HH:MM (np. 18:00), aby usunąć logi STARSZE niż podany czas, lub wpisz \"all\" aby wyczyścić cały dziennik:', 'all'); if(v && v.trim().length > 0){ runCmd('/api/clear_logs?time='+encodeURIComponent(v.trim())); } } ");
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
   client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');return;} ");
@@ -509,11 +596,27 @@ void setup() {
   RTC.begin(); 
   
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+
+  // 🛠️ INITIAL OUT-OF-THE-BOX SETUP PORTAL INTERCEPT
+  if (provisioningMode) {
+    displayProvisioningInstructions(); 
+    
+    WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
+    WiFi.beginAP("ZAMEK_SETUP");
+    server.begin();
+    
+    while (true) {
+      handleProvisioningServer();
+      delay(10);
+    }
+  }
+
+  // 🛡️ RECOVERY INITIALIZATION
   updateDisplay("Laczenie z WiFi... ");
-  
   WiFi.begin(ssid, pass);
+  
   unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) {
     delay(500);
   }
 
@@ -536,6 +639,8 @@ void setup() {
     tone(BUZZER_PIN, 1300, 120); delay(140);
     tone(BUZZER_PIN, 1600, 300);
   } else {
+    // POWER SURGE AMBUSH SAFETY NET
+    isOfflineStandby = true;
     forceHardwareRFIDReset();
     updateDisplay("Gotowy", "Tryb Offline");
     tone(BUZZER_PIN, 300, 600);
@@ -543,7 +648,24 @@ void setup() {
 }
 
 void loop() {
-  handleWebServer(); 
+  if (!isOfflineStandby) {
+    handleWebServer(); 
+  } else {
+    // SILENT SELF-HEALING ENGINE
+    if (millis() - lastWifiRetryTime > 60000) {
+      lastWifiRetryTime = millis();
+      
+      if (WiFi.status() != WL_CONNECTED) {
+        WiFi.begin(ssid, pass); 
+      } else {
+        isOfflineStandby = false;
+        server.begin();
+        updateDisplay("Gotowy", WiFi.localIP().toString());
+        addLog("Polaczenie Wi-Fi przywrocone");
+        tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
+      }
+    }
+  }
 
   // --- NON-BLOCKING WATCHDOG RESET ---
   if (rfidResetPending && !doorOpen && (millis() - lastScanTime > 1000)) {
@@ -552,7 +674,7 @@ void loop() {
     if (learningMode) {
       updateDisplay("TRYB UCZENIA", pendingUsername);
     } else {
-      updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+      updateDisplay("Gotowy", isOfflineStandby ? "Tryb Offline" : WiFi.localIP().toString());
     }
   }
 
@@ -570,7 +692,11 @@ void loop() {
       digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW);
       digitalWrite(LED_GREEN, LOW);
     } else {
-      digitalWrite(LED_RED, HIGH);
+      if (isOfflineStandby) {
+        digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH);
+      } else {
+        digitalWrite(LED_RED, HIGH);
+      }
       digitalWrite(LED_GREEN, LOW);
     }
   }
@@ -648,7 +774,7 @@ void loop() {
           updateDisplay("TRYB UCZENIA", pendingUsername);
           tone(BUZZER_PIN, 1500, 400);
         } else {
-          updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+          updateDisplay("Gotowy", isOfflineStandby ? "Tryb Offline" : WiFi.localIP().toString());
           tone(BUZZER_PIN, 800, 400);
         }
         while(digitalRead(BUTTON_PIN) == LOW); 
@@ -672,6 +798,6 @@ void loop() {
 
     digitalWrite(LED_GREEN, LOW);
     digitalWrite(LED_RED, HIGH);
-    updateDisplay("Gotowy", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Offline");
+    updateDisplay("Gotowy", isOfflineStandby ? "Tryb Offline" : WiFi.localIP().toString());
   }
 }
