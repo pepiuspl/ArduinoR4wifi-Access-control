@@ -31,6 +31,10 @@ char proxmox_log_server[16] = "";
 int proxmox_log_port = 5000;
 bool telemetryEnabled = false;
 
+// --- RECOVERY LIFELINE STORAGE ---
+char temporary_password[8] = "";
+bool hasTemporaryPassword = false;
+
 // --- PINS ---
 #define RELAY_PIN 4
 #define BUTTON_PIN 5
@@ -143,6 +147,10 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   EEPROM.put(356, proxmox_log_port);
   EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
   EEPROM.write(250, 0x55); 
+
+  // Clean out tracking values to prevent token reuse vulnerabilities
+  hasTemporaryPassword = false;
+  memset(temporary_password, 0, sizeof(temporary_password));
 }
 
 void factoryResetSettings() {
@@ -363,6 +371,20 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
+  // 🔥 UN-AUTHENTICATED API INTERCEPT: Generates and channels recovery tokens securely to logfiles
+  if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
+    long tokenNum = random(100000, 999999);
+    sprintf(temporary_password, "%ld", tokenNum);
+    hasTemporaryPassword = true;
+    
+    addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
+    updateDisplay("RESET HASLA", "Token wyslany do logow");
+    tone(BUZZER_PIN, 1400, 400);
+    
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
+    delay(1); client.stop(); return;
+  }
+
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
     client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
     delay(1); client.stop(); return;
@@ -378,11 +400,15 @@ void handleWebServer() {
     attemptedPass = reqHeader.substring(passPos + 5, endPos);
   }
 
-  // 🔥 Patched: Symmetrical parsing passes the login query inputs directly through the hex decoder before checking parameters
   String decodedAttempt = urlDecode(attemptedPass);
-  bool isAuthenticated = (passPos != -1 && decodedAttempt == String(admin_password));
+  
+  // Accept standard master keys or active recovery tokens symmetrically
+  bool authPermanent = (passPos != -1 && decodedAttempt == String(admin_password));
+  bool authTemporary = (passPos != -1 && hasTemporaryPassword && decodedAttempt == String(temporary_password));
+  bool isAuthenticated = (authPermanent || authTemporary);
 
-  if (passPos != -1) {
+  bool isApiRequest = (reqHeader.indexOf("/api/") != -1);
+  if (passPos != -1 && isApiRequest) {
     if (!isAuthenticated && decodedAttempt.length() > 0) {
       failedLoginAttempts++;
       if (failedLoginAttempts >= 5) {
@@ -553,14 +579,17 @@ void handleWebServer() {
       int sIdx = reqHeader.indexOf("s=") + 2;
       int pIdx = reqHeader.indexOf("&p=") + 3;
       int aIdx = reqHeader.indexOf("&a=") + 3;
-      int spaceIdx = reqHeader.indexOf(" ", sIdx);
       
       String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
       String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
-      String nAdmin = reqHeader.substring(aIdx, spaceIdx);
       
-      nSSID.replace("+", " "); nPass.replace("+", " ");
-      saveConfiguration(nSSID, nPass, nAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled);
+      int nextAmp = reqHeader.indexOf("&", aIdx);
+      int spaceIdx = reqHeader.indexOf(" ", aIdx);
+      int endPortPos = (nextAmp != -1 && nextAmp < spaceIdx) ? nextAmp : spaceIdx;
+      String nAdmin = reqHeader.substring(aIdx, endPortPos);
+      
+      String decSSID = urlDecode(nSSID); String decPass = urlDecode(nPass); String decAdmin = urlDecode(nAdmin);
+      saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled);
       addLog("Zapisano ustawienia");
       
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
@@ -585,25 +614,31 @@ void handleWebServer() {
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
   client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
   client.println("function handleClearLogs(){ let v=prompt('Wpisz godzinę w formacie HH:MM (np. 18:00), aby usunąć logi STARSZE niż podany czas, lub wpisz \"all\" aby wyczyścić cały dziennik:', 'all'); if(v && v.trim().length > 0){ runCmd('/api/clear_logs?time='+encodeURIComponent(v.trim())); } } ");
+  
+  // 🔘 Form Recovery Link Trigger Handler
+  client.println("function triggerReset(){ if(confirm('Wygenerować jednorazowe hasło ratunkowe? Zostanie ono zapisane w logach systemowych.')){ fetch('/api/forgot_password').then(()=>alert('Hasło tymczasowe wygenerowane! Sprawdź ekran OLED lub logi Proxmox.')); } } ");
+
   client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
-  
-  // 🔥 Patched: If background authentication loop fails, zero out local JS string immediately to freeze spamming
   client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');pass='';return;} ");
-  
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
   client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
   client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
   client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong> ${u.idx==0?'<span style=\"color:#ff8f00;font-size:11px;\">[SUPER-USER]</span>':''}<br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;white-space:nowrap;\"><a href=\"#\" onclick=\"runCmd('/api/toggle_user_active?idx='+${u.idx})\" style=\"color:${u.active?'#81c784':'#ffb300'};text-decoration:none;margin-right:16px;font-weight:bold;\">${u.active?'🟢 Aktywna':'🔴 Zablokowana'}</a><a href=\"#\" onclick=\"renameUser(${u.idx},'${u.name}')\" style=\"color:#64b5f6;text-decoration:none;margin-right:12px;\">✏️ Edytuj</a><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
   client.println("document.getElementById('v-users').innerHTML=uH?uH:'<tr><td>Baza pusta</td></tr>'; ");
   client.println("let lH=''; d.logs.forEach(l=>{ lH+=`<tr><td>${l}</td></tr>`; }); document.getElementById('v-logs').innerHTML=lH; ");
-  client.println("document.getElementById('cfg-ssid').value=d.ssid; });} ");
+  client.println("if(document.activeElement.id !== 'cfg-ssid') document.getElementById('cfg-ssid').value=d.ssid; ");
+  client.println("if(document.activeElement.id !== 'cfg-admin') document.getElementById('cfg-admin').value=d.admin_pass; ");
+  client.println("});} ");
   client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); setInterval(updateData,2000);}; ");
-  client.println("function saveCfg(){let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Zrestartuj urządzenie.');} </script></head><body>");
+  client.println("function saveCfg(){let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Urządzenie zostanie zaktualizowane.');} </script></head><body>");
 
   client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
   client.println("<div class='box'><form method='GET' action='/'>");
   client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
-  client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form></div></div>");
+  client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form>");
+  
+  // Render explicit Recovery link option to the login dialog container box
+  client.println("<br><a href='#' onclick='triggerReset()' style='color:#e57373;text-decoration:none;font-size:13px;letter-spacing:0.3px;'>Nie pamiętasz hasła? Wygeneruj klucz tymczasowy</a></div></div>");
 
   client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania Access Control</h2>");
   client.println("<div class='box'><h3>Status Urządzenia</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Rygiel: <strong id='v-lock'>-</strong></p></div>");
@@ -613,9 +648,9 @@ void handleWebServer() {
   client.println("<div class='box'><h3>👥 Baza Użytkowników</h3><table class='log-table' id='v-users'></table></div>");
   
   client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
-  client.println("<input type='text' id='cfg-ssid' placeholder='Nowe WiFi SSID'><br>");
-  client.println("<input type='password' id='cfg-pass' placeholder='Nowe WiFi Hasło'><br>");
-  client.println("<input type='text' id='cfg-admin' placeholder='Nowe Hasło Web Panelu'><br>");
+  client.println("<input type='text' id='cfg-ssid' placeholder='WiFi SSID'><br>");
+  client.println("<input type='password' id='cfg-pass' placeholder='Wpisz nowe hasło do Wi-Fi (opcjonalnie)'><br>");
+  client.println("<input type='text' id='cfg-admin' placeholder='Hasło Panelu Administratora'><br>");
   client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
   
   client.println("<div class='box'><h3>Dziennik Zdarzeń (Max 30 wpisów)</h3>");
@@ -662,6 +697,9 @@ void setup() {
   SPI.begin();
   RTC.begin(); 
   
+  // 🎲 Random Seed Initialization: Read electrical noise from raw pins to randomize tokens dynamically
+  randomSeed(analogRead(0));
+
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
 
   if (provisioningMode) {
@@ -865,7 +903,6 @@ void loop() {
       delay(10);
     }
     if (!longPressed && (millis() - pressTime > 50)) {
-      // 🔥 FAIL-SAFE RESET: Pushing the physical board button instantly zeroes out any software lockouts!
       failedLoginAttempts = 0;
       lockoutEndTime = 0;
       openDoor("Przycisk");
