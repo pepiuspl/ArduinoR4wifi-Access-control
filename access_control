@@ -418,7 +418,7 @@ void handleWebServer() {
     String decodedAdmin = urlDecode(rawAdmin); String decodedTeleIP = urlDecode(rawTeleIP);
     
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Zapisano w EEPROM!</h2><p>Uruchamianie ponowne...</p></body></html>");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>Zapisano w EEPROM!</h2><p>Uruchamianie ponowne...</p></body></html>");
     delay(500); client.stop();
     tone(BUZZER_PIN, 2000, 800); delay(1000);
     NVIC_SystemReset();
