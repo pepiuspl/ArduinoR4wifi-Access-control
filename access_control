@@ -13,8 +13,8 @@
 const char* app_version = "v2.6.3 - Log Engine Release";
 
 // --- FALLBACK DEFAULTS ---
-char ssid[32] = "YOUR_WIFI_NAME";         
-char pass[32] = "YOUR_WIFI_PASSWORD";     
+char ssid[32] = "wifi_archer";         
+char pass[32] = "kupsenetabiedaku1!";     
 char admin_password[16] = "admin";       
 
 // --- TELEMETRY SERVER ENGINE (PROXMOX TARGET) ---
