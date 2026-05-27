@@ -606,6 +606,9 @@ void handleWebServer() {
   client.println("input[type=password], input[type=text]{padding:10px;width:75%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:12px;box-sizing:border-box;}");
   client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;} .hide{display:none;}</style>");
   
+  // 🔥 Global JS Visibility Handler injected right at the head layout configuration bounds
+  client.println("<script>function togglePassVisibility(id){var x=document.getElementById(id); if(x.type==='password'){x.type='text';}else{x.type='password';}}</script>");
+  
   client.println("<script>var pass=''; var dataTimer; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
   client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
   client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
@@ -618,20 +621,22 @@ void handleWebServer() {
   client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
   client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
   client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
-  client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong> ${u.idx==0?'<span style=\"color:#ff8f00;font-size:11px;\">[SUPER-USER]</span>':''}<br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;white-space:nowrap;\"><a href=\"#\" onclick=\"runCmd('/api/toggle_user_active?idx='+${u.idx})\" style=\"color:${u.active?'#81c784':'#ffb300'};text-decoration:none;margin-right:16px;font-weight:bold;\">${u.active?'🟢 Aktywna':'🔴 Zablokowana'}</a><a href=\"#\" onclick=\"renameUser(${u.idx},'${u.name}')\" style=\"color:#64b5f6;text-decoration:none;margin-right:12px;\">✏️ Edytuj</a><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
+  client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong><br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;white-space:nowrap;\"><a href=\"#\" onclick=\"runCmd('/api/toggle_user_active?idx='+${u.idx})\" style=\"color:${u.active?'#81c784':'#ffb300'};text-decoration:none;margin-right:16px;font-weight:bold;\">${u.active?'🟢 Aktywna':'🔴 Zablokowana'}</a><a href=\"#\" onclick=\"renameUser(${u.idx},'${u.name}')\" style=\"color:#64b5f6;text-decoration:none;margin-right:12px;\">✏️ Edytuj</a><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
   client.println("document.getElementById('v-users').innerHTML=uH?uH:'<tr><td>Baza pusta</td></tr>'; ");
   client.println("let lH=''; d.logs.forEach(l=>{ lH+=`<tr><td>${l}</td></tr>`; }); document.getElementById('v-logs').innerHTML=lH; ");
   client.println("if(document.activeElement.id !== 'cfg-ssid') document.getElementById('cfg-ssid').value=d.ssid; ");
   client.println("if(document.activeElement.id !== 'cfg-admin') document.getElementById('cfg-admin').value=d.admin_pass; ");
   client.println("});} ");
   client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); dataTimer=setInterval(updateData,2000);}; ");
-  
-  // 🔥 Patched save sequence forces data timer clear cycles immediately to insulate transaction handshakes
   client.println("function saveCfg(){ clearInterval(dataTimer); let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Urządzenie zostanie zaktualizowane.');} </script></head><body>");
 
   client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
   client.println("<div class='box'><form method='GET' action='/'>");
+  
+  // 👁️ Added visibility toggle to the lock screen login interface panel
   client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
+  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
+  
   client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form>");
   client.println("<br><a href='#' onclick='triggerReset()' style='color:#e57373;text-decoration:none;font-size:13px;letter-spacing:0.3px;'>Nie pamiętasz hasła? Wygeneruj klucz tymczasowy</a></div></div>");
 
@@ -644,8 +649,14 @@ void handleWebServer() {
   
   client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
   client.println("<input type='text' id='cfg-ssid' placeholder='WiFi SSID'><br>");
+  
+  // 👁️ Added visibility checkbox options cleanly alongside the main system administration configuration inputs
   client.println("<input type='password' id='cfg-pass' placeholder='Wpisz nowe hasło do Wi-Fi (opcjonalnie)'><br>");
-  client.println("<input type='text' id='cfg-admin' placeholder='Hasło Panelu Administratora'><br>");
+  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-pass\")'> 👁️ Pokaz wpisane haslo</label>");
+  
+  client.println("<input type='password' id='cfg-admin' placeholder='Hasło Panelu Administratora'><br>");
+  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-admin\")'> 👁️ Pokaz wpisane haslo</label>");
+  
   client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
   
   client.println("<div class='box'><h3>Dziennik Zdarzeń (Max 30 wpisów)</h3>");
@@ -858,7 +869,7 @@ void loop() {
         }
       }
       if (valid) {
-        if (matchedIndex == 0 || isCardActive[matchedIndex]) {
+        if (isCardActive[matchedIndex]) {
           openDoor(String(users[matchedIndex].name) + " [" + uidStr + "]"); 
         } else {
           addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
