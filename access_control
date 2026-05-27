@@ -18,7 +18,7 @@ char pass[32] = "kupsenetabiedaku1!";
 char admin_password[16] = "admin";       
 
 // --- TELEMETRY SERVER ENGINE (PROXMOX TARGET) ---
-const char* proxmox_log_server = "192.168.0.XX"; // 👈 Type your Debian CT / Docker IP address here
+const char* proxmox_log_server = "192.168.0.47";
 const int proxmox_log_port = 5000;
 
 // --- PINS ---
