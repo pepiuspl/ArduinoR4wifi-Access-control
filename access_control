@@ -12,7 +12,7 @@
 // --- VERSION CONTROL SNAPSHOT ---
 const char* app_version = "v2.7.0 - Genesis Core";
 
-// --- USER DATABASE STRUCTURE (Declared first to fix compile order) ---
+// --- USER DATABASE STRUCTURE ---
 struct User {
   byte uid[4];
   char name[16]; 
@@ -87,7 +87,7 @@ void loadConfiguration() {
     provisioningMode = true; 
     hasSavedConfig = false;
     strcpy(admin_password, "admin");
-    strcpy(proxmox_log_server, "192.168.1.100");
+    strcpy(proxmox_log_server, "192.168.4.1");
   }
 }
 
@@ -183,7 +183,8 @@ void displayProvisioningInstructions(String errorContext = "") {
   display.println("   SSID: ZAMEK_SETUP");
   display.println("2. Otworz przegladarke");
   display.println("3. Wejdz na adres IP:");
-  display.println("   192.168.1.100");
+  // 🔥 Patched: Update instruction text to point to the stable default address
+  display.println("   192.168.4.1");
   display.display();
 }
 
@@ -295,7 +296,7 @@ void handleProvisioningServer() {
   client.println("<div class='box'><form method='GET' action='/save_setup'>");
   client.print("<h3>1. Siec Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
   client.print("<input type='password' name='p' placeholder='Haslo do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
-  client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='text' name='a' placeholder='Haslo Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
+  client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='text' name='a' placeholder='Hasło Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
   client.println("<span class='desc'>Bedziesz uzywac tego hasla do zarzadzania kartami i otwierania zamku przez przegladarke.</span>");
   client.print("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logow' value='"); client.print(proxmox_log_server); client.print("'><br>");
   client.print("<input type='text' name='tp' placeholder='Port Telemetrii' value='"); client.print(proxmox_log_port); client.print("'><br>");
@@ -614,10 +615,10 @@ void setup() {
   
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
 
-  // 🛠| INITIAL OUT-OF-THE-BOX SETUP PORTAL INTERCEPT
+  // 🛠️ TRUE FIRST TIME OUT-OF-THE-BOX INITIALIZATION
   if (provisioningMode) {
     displayProvisioningInstructions(); 
-    WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
+    // 🔥 Fixed: Drop WiFi.config() to avoid freezing the ESP32 module coprocessor layout
     WiFi.beginAP("ZAMEK_SETUP");
     server.begin();
     while (true) {
@@ -636,7 +637,7 @@ void setup() {
     delay(500);
     counter++;
     if (counter == 8)  updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [======]");
-    if (counter == 16) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [========]");
+    if (counter == 16) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -659,13 +660,12 @@ void setup() {
     tone(BUZZER_PIN, 1600, 300);
   } else {
     // 🔥 ACTIVE RECOVERY RESCUE PORTAL OVERRIDE
-    // Home router missing or typo detected. Keep the configuration portal alive!
     isOfflineStandby = true;
     forceHardwareRFIDReset();
     displayProvisioningInstructions("ERR: BLAD LACZENIA!");
     
     WiFi.disconnect();
-    WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
+    // 🔥 Fixed: Dropped the static configuration bounds, forcing native radio channel setups
     WiFi.beginAP("ZAMEK_SETUP");
     server.begin();
     tone(BUZZER_PIN, 300, 600);
@@ -676,7 +676,7 @@ void loop() {
   if (isOfflineStandby) {
     handleProvisioningServer();
     
-    // Non-blocking self-healing retry block runs quietly in background every 45 seconds
+    // Non-blocking background recovery check loop executes silently every 45 seconds
     if (millis() - lastWifiRetryTime > 45000) {
       lastWifiRetryTime = millis();
       
@@ -684,14 +684,12 @@ void loop() {
       delay(200); 
       if (WiFi.status() == WL_CONNECTED) {
         isOfflineStandby = false;
-        // In WiFiS3 calling begin() gracefully overrides AP mode automatically without explicit teardown methods
         server.begin();
         updateDisplay("Gotowy", WiFi.localIP().toString());
         addLog("Polaczenie Wi-Fi przywrocone");
         tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
       } else {
         WiFi.disconnect();
-        WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
         WiFi.beginAP("ZAMEK_SETUP");
       }
     }
