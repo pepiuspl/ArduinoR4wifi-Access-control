@@ -38,18 +38,13 @@ WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200); 
 WiFiServer server(80); 
 
-// --- USER DATABASE STRUCTURE ---
-struct User {
-  byte uid[4];
-  char name[16]; 
-};
-
 // --- SYSTEM VARIABLES ---
 bool doorOpen = false;
 bool learningMode = false;
 bool autoExitLearn = false; 
 bool provisioningMode = false; 
 bool isOfflineStandby = false; 
+bool hasSavedConfig = false;
 User users[10];       
 bool isCardActive[10] = {true}; 
 int totalCards = 0;
@@ -67,6 +62,12 @@ bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 unsigned long lastWifiRetryTime = 0; 
 
+// --- USER DATABASE STRUCTURE ---
+struct User {
+  byte uid[4];
+  char name[16]; 
+};
+
 // --- STORAGE MANAGEMENT ENGINE ---
 void loadConfiguration() {
   if (EEPROM.read(250) == 0x55) {
@@ -77,8 +78,13 @@ void loadConfiguration() {
     EEPROM.get(356, proxmox_log_port);
     telemetryEnabled = (EEPROM.read(251) == 0x01);
     provisioningMode = false; 
+    hasSavedConfig = true;
   } else {
     provisioningMode = true; 
+    hasSavedConfig = false;
+    // Set out-of-the-box defaults for form fields if memory is blank
+    strcpy(admin_password, "admin");
+    strcpy(proxmox_log_server, "192.168.1.100");
   }
 }
 
@@ -160,17 +166,20 @@ void updateDisplay(String status, String info = "") {
   display.display();
 }
 
-void displayProvisioningInstructions() {
+void displayProvisioningInstructions(String errorContext = "") {
   display.clearDisplay();
   display.setCursor(0,0);
   display.setTextSize(1);
-  display.println("!!! PIERWSZA KONFIG !!!");
+  if (errorContext != "") {
+    display.println(errorContext);
+  } else {
+    display.println("!!! PIERWSZA KONFIG !!!");
+  }
   display.println("---------------------");
   display.println("1. Polacz sie z Wi-Fi");
   display.println("   SSID: ZAMEK_SETUP");
   display.println("2. Otworz przegladarke");
   display.println("3. Wejdz na adres IP:");
-  display.setTextSize(1);
   display.println("   192.168.1.100");
   display.display();
 }
@@ -221,7 +230,7 @@ void openDoor(String source) {
   addLog("Otwarto: " + source);
 }
 
-// --- OUT-OF-THE-BOX CAPTIVE PROVISIONING ROUTER SERVICE ---
+// --- OUT-OF-THE-BOX & RESCUE PROVISIONING ROUTER SERVICE ---
 void handleProvisioningServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -272,22 +281,28 @@ void handleProvisioningServer() {
   client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);}");
-  client.println("input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#2e7d32;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;} .desc{font-size:12px;color:#888;margin-top:-5px;margin-bottom:10px;display:block;}</style></head><body>");
-  client.println("<h2>⚙️ Kreator Pierwszej Konfiguracji</h2><div class='box'><form method='GET' action='/save_setup'>");
-  client.println("<h3>1. Sieć Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' required><br>");
-  client.println("<input type='password' name='p' placeholder='Hasło do Wi-Fi' required><br>");
-  client.println("<h3>2. Bezpieczeństwo Panelu</h3><input type='text' name='a' placeholder='Hasło Administratora WWW' maxlength='15' required><br>");
+  client.println("input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#2e7d32;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;} .desc{font-size:12px;color:#888;margin-top:-5px;margin-bottom:10px;display:block;} .warn{background:#b71c1c;padding:12px;border-radius:5px;font-size:14px;margin-bottom:15px;line-height:1.4;}</style></head><body>");
+  client.println("<h2>⚙️ Kreator Pierwszej Konfiguracji</h2>");
+  
+  // 🟢 Dynamic Form Intercept Notice: Warns user of typo values retained in active state variables
+  if (hasSavedConfig) {
+    client.print("<div class='box' style='border:2px solid #b71c1c;'><div class='warn'>⚠️ <strong>BŁĄD POŁĄCZENIA!</strong><br>Urządzenie nie mogło połączyć się z siecią: ");
+    client.print(ssid); client.println("<br>Sprawdź czy nazwa i hasło są poprawne. Formularz poniżej został uzupełniony błędnymi danymi w celu poprawki.</div></div>");
+  }
+
+  client.println("<div class='box'><form method='GET' action='/save_setup'>");
+  client.print("<h3>1. Sieć Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
+  client.print("<input type='password' name='p' placeholder='Hasło do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
+  client.print("<h3>2. Bezpieczeństwo Panelu</h3><input type='text' name='a' placeholder='Hasło Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
   client.println("<span class='desc'>Będziesz używać tego hasła do zarządzania kartami i otwierania zamku przez przeglądarkę.</span>");
-  client.println("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logów (np. Proxmox)' value='192.168.1.100'><br>");
-  client.println("<input type='text' name='tp' placeholder='Port Telemetrii' value='5000'><br>");
-  client.println("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' checked> Włącz automatyczną wysyłkę telemetryczną</label><br>");
+  client.print("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logów' value='"); client.print(proxmox_log_server); client.print("'><br>");
+  client.print("<input type='text' name='tp' placeholder='Port Telemetrii' value='"); client.print(proxmox_log_port); client.print("'><br>");
+  client.print("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' "); client.print(telemetryEnabled ? "checked" : ""); client.println("> Włącz automatyczną wysyłkę telemetryczną</label><br>");
   client.println("<input type='submit' class='btn' value='Zapisz Ustawienia i Uruchom'></form></div></body></html>");
   delay(1); client.stop();
 }
 
 void handleWebServer() {
-  if (isOfflineStandby) return; 
-
   WiFiClient client = server.available();
   if (!client) return;
 
@@ -597,27 +612,29 @@ void setup() {
   
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
 
-  // 🛠️ INITIAL OUT-OF-THE-BOX SETUP PORTAL INTERCEPT
+  // 🛠️ TRUE FIRST TIME OUT-OF-THE-BOX INITIALIZATION
   if (provisioningMode) {
     displayProvisioningInstructions(); 
-    
     WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
     WiFi.beginAP("ZAMEK_SETUP");
     server.begin();
-    
     while (true) {
       handleProvisioningServer();
       delay(10);
     }
   }
 
-  // 🛡️ RECOVERY INITIALIZATION
-  updateDisplay("Laczenie z WiFi... ");
+  // 🛡️ PROGRESS-AWARE ROUTER UPLINK ROUTINE
+  updateDisplay("Wi-Fi: Laczenie...", "Proba: 1/3 [....]");
   WiFi.begin(ssid, pass);
   
   unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) {
+  int counter = 0;
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
     delay(500);
+    counter++;
+    if (counter == 10) updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [......]");
+    if (counter == 20) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -639,32 +656,49 @@ void setup() {
     tone(BUZZER_PIN, 1300, 120); delay(140);
     tone(BUZZER_PIN, 1600, 300);
   } else {
-    // POWER SURGE AMBUSH SAFETY NET
+    // 🔥 DYNAMIC ACTIVE HOTSPOT LIFELINE
+    // If a power surge lag happens or user makes a typo, keep the hotspot alive at 192.168.1.100 as a rescue line!
     isOfflineStandby = true;
     forceHardwareRFIDReset();
-    updateDisplay("Gotowy", "Tryb Offline");
+    displayProvisioningInstructions("ERR: BLAD LACZENIA!");
+    
+    WiFi.disconnect();
+    WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
+    WiFi.beginAP("ZAMEK_SETUP");
+    server.begin();
     tone(BUZZER_PIN, 300, 600);
   }
 }
 
 void loop() {
-  if (!isOfflineStandby) {
-    handleWebServer(); 
-  } else {
-    // SILENT SELF-HEALING ENGINE
-    if (millis() - lastWifiRetryTime > 60000) {
+  // If offline hotspot rescue line is running, keep handling the provisioning server
+  if (isOfflineStandby) {
+    handleProvisioningServer();
+    
+    // Non-blocking self-healing background check runs every 45 seconds to check if home router has appeared
+    if (millis() - lastWifiRetryTime > 45000) {
       lastWifiRetryTime = millis();
       
-      if (WiFi.status() != WL_CONNECTED) {
-        WiFi.begin(ssid, pass); 
-      } else {
+      // Attempt a quick scan to check if home network is reachable
+      WiFi.begin(ssid, pass);
+      delay(200); 
+      if (WiFi.status() == WL_CONNECTED) {
+        // Router found! Tear down emergency hotspot and go online smoothly
         isOfflineStandby = false;
+        WiFi.endAP(); 
         server.begin();
         updateDisplay("Gotowy", WiFi.localIP().toString());
         addLog("Polaczenie Wi-Fi przywrocone");
         tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
+      } else {
+        // Still no router, fall back immediately to hosting the rescue portal
+        WiFi.disconnect();
+        WiFi.config(IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(192, 168, 1, 100), IPAddress(255, 255, 255, 0));
+        WiFi.beginAP("ZAMEK_SETUP");
       }
     }
+  } else {
+    handleWebServer(); 
   }
 
   // --- NON-BLOCKING WATCHDOG RESET ---
@@ -674,7 +708,7 @@ void loop() {
     if (learningMode) {
       updateDisplay("TRYB UCZENIA", pendingUsername);
     } else {
-      updateDisplay("Gotowy", isOfflineStandby ? "Tryb Offline" : WiFi.localIP().toString());
+      updateDisplay("Gotowy", isOfflineStandby ? "Rescue Hotspot" : WiFi.localIP().toString());
     }
   }
 
@@ -693,6 +727,7 @@ void loop() {
       digitalWrite(LED_GREEN, LOW);
     } else {
       if (isOfflineStandby) {
+        // Flash red status indicating it is hosted on emergency recovery mode
         digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH);
       } else {
         digitalWrite(LED_RED, HIGH);
@@ -774,7 +809,7 @@ void loop() {
           updateDisplay("TRYB UCZENIA", pendingUsername);
           tone(BUZZER_PIN, 1500, 400);
         } else {
-          updateDisplay("Gotowy", isOfflineStandby ? "Tryb Offline" : WiFi.localIP().toString());
+          updateDisplay("Gotowy", isOfflineStandby ? "Rescue Hotspot" : WiFi.localIP().toString());
           tone(BUZZER_PIN, 800, 400);
         }
         while(digitalRead(BUTTON_PIN) == LOW); 
@@ -798,6 +833,6 @@ void loop() {
 
     digitalWrite(LED_GREEN, LOW);
     digitalWrite(LED_RED, HIGH);
-    updateDisplay("Gotowy", isOfflineStandby ? "Tryb Offline" : WiFi.localIP().toString());
+    updateDisplay("Gotowy", isOfflineStandby ? "Rescue Hotspot" : WiFi.localIP().toString());
   }
 }
