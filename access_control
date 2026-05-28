@@ -1,35 +1,41 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <U8g2lib.h>
 
-// -------------------------------------------------------------------
-// CONFIGURATION: If the screen stays black on the first push, 
-// comment out Option 1 and uncomment Option 2 for your next commit!
-// -------------------------------------------------------------------
-
-// OPTION 1: For 1.3" OLEDs (Commonly uses SH1106 chip)
-// U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
-
-// OPTION 2: For 0.96" or large alternative OLEDs (Uses SSD1306 chip)
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
-
+const int LED_PIN = LED_BUILTIN; // The onboard LED on your Uno R4
 
 void setup() {
-  // Start the screen communication
-  u8g2.begin();
+  pinMode(LED_PIN, OUTPUT);
+  Wire.begin();
+  
+  // Fast blink 3 times on bootup so we know the code flashed successfully
+  for(int i = 0; i < 3; i++) {
+    digitalWrite(LED_PIN, HIGH); delay(100);
+    digitalWrite(LED_PIN, LOW);  delay(100);
+  }
+  delay(1000);
 }
 
 void loop() {
-  u8g2.clearBuffer();					         // Clear the display's internal memory
-  
-  u8g2.setFont(u8g2_font_ncenB10_tr);	 // Choose a clean, easy-to-read font
-  u8g2.drawStr(0, 15, "GitHub Flash OK!"); // Draw text at X=0, Y=15
-  
-  u8g2.setFont(u8g2_font_6x10_tf);
-  u8g2.drawStr(0, 40, "Hardware is awake");
-  u8g2.drawStr(0, 55, "Testing I2C...");
-  
-  u8g2.sendBuffer();					         // Push the data physically to the screen pixels
-  
-  delay(2000);  
+  bool deviceFound = false;
+
+  // Scan all possible I2C addresses (1 to 127)
+  for (byte address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    byte error = Wire.endTransmission();
+
+    if (error == 0) {
+      deviceFound = true; // Something is alive out there!
+      break; 
+    }
+  }
+
+  if (deviceFound) {
+    // SUCCESS: If the Arduino physically sees the screen, the onboard LED will blink FAST
+    digitalWrite(LED_PIN, HIGH); delay(100);
+    digitalWrite(LED_PIN, LOW);  delay(100);
+  } else {
+    // FAILURE: If there is no electrical connection, the onboard LED will pulse SLOWLY
+    digitalWrite(LED_PIN, HIGH); delay(1000);
+    digitalWrite(LED_PIN, LOW);  delay(1000);
+  }
 }
