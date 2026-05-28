@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.7.1 - Genesis Core";
+const char* app_version = "v2.7.0 - Genesis Core";
 
 // --- USER DATABASE STRUCTURES (Declared first to fix compile order) ---
 struct User {
