@@ -968,3 +968,4 @@ digitalWrite(LED_GREEN, LOW);
 digitalWrite(LED_RED, HIGH);
 updateDisplay("Gotowy", isOfflineStandby ? "Rescue Hotspot" : WiFi.localIP().toString());
 }
+}
