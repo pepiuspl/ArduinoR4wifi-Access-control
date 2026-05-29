@@ -1,6 +1,6 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SH110X.h> // FIXED: Corrected library header name
+#include <Adafruit_SH110X.h> 
 #include <SPI.h>
 #include <MFRC522.h>
 #include <WiFiS3.h> 
@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.7.0 - Genesis Core";
+const char* app_version = "v2.7.1 - Genesis Core";
 
 // --- USER DATABASE STRUCTURES (Declared first to fix compile order) ---
 struct User {
@@ -45,10 +45,10 @@ bool hasTemporaryPassword = false;
 #define SS_PIN 10
 
 #define MAX_LOGS 30 
-#define OLED_RESET -1 // FIXED: Defined missing reset variable
+#define OLED_RESET -1 
 
 // --- OBJECTS ---
-Adafruit_SH1106G display = Adafruit_SH1106G(128, 64, &Wire, OLED_RESET); // FIXED: Corrected driver class name
+Adafruit_SH1106G display = Adafruit_SH1106G(128, 64, &Wire, OLED_RESET); 
 MFRC522 rfid(SS_PIN, RST_PIN);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200); 
@@ -76,6 +76,7 @@ unsigned long accessEndTime = 0;
 bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 unsigned long lastWifiRetryTime = 0; 
+unsigned long lastRfidWatchdogTime = 0; // FIXED: Added automated heartbeat tracking interval
 
 // --- UNIVERSAL URL DECODER UTILITY ---
 String urlDecode(String str) {
@@ -286,7 +287,8 @@ void handleProvisioningServer() {
   if (!client) return;
 
   String reqHeader = "";
-  while (client.connected()) {
+  unsigned long webTimeout = millis() + 200; // FIXED: Strict compilation safety net timeout
+  while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
       char c = client.read();
       reqHeader += c;
@@ -364,7 +366,8 @@ void handleWebServer() {
   if (!client) return;
 
   String reqHeader = "";
-  while (client.connected()) {
+  unsigned long webTimeout = millis() + 200; // FIXED: Strict parsing safety window to kill blocking infinite loops
+  while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
       char c = client.read();
       reqHeader += c;
@@ -752,7 +755,6 @@ void setup() {
 
   randomSeed(analogRead(0));
 
-  // FIXED: Updated initialization call sequence to match SH1106 native parameters
   delay(300); 
   display.begin(0x3C, true); 
   display.clearDisplay();
@@ -810,9 +812,18 @@ void setup() {
     tone(BUZZER_PIN, 300, 600);
     lastWifiRetryTime = millis(); 
   }
+  
+  lastRfidWatchdogTime = millis(); // Initialize watchdog tracking tick
 }
 
 void loop() {
+  // --- AUTOMATED RFID HEARTBEAT WATCHDOG ---
+  // Silently reset the RFID reader every 2 minutes if the door is resting closed
+  if (!doorOpen && !learningMode && (millis() - lastRfidWatchdogTime > 120000)) {
+    lastRfidWatchdogTime = millis();
+    forceHardwareRFIDReset(); 
+  }
+
   if (isOfflineStandby) {
     handleProvisioningServer();
 
@@ -884,6 +895,7 @@ void loop() {
   }
 
   if (!rfidResetPending && !doorOpen && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    lastRfidWatchdogTime = millis(); // Refresh watchdog countdown anchor on any activity
     String uidStr = "";
     for (byte i = 0; i < rfid.uid.size; i++) {
       if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
@@ -946,6 +958,7 @@ void loop() {
         if (learningMode) {
           pendingUsername = "Przycisk Fiz."; 
           forceHardwareRFIDReset();
+          lastRfidWatchdogTime = millis(); 
           updateDisplay("TRYB UCZENIA", pendingUsername);
           tone(BUZZER_PIN, 1500, 400);
         } else {
@@ -960,6 +973,7 @@ void loop() {
     if (!longPressed && (millis() - pressTime > 50)) {
       failedLoginAttempts = 0;
       lockoutEndTime = 0;
+      lastRfidWatchdogTime = millis(); // Refresh watchdog countdown anchor
       openDoor("Przycisk");
     }
   }
@@ -969,6 +983,7 @@ void loop() {
     digitalWrite(RELAY_PIN, HIGH); 
     delay(100); 
     forceHardwareRFIDReset();
+    lastRfidWatchdogTime = millis(); 
     rfidResetPending = false; 
     digitalWrite(LED_GREEN, LOW);
     digitalWrite(LED_RED, HIGH);
