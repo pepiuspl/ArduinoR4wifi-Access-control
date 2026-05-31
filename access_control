@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.7.1 - Genesis Core";
+const char* app_version = "v2.8.0 - Design Core";
 
 // --- USER DATABASE STRUCTURES (Declared first to fix compile order) ---
 struct User {
@@ -65,6 +65,7 @@ User users[10];
 bool isCardActive[10] = {true}; 
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
+String globalDisplayInfo = ""; // Holds secondary text info safely
 
 LogEntry lastActions[MAX_LOGS]; 
 int logCount = 0;
@@ -76,7 +77,11 @@ unsigned long accessEndTime = 0;
 bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 unsigned long lastWifiRetryTime = 0; 
-unsigned long lastRfidWatchdogTime = 0; // FIXED: Added automated heartbeat tracking interval
+unsigned long lastRfidWatchdogTime = 0; 
+
+// --- ANIMATION CONTROLLER GLOBALS ---
+int globalAnimFrame = 0;
+unsigned long lastFrameTick = 0;
 
 // --- UNIVERSAL URL DECODER UTILITY ---
 String urlDecode(String str) {
@@ -203,36 +208,135 @@ void forceHardwareRFIDReset() {
   rfid.PCD_Init(); 
 }
 
-void updateDisplay(String status, String info = "") {
+// Helper to fetch live clock formatted as HH:MM safely
+String getFormattedSystemTime() {
+  RTCTime currentRTCTime;
+  if (RTC.getTime(currentRTCTime)) {
+    char timeBuffer[6];
+    sprintf(timeBuffer, "%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes());
+    return String(timeBuffer);
+  }
+  return "--:--";
+}
+
+// NEW Vector Rendering Function for UI Layout & Transitions
+void renderSystemUI() {
   display.clearDisplay();
-  display.setCursor(0,0);
+  
+  // 1. TOP STATUS HEADER STRIP
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
-  display.println("ZAMEK SMART R4");
-  display.println(app_version);
-  display.println("---------------------");
-  display.println("Status: " + status);
-  display.println(info);
+  display.setCursor(4, 2);
+  display.print("SMART LOCK SYSTEM");
+  display.drawFastHLine(0, 12, 128, SH110X_WHITE);
+
+  // 2. CONTEXTUAL MAIN RENDERING MATRIX
+  if (provisioningMode || isOfflineStandby) {
+    // Standard text backup rendering for setup screens
+    display.setCursor(0, 18);
+    display.println(globalDisplayInfo);
+  } 
+  else if (learningMode) {
+    // Render dynamic pulsing learn UI
+    display.setCursor(20, 20);
+    display.setTextSize(2);
+    display.print("LEARNING");
+    display.setTextSize(1);
+    display.setCursor(20, 42);
+    display.print("Target: " + pendingUsername);
+    
+    // Draw an animated radio signal radar ripple ring
+    int rippleRadius = 4 + (globalAnimFrame % 3) * 5;
+    display.drawCircle(110, 32, rippleRadius, SH110X_WHITE);
+    display.fillCircle(110, 32, 2, SH110X_WHITE);
+  } 
+  else if (doorOpen) {
+    // --- UNLOCKED ACCESS ANIMATED STATE ---
+    // Padlock Vector Parameters (Animated Shackle Expansion)
+    int shackleOffset = (globalAnimFrame > 4) ? 5 : globalAnimFrame; // Moves up vertically
+    
+    // Draw Lock Base Body
+    display.fillRoundRect(14, 34, 22, 16, 2, SH110X_WHITE);
+    display.fillCircle(25, 40, 2, SH110X_BLACK);
+    display.drawFastVLine(25, 42, 4, SH110X_BLACK);
+    
+    // Draw Retracted & Rotated Open Shackle Vector
+    display.drawCircleHelper(25, 34 - shackleOffset, 7, 1|2, SH110X_WHITE); // Upper arch
+    display.drawFastVLine(18, 34 - shackleOffset, 4, SH110X_WHITE);        // Left retaining side
+    
+    // Render Primary Bold Output Typography
+    display.setTextSize(2);
+    display.setCursor(48, 20);
+    display.print("OPEN");
+    
+    display.setTextSize(1);
+    display.setCursor(48, 40);
+    display.print(globalDisplayInfo); // Prints scanned owner name safely
+    
+    // Draw Evolving Vector Checkmark Feedback Sequence
+    if (globalAnimFrame > 2) {
+      int checkStage = min(globalAnimFrame - 2, 6);
+      // Line segment 1 (Short drop)
+      display.drawLine(100, 35, 100 + min(checkStage, 3), 35 + min(checkStage, 3), SH110X_WHITE);
+      if (checkStage > 3) {
+        // Line segment 2 (Long swipe up)
+        display.drawLine(103, 38, 103 + (checkStage - 3) * 3, 38 - (checkStage - 3) * 3, SH110X_WHITE);
+      }
+    }
+  } 
+  else {
+    // --- LOCKED SECURE STANDBY STATE ---
+    // Draw Clean Locked Padlock Vector
+    display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
+    display.fillCircle(25, 39, 2, SH110X_BLACK);
+    display.drawFastVLine(25, 41, 5, SH110X_BLACK);
+    
+    // Closed Fixed Shackle
+    display.drawCircleHelper(25, 32, 7, 1|2, SH110X_WHITE);
+    display.drawFastVLine(18, 32, 4, SH110X_WHITE);
+    display.drawFastVLine(32, 32, 4, SH110X_WHITE);
+
+    // Primary Text Fields
+    display.setTextSize(2);
+    display.setCursor(48, 24);
+    display.print("LOCKED");
+  }
+
+  // 3. BOTTOM FOOTER BAR
+  display.drawFastHLine(0, 53, 128, SH110X_WHITE);
+  display.setTextSize(1);
+  display.setCursor(4, 56);
+  
+  // Left context print (Network IP Tracker)
+  if (WiFi.status() == WL_CONNECTED) {
+    display.print(WiFi.localIP().toString());
+  } else if (isOfflineStandby) {
+    display.print("AP: SETUP");
+  } else {
+    display.print("DISCONNECTED");
+  }
+  
+  // Right context print (Synchronized RTC Clock)
+  String liveTime = getFormattedSystemTime();
+  display.setCursor(94, 56);
+  display.print(liveTime);
+
   display.display();
 }
 
+// Deprecated text utility wrapper redirected natively into the graphic matrix daemon
+void updateDisplay(String status, String info = "") {
+  globalDisplayInfo = info;
+  renderSystemUI();
+}
+
 void displayProvisioningInstructions(String errorContext = "") {
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.setTextSize(1);
-  display.setTextColor(SH110X_WHITE);
   if (errorContext != "") {
-    display.println(errorContext);
+    globalDisplayInfo = errorContext + "\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
   } else {
-    display.println("!!! PIERWSZA KONFIG !!!");
+    globalDisplayInfo = "INITIAL CONFIG!\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
   }
-  display.println("---------------------");
-  display.println("1. Polacz sie z Wi-Fi");
-  display.println("   SSID: ZAMEK_SETUP");
-  display.println("2. Otworz przegladarke");
-  display.println("3. Wejdz na adres IP:");
-  display.println("   192.168.4.1");
-  display.display();
+  renderSystemUI();
 }
 
 void sendExternalTelemetry(String logData) {
@@ -272,12 +376,13 @@ void addLog(String msg) {
 
 void openDoor(String source) {
   doorOpen = true; 
+  globalAnimFrame = 0; // Reset animation timeline
   accessEndTime = millis() + 3000;
+  globalDisplayInfo = source;
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED, LOW);
   tone(BUZZER_PIN, 1000, 200);
-  updateDisplay("OTWARTE", source);
   addLog("Otwarto: " + source);
 }
 
@@ -287,7 +392,7 @@ void handleProvisioningServer() {
   if (!client) return;
 
   String reqHeader = "";
-  unsigned long webTimeout = millis() + 200; // FIXED: Strict compilation safety net timeout
+  unsigned long webTimeout = millis() + 200; 
   while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
       char c = client.read();
@@ -366,7 +471,7 @@ void handleWebServer() {
   if (!client) return;
 
   String reqHeader = "";
-  unsigned long webTimeout = millis() + 200; // FIXED: Strict parsing safety window to kill blocking infinite loops
+  unsigned long webTimeout = millis() + 200; 
   while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
       char c = client.read();
@@ -376,7 +481,6 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
-  // 🧪 INTERCEPT FLOW FOR DEVELOPMENT RECONFIGURATION SIMULATIONS
   if (reqHeader.indexOf("GET /init") != -1) {
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
     client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
@@ -396,7 +500,6 @@ void handleWebServer() {
     delay(1); client.stop(); return;
   }
 
-  // Allow sandbox setup saves to execute natively inside standard daemon listeners
   if (reqHeader.indexOf("/save_setup") != -1) {
     int sIdx = reqHeader.indexOf("s=") + 2;
     int pIdx = reqHeader.indexOf("&p=") + 3;
@@ -437,7 +540,7 @@ void handleWebServer() {
     hasTemporaryPassword = true;
 
     addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
-    updateDisplay("RESET HASLA", "Token wyslany do logow");
+    globalDisplayInfo = "Klucz tymczasowy wyslany";
     tone(BUZZER_PIN, 1400, 400);
 
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
@@ -472,7 +575,6 @@ void handleWebServer() {
       if (failedLoginAttempts >= 5) {
         lockoutEndTime = millis() + 300000; 
         addLog("ALARM: Atak BruteForce!");
-        updateDisplay("BLOKADA SYSTEMU", "Atak BruteForce");
       }
     } else if (isAuthenticated) {
       failedLoginAttempts = 0; 
@@ -541,11 +643,10 @@ void handleWebServer() {
           if(pendingUsername.length() == 0) pendingUsername = "Uzytkownik R4";
         }
         forceHardwareRFIDReset();
-        updateDisplay("TRYB UCZENIA", pendingUsername);
+        globalAnimFrame = 0;
         addLog("Tryb Ucz. [" + pendingUsername + "]");
         tone(BUZZER_PIN, 1500, 300);
       } else {
-        updateDisplay("Gotowy", WiFi.localIP().toString());
         addLog("Stop Ucz: Panel WWW");
         tone(BUZZER_PIN, 800, 300);
       }
@@ -813,12 +914,20 @@ void setup() {
     lastWifiRetryTime = millis(); 
   }
   
-  lastRfidWatchdogTime = millis(); // Initialize watchdog tracking tick
+  lastRfidWatchdogTime = millis(); 
+  lastFrameTick = millis();
 }
 
 void loop() {
+  // --- NON-BLOCKING GRAPHIC FRAMERATE TIMER MATRIX ---
+  // Loops and calculates vector translations every 80ms (~12 FPS animation engine)
+  if (millis() - lastFrameTick > 80) {
+    lastFrameTick = millis();
+    globalAnimFrame++;
+    renderSystemUI(); // Redraws screen dynamically to maintain live clock and moving elements
+  }
+
   // --- AUTOMATED RFID HEARTBEAT WATCHDOG ---
-  // Silently reset the RFID reader every 2 minutes if the door is resting closed
   if (!doorOpen && !learningMode && (millis() - lastRfidWatchdogTime > 120000)) {
     lastRfidWatchdogTime = millis();
     forceHardwareRFIDReset(); 
@@ -866,9 +975,9 @@ void loop() {
     forceHardwareRFIDReset();
     rfidResetPending = false;
     if (learningMode) {
-      updateDisplay("TRYB UCZENIA", pendingUsername);
+      globalAnimFrame = 0;
     } else {
-      updateDisplay("Gotowy", isOfflineStandby ? "Rescue Hotspot" : WiFi.localIP().toString());
+      globalDisplayInfo = "";
     }
   }
 
@@ -895,7 +1004,7 @@ void loop() {
   }
 
   if (!rfidResetPending && !doorOpen && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    lastRfidWatchdogTime = millis(); // Refresh watchdog countdown anchor on any activity
+    lastRfidWatchdogTime = millis(); 
     String uidStr = "";
     for (byte i = 0; i < rfid.uid.size; i++) {
       if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
@@ -907,7 +1016,9 @@ void loop() {
     if (learningMode) {
       saveNewCard(rfid.uid.uidByte, pendingUsername);
       addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
-      updateDisplay("DODANO KARTE", pendingUsername);
+      
+      globalAnimFrame = 0;
+      globalDisplayInfo = "DODANO KARTE";
 
       digitalWrite(LED_RED, LOW);
       digitalWrite(LED_GREEN, HIGH);
@@ -932,7 +1043,7 @@ void loop() {
       }
       if (valid) {
         if (isCardActive[matchedIndex]) {
-          openDoor(String(users[matchedIndex].name) + " [" + uidStr + "]"); 
+          openDoor(String(users[matchedIndex].name)); 
         } else {
           addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
           tone(BUZZER_PIN, 200, 600);
@@ -956,13 +1067,13 @@ void loop() {
         learningMode = !learningMode; 
         autoExitLearn = true; 
         if (learningMode) {
-          pendingUsername = "Przycisk Fiz."; 
+          pendingUsername = "Przycisk"; 
           forceHardwareRFIDReset();
           lastRfidWatchdogTime = millis(); 
-          updateDisplay("TRYB UCZENIA", pendingUsername);
+          globalAnimFrame = 0;
           tone(BUZZER_PIN, 1500, 400);
         } else {
-          updateDisplay("Gotowy", isOfflineStandby ? "Rescue Hotspot" : WiFi.localIP().toString());
+          globalDisplayInfo = "";
           tone(BUZZER_PIN, 800, 400);
         }
         while(digitalRead(BUTTON_PIN) == LOW); 
@@ -973,8 +1084,8 @@ void loop() {
     if (!longPressed && (millis() - pressTime > 50)) {
       failedLoginAttempts = 0;
       lockoutEndTime = 0;
-      lastRfidWatchdogTime = millis(); // Refresh watchdog countdown anchor
-      openDoor("Przycisk");
+      lastRfidWatchdogTime = millis(); 
+      openDoor("PRZYCISK");
     }
   }
 
@@ -985,8 +1096,8 @@ void loop() {
     forceHardwareRFIDReset();
     lastRfidWatchdogTime = millis(); 
     rfidResetPending = false; 
+    globalDisplayInfo = "";
     digitalWrite(LED_GREEN, LOW);
     digitalWrite(LED_RED, HIGH);
-    updateDisplay("Gotowy", isOfflineStandby ? "Rescue Hotspot" : WiFi.localIP().toString());
   }
 }
