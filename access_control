@@ -220,7 +220,7 @@ String getFormattedSystemTime() {
   return "--:--";
 }
 
-// --- GRAPHICS ENGINE MAIN DAEMON ---
+// --- GRAPHICS ENGINE MAIN DAEMON (CORRECTED LAYOUT MARGINS) ---
 void renderSystemUI() {
   display.clearDisplay();
   
@@ -237,101 +237,92 @@ void renderSystemUI() {
     display.println(globalDisplayInfo);
   } 
   else if (learningMode) {
-    // TRYB UCZENIA GRAPHICS
-    display.setCursor(16, 20);
+    display.setCursor(12, 20);
     display.setTextSize(2);
     display.print("LEARNING");
     
     display.setTextSize(1);
-    display.setCursor(16, 42);
+    display.setCursor(12, 42);
     display.print("User: " + pendingUsername);
     
-    // Pulse radar rings on the side
     int radarRadius = 4 + (globalAnimFrame % 3) * 5;
-    display.drawCircle(112, 32, radarRadius, SH110X_WHITE);
-    display.fillCircle(112, 32, 2, SH110X_WHITE);
+    display.drawCircle(114, 32, radarRadius, SH110X_WHITE);
+    display.fillCircle(114, 32, 2, SH110X_WHITE);
   } 
   else if (deniedActive) {
-    // --- POINT 3: ACCESS DENIED SHAKING UI ---
     int shakeOffset = (globalAnimFrame % 2 == 0) ? -3 : 3; 
     
-    // Draw Shaking Lock Base
-    display.fillRoundRect(14 + shakeOffset, 32, 22, 18, 2, SH110X_WHITE);
-    display.fillCircle(25 + shakeOffset, 39, 2, SH110X_BLACK);
-    display.drawFastVLine(25 + shakeOffset, 41, 5, SH110X_BLACK);
+    // Draw Shaking Lock Base (FIXED: Left margin offset to X=6)
+    display.fillRoundRect(6 + shakeOffset, 32, 22, 18, 2, SH110X_WHITE);
+    display.fillCircle(17 + shakeOffset, 39, 2, SH110X_BLACK);
+    display.drawFastVLine(17 + shakeOffset, 41, 5, SH110X_BLACK);
     
-    // Closed Fixed Shackle
-    display.drawCircleHelper(25 + shakeOffset, 32, 7, 1|2, SH110X_WHITE);
-    display.drawFastVLine(18 + shakeOffset, 32, 4, SH110X_WHITE);
-    display.drawFastVLine(32 + shakeOffset, 32, 4, SH110X_WHITE);
+    display.drawCircleHelper(17 + shakeOffset, 32, 7, 1|2, SH110X_WHITE);
+    display.drawFastVLine(10 + shakeOffset, 32, 4, SH110X_WHITE);
+    display.drawFastVLine(24 + shakeOffset, 32, 4, SH110X_WHITE);
 
-    // Text Warning
+    // Text Warning (FIXED: Shifted left to X=38)
     display.setTextSize(2);
-    display.setCursor(46, 24);
+    display.setCursor(38, 24);
     display.print("DENIED");
     
-    // Flash a big cross Vector 'X' on the right side
     if (globalAnimFrame % 4 < 3) {
-      display.drawLine(102, 22, 118, 38, SH110X_WHITE);
-      display.drawLine(118, 22, 102, 38, SH110X_WHITE);
+      display.drawLine(106, 22, 122, 38, SH110X_WHITE);
+      display.drawLine(122, 22, 106, 38, SH110X_WHITE);
     }
   } 
   else if (doorOpen) {
-    // --- UNLOCKED DYNAMIC ACCESS VECTOR ---
     int shackleSlide = (globalAnimFrame > 4) ? 5 : globalAnimFrame; 
     
-    // Padlock body
-    display.fillRoundRect(14, 34, 22, 16, 2, SH110X_WHITE);
-    display.fillCircle(25, 40, 2, SH110X_BLACK);
-    display.drawFastVLine(25, 42, 4, SH110X_BLACK);
-    
-    // Lift shackle arch
-    display.drawCircleHelper(25, 34 - shackleSlide, 7, 1|2, SH110X_WHITE); 
-    display.drawFastVLine(18, 34 - shackleSlide, 4, SH110X_WHITE);        
+    // Padlock body (FIXED: Left margin offset to X=6)
+    display.fillRoundRect(6, 34, 22, 16, 2, SH110X_WHITE);
+    display.fillCircle(17, 40, 2, SH110X_BLACK);
+    display.drawFastVLine(17, 42, 4, SH110X_BLACK);
+    display.drawCircleHelper(17, 34 - shackleSlide, 7, 1|2, SH110X_WHITE); 
+    display.drawFastVLine(10, 34 - shackleSlide, 4, SH110X_WHITE);        
     
     display.setTextSize(2);
-    display.setCursor(48, 18);
+    display.setCursor(38, 18); // FIXED: Shifted left to X=38
     display.print("OPEN");
     
-    // --- POINT 4: DYNAMIC MARQUEE SCROLLING FOR NAMES ---
     display.setTextSize(1);
-    display.setCursor(48, 38);
-    if (globalDisplayInfo.length() > 13) {
+    display.setCursor(38, 38); // FIXED: Shifted left to X=38
+    if (globalDisplayInfo.length() > 11) {
       int scrollShift = (globalAnimFrame / 2) % (globalDisplayInfo.length());
       String marqueeStr = globalDisplayInfo.substring(scrollShift) + "   " + globalDisplayInfo.substring(0, scrollShift);
-      display.print(marqueeStr.substring(0, 13));
+      display.print(marqueeStr.substring(0, 11));
     } else {
       display.print(globalDisplayInfo);
     }
     
-    // Draw Evolving Checkmark Vector Animation
     if (globalAnimFrame > 1) {
       int checkTicks = min(globalAnimFrame - 1, 6);
-      display.drawLine(104, 32, 104 + min(checkTicks, 3), 32 + min(checkTicks, 3), SH110X_WHITE);
+      display.drawLine(110, 32, 110 + min(checkTicks, 3), 32 + min(checkTicks, 3), SH110X_WHITE);
       if (checkTicks > 3) {
-        display.drawLine(107, 35, 107 + (checkTicks - 3) * 3, 35 - (checkTicks - 3) * 3, SH110X_WHITE);
+        display.drawLine(113, 35, 113 + (checkTicks - 3) * 3, 35 - (checkTicks - 3) * 3, SH110X_WHITE);
       }
     }
   } 
   else {
-    // --- SECURED IDLE LOCK STATUS PANEL ---
-    display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
-    display.fillCircle(25, 39, 2, SH110X_BLACK);
-    display.drawFastVLine(25, 41, 5, SH110X_BLACK);
-    display.drawCircleHelper(25, 32, 7, 1|2, SH110X_WHITE);
-    display.drawFastVLine(18, 32, 4, SH110X_WHITE);
-    display.drawFastVLine(32, 32, 4, SH110X_WHITE);
+    // --- SECURED IDLE STATE ---
+    // Padlock Drawing (FIXED: Shifted left to X=6)
+    display.fillRoundRect(6, 32, 22, 18, 2, SH110X_WHITE);
+    display.fillCircle(17, 39, 2, SH110X_BLACK);
+    display.drawFastVLine(17, 41, 5, SH110X_BLACK);
+    display.drawCircleHelper(17, 32, 7, 1|2, SH110X_WHITE);
+    display.drawFastVLine(10, 32, 4, SH110X_WHITE);
+    display.drawFastVLine(24, 32, 4, SH110X_WHITE);
 
     display.setTextSize(2);
-    display.setCursor(48, 24);
+    display.setCursor(38, 24); // FIXED: Shifted left to X=38 to prevent overlaying the waves
     display.print("LOCKED");
 
-    // --- POINT 2: SECURE STANDBY RADAR PULSE WAVES ---
+    // STANDBY RADAR PULSE WAVES (FIXED: Center shifted right to X=118, radii compressed for alignment)
     int pulsePhase = (globalAnimFrame / 3) % 4; 
-    display.fillCircle(114, 36, 1, SH110X_WHITE);
-    if (pulsePhase >= 1) display.drawCircleHelper(114, 36, 5, 2|4, SH110X_WHITE); 
-    if (pulsePhase >= 2) display.drawCircleHelper(114, 36, 10, 2|4, SH110X_WHITE);
-    if (pulsePhase >= 3) display.drawCircleHelper(114, 36, 15, 2|4, SH110X_WHITE);
+    display.fillCircle(118, 36, 1, SH110X_WHITE);
+    if (pulsePhase >= 1) display.drawCircleHelper(118, 36, 4, 2|4, SH110X_WHITE); 
+    if (pulsePhase >= 2) display.drawCircleHelper(118, 36, 8, 2|4, SH110X_WHITE);
+    if (pulsePhase >= 3) display.drawCircleHelper(118, 36, 12, 2|4, SH110X_WHITE);
   }
 
   // 3. BOTTOM BOUNDARY FOUNDATION BAR
@@ -405,8 +396,8 @@ void addLog(String msg) {
 
 void openDoor(String source) {
   doorOpen = true; 
-  deniedActive = false; // Kill any structural errors
-  globalAnimFrame = 0;  // Reset timeline
+  deniedActive = false; 
+  globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source;
   digitalWrite(RELAY_PIN, LOW);
@@ -899,7 +890,6 @@ void setup() {
     }
   }
 
-  // --- POINT 1: ANIMATED WIFI PROGRESS JUICE BAR ---
   WiFi.begin(ssid, pass);
   unsigned long startAttempt = millis();
   int juiceCounter = 0;
@@ -912,16 +902,13 @@ void setup() {
     display.setCursor(14, 16);
     display.print("CONNECTING WIFI...");
     
-    // Draw Juice Bar Frame Outline
     display.drawRect(14, 34, 100, 12, SH110X_WHITE);
-    // Dynamically increment fill loop block
     display.fillRect(17, 37, (juiceCounter * 6) % 94, 6, SH110X_WHITE);
     display.display();
     delay(250);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    // --- RIGOROUS PERSISTENT NTP CLOCK SYNC SYSTEM ---
     timeClient.begin();
     
     display.clearDisplay();
@@ -932,7 +919,6 @@ void setup() {
     int ntpRetryAttempts = 0;
     unsigned long validEpochTimestamp = 0;
     
-    // Loop aggressively until receiving a valid timestamp from pool servers
     while (validEpochTimestamp < 1000000000 && ntpRetryAttempts < 15) {
       timeClient.update();
       validEpochTimestamp = timeClient.getEpochTime();
@@ -953,7 +939,6 @@ void setup() {
     server.begin(); 
     forceHardwareRFIDReset();
 
-    // Fanfare chords
     tone(BUZZER_PIN, 800, 100);  delay(120);
     tone(BUZZER_PIN, 1000, 100); delay(120);
     tone(BUZZER_PIN, 1300, 120); delay(140);
@@ -977,21 +962,17 @@ void setup() {
 }
 
 void loop() {
-  // --- GRAPHIC FRAMERATE TIMER MATRIX ---
-  // Calculates animation loops precisely at ~12 frames per second
   if (millis() - lastFrameTick > 80) {
     lastFrameTick = millis();
     globalAnimFrame++;
     renderSystemUI(); 
   }
 
-  // --- ACCESS DENIED ALIVE WATCHDOG TIMER ---
   if (deniedActive && millis() > deniedEndTime) {
     deniedActive = false;
     globalDisplayInfo = "";
   }
 
-  // --- AUTOMATED RFID HARDWARE REJUVENATOR WATCHDOG ---
   if (!doorOpen && !learningMode && !deniedActive && (millis() - lastRfidWatchdogTime > 120000)) {
     lastRfidWatchdogTime = millis();
     forceHardwareRFIDReset(); 
@@ -1108,14 +1089,14 @@ void loop() {
           addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
           deniedActive = true; 
           globalAnimFrame = 0;
-          deniedEndTime = millis() + 1800; // Trigger shake timeout
+          deniedEndTime = millis() + 1800; 
           tone(BUZZER_PIN, 200, 600);
         }
       } else {
         addLog("Odmowa: Nieznany [" + uidStr + "]");
         deniedActive = true; 
         globalAnimFrame = 0;
-        deniedEndTime = millis() + 1800; // Trigger shake timeout
+        deniedEndTime = millis() + 1800; 
         tone(BUZZER_PIN, 200, 500);
       }
     }
