@@ -65,7 +65,7 @@ User users[10];
 bool isCardActive[10] = {true}; 
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik"; 
-String globalDisplayInfo = ""; // Holds secondary text info safely
+String globalDisplayInfo = ""; 
 
 LogEntry lastActions[MAX_LOGS]; 
 int logCount = 0;
@@ -79,9 +79,11 @@ unsigned long lastScanTime = 0;
 unsigned long lastWifiRetryTime = 0; 
 unsigned long lastRfidWatchdogTime = 0; 
 
-// --- ANIMATION CONTROLLER GLOBALS ---
+// --- UI AND ANIMATION ENGINE GLOBALS ---
 int globalAnimFrame = 0;
 unsigned long lastFrameTick = 0;
+bool deniedActive = false;
+unsigned long deniedEndTime = 0;
 
 // --- UNIVERSAL URL DECODER UTILITY ---
 String urlDecode(String str) {
@@ -208,7 +210,6 @@ void forceHardwareRFIDReset() {
   rfid.PCD_Init(); 
 }
 
-// Helper to fetch live clock formatted as HH:MM safely
 String getFormattedSystemTime() {
   RTCTime currentRTCTime;
   if (RTC.getTime(currentRTCTime)) {
@@ -219,112 +220,140 @@ String getFormattedSystemTime() {
   return "--:--";
 }
 
-// NEW Vector Rendering Function for UI Layout & Transitions
+// --- GRAPHICS ENGINE MAIN DAEMON ---
 void renderSystemUI() {
   display.clearDisplay();
   
-  // 1. TOP STATUS HEADER STRIP
+  // 1. TOP BOUNDARY PARTITION STRIP
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(4, 2);
   display.print("SMART LOCK SYSTEM");
   display.drawFastHLine(0, 12, 128, SH110X_WHITE);
 
-  // 2. CONTEXTUAL MAIN RENDERING MATRIX
+  // 2. MAIN DYNAMIC RENDERING PANEL
   if (provisioningMode || isOfflineStandby) {
-    // Standard text backup rendering for setup screens
     display.setCursor(0, 18);
     display.println(globalDisplayInfo);
   } 
   else if (learningMode) {
-    // Render dynamic pulsing learn UI
-    display.setCursor(20, 20);
+    // TRYB UCZENIA GRAPHICS
+    display.setCursor(16, 20);
     display.setTextSize(2);
     display.print("LEARNING");
-    display.setTextSize(1);
-    display.setCursor(20, 42);
-    display.print("Target: " + pendingUsername);
     
-    // Draw an animated radio signal radar ripple ring
-    int rippleRadius = 4 + (globalAnimFrame % 3) * 5;
-    display.drawCircle(110, 32, rippleRadius, SH110X_WHITE);
-    display.fillCircle(110, 32, 2, SH110X_WHITE);
+    display.setTextSize(1);
+    display.setCursor(16, 42);
+    display.print("User: " + pendingUsername);
+    
+    // Pulse radar rings on the side
+    int radarRadius = 4 + (globalAnimFrame % 3) * 5;
+    display.drawCircle(112, 32, radarRadius, SH110X_WHITE);
+    display.fillCircle(112, 32, 2, SH110X_WHITE);
+  } 
+  else if (deniedActive) {
+    // --- POINT 3: ACCESS DENIED SHAKING UI ---
+    int shakeOffset = (globalAnimFrame % 2 == 0) ? -3 : 3; 
+    
+    // Draw Shaking Lock Base
+    display.fillRoundRect(14 + shakeOffset, 32, 22, 18, 2, SH110X_WHITE);
+    display.fillCircle(25 + shakeOffset, 39, 2, SH110X_BLACK);
+    display.drawFastVLine(25 + shakeOffset, 41, 5, SH110X_BLACK);
+    
+    // Closed Fixed Shackle
+    display.drawCircleHelper(25 + shakeOffset, 32, 7, 1|2, SH110X_WHITE);
+    display.drawFastVLine(18 + shakeOffset, 32, 4, SH110X_WHITE);
+    display.drawFastVLine(32 + shakeOffset, 32, 4, SH110X_WHITE);
+
+    // Text Warning
+    display.setTextSize(2);
+    display.setCursor(46, 24);
+    display.print("DENIED");
+    
+    // Flash a big cross Vector 'X' on the right side
+    if (globalAnimFrame % 4 < 3) {
+      display.drawLine(102, 22, 118, 38, SH110X_WHITE);
+      display.drawLine(118, 22, 102, 38, SH110X_WHITE);
+    }
   } 
   else if (doorOpen) {
-    // --- UNLOCKED ACCESS ANIMATED STATE ---
-    // Padlock Vector Parameters (Animated Shackle Expansion)
-    int shackleOffset = (globalAnimFrame > 4) ? 5 : globalAnimFrame; // Moves up vertically
+    // --- UNLOCKED DYNAMIC ACCESS VECTOR ---
+    int shackleSlide = (globalAnimFrame > 4) ? 5 : globalAnimFrame; 
     
-    // Draw Lock Base Body
+    // Padlock body
     display.fillRoundRect(14, 34, 22, 16, 2, SH110X_WHITE);
     display.fillCircle(25, 40, 2, SH110X_BLACK);
     display.drawFastVLine(25, 42, 4, SH110X_BLACK);
     
-    // Draw Retracted & Rotated Open Shackle Vector
-    display.drawCircleHelper(25, 34 - shackleOffset, 7, 1|2, SH110X_WHITE); // Upper arch
-    display.drawFastVLine(18, 34 - shackleOffset, 4, SH110X_WHITE);        // Left retaining side
+    // Lift shackle arch
+    display.drawCircleHelper(25, 34 - shackleSlide, 7, 1|2, SH110X_WHITE); 
+    display.drawFastVLine(18, 34 - shackleSlide, 4, SH110X_WHITE);        
     
-    // Render Primary Bold Output Typography
     display.setTextSize(2);
-    display.setCursor(48, 20);
+    display.setCursor(48, 18);
     display.print("OPEN");
     
+    // --- POINT 4: DYNAMIC MARQUEE SCROLLING FOR NAMES ---
     display.setTextSize(1);
-    display.setCursor(48, 40);
-    display.print(globalDisplayInfo); // Prints scanned owner name safely
+    display.setCursor(48, 38);
+    if (globalDisplayInfo.length() > 13) {
+      int scrollShift = (globalAnimFrame / 2) % (globalDisplayInfo.length());
+      String marqueeStr = globalDisplayInfo.substring(scrollShift) + "   " + globalDisplayInfo.substring(0, scrollShift);
+      display.print(marqueeStr.substring(0, 13));
+    } else {
+      display.print(globalDisplayInfo);
+    }
     
-    // Draw Evolving Vector Checkmark Feedback Sequence
-    if (globalAnimFrame > 2) {
-      int checkStage = min(globalAnimFrame - 2, 6);
-      // Line segment 1 (Short drop)
-      display.drawLine(100, 35, 100 + min(checkStage, 3), 35 + min(checkStage, 3), SH110X_WHITE);
-      if (checkStage > 3) {
-        // Line segment 2 (Long swipe up)
-        display.drawLine(103, 38, 103 + (checkStage - 3) * 3, 38 - (checkStage - 3) * 3, SH110X_WHITE);
+    // Draw Evolving Checkmark Vector Animation
+    if (globalAnimFrame > 1) {
+      int checkTicks = min(globalAnimFrame - 1, 6);
+      display.drawLine(104, 32, 104 + min(checkTicks, 3), 32 + min(checkTicks, 3), SH110X_WHITE);
+      if (checkTicks > 3) {
+        display.drawLine(107, 35, 107 + (checkTicks - 3) * 3, 35 - (checkTicks - 3) * 3, SH110X_WHITE);
       }
     }
   } 
   else {
-    // --- LOCKED SECURE STANDBY STATE ---
-    // Draw Clean Locked Padlock Vector
+    // --- SECURED IDLE LOCK STATUS PANEL ---
     display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
     display.fillCircle(25, 39, 2, SH110X_BLACK);
     display.drawFastVLine(25, 41, 5, SH110X_BLACK);
-    
-    // Closed Fixed Shackle
     display.drawCircleHelper(25, 32, 7, 1|2, SH110X_WHITE);
     display.drawFastVLine(18, 32, 4, SH110X_WHITE);
     display.drawFastVLine(32, 32, 4, SH110X_WHITE);
 
-    // Primary Text Fields
     display.setTextSize(2);
     display.setCursor(48, 24);
     display.print("LOCKED");
+
+    // --- POINT 2: SECURE STANDBY RADAR PULSE WAVES ---
+    int pulsePhase = (globalAnimFrame / 3) % 4; 
+    display.fillCircle(114, 36, 1, SH110X_WHITE);
+    if (pulsePhase >= 1) display.drawCircleHelper(114, 36, 5, 2|4, SH110X_WHITE); 
+    if (pulsePhase >= 2) display.drawCircleHelper(114, 36, 10, 2|4, SH110X_WHITE);
+    if (pulsePhase >= 3) display.drawCircleHelper(114, 36, 15, 2|4, SH110X_WHITE);
   }
 
-  // 3. BOTTOM FOOTER BAR
+  // 3. BOTTOM BOUNDARY FOUNDATION BAR
   display.drawFastHLine(0, 53, 128, SH110X_WHITE);
   display.setTextSize(1);
   display.setCursor(4, 56);
   
-  // Left context print (Network IP Tracker)
   if (WiFi.status() == WL_CONNECTED) {
     display.print(WiFi.localIP().toString());
   } else if (isOfflineStandby) {
-    display.print("AP: SETUP");
+    display.print("HOTSPOT ACTIVE");
   } else {
-    display.print("DISCONNECTED");
+    display.print("NO NETWORK");
   }
   
-  // Right context print (Synchronized RTC Clock)
-  String liveTime = getFormattedSystemTime();
-  display.setCursor(94, 56);
-  display.print(liveTime);
+  String liveClock = getFormattedSystemTime();
+  display.setCursor(98, 56);
+  display.print(liveClock);
 
   display.display();
 }
 
-// Deprecated text utility wrapper redirected natively into the graphic matrix daemon
 void updateDisplay(String status, String info = "") {
   globalDisplayInfo = info;
   renderSystemUI();
@@ -376,7 +405,8 @@ void addLog(String msg) {
 
 void openDoor(String source) {
   doorOpen = true; 
-  globalAnimFrame = 0; // Reset animation timeline
+  deniedActive = false; // Kill any structural errors
+  globalAnimFrame = 0;  // Reset timeline
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source;
   digitalWrite(RELAY_PIN, LOW);
@@ -386,7 +416,6 @@ void openDoor(String source) {
   addLog("Otwarto: " + source);
 }
 
-// --- OUT-OF-THE-BOX & RESCUE PROVISIONING ROUTER SERVICE ---
 void handleProvisioningServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -870,32 +899,61 @@ void setup() {
     }
   }
 
-  updateDisplay("Wi-Fi: Laczenie...", "Proba: 1/3 [....]");
+  // --- POINT 1: ANIMATED WIFI PROGRESS JUICE BAR ---
   WiFi.begin(ssid, pass);
-
   unsigned long startAttempt = millis();
-  int counter = 0;
+  int juiceCounter = 0;
+  
   while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) {
-    delay(500);
-    counter++;
-    if (counter == 8)  updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [======]");
-    if (counter == 16) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
+    juiceCounter++;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(14, 16);
+    display.print("CONNECTING WIFI...");
+    
+    // Draw Juice Bar Frame Outline
+    display.drawRect(14, 34, 100, 12, SH110X_WHITE);
+    // Dynamically increment fill loop block
+    display.fillRect(17, 37, (juiceCounter * 6) % 94, 6, SH110X_WHITE);
+    display.display();
+    delay(250);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    // --- RIGOROUS PERSISTENT NTP CLOCK SYNC SYSTEM ---
     timeClient.begin();
-    timeClient.update();
+    
+    display.clearDisplay();
+    display.setCursor(14, 24);
+    display.print("SYNCING NTP CLOCK...");
+    display.display();
+    
+    int ntpRetryAttempts = 0;
+    unsigned long validEpochTimestamp = 0;
+    
+    // Loop aggressively until receiving a valid timestamp from pool servers
+    while (validEpochTimestamp < 1000000000 && ntpRetryAttempts < 15) {
+      timeClient.update();
+      validEpochTimestamp = timeClient.getEpochTime();
+      if (validEpochTimestamp < 1000000000) {
+        delay(600);
+        ntpRetryAttempts++;
+      }
+    }
 
-    unsigned long epochTime = timeClient.getEpochTime();
-    RTCTime localTime(epochTime);
-    RTC.setTime(localTime);
+    if (validEpochTimestamp > 1000000000) {
+      RTCTime localTime(validEpochTimestamp);
+      RTC.setTime(localTime);
+      addLog("System online");
+    } else {
+      addLog("System online (NTP fail backup)");
+    }
 
     server.begin(); 
     forceHardwareRFIDReset();
 
-    updateDisplay("Gotowy", WiFi.localIP().toString());
-    addLog("System online");
-
+    // Fanfare chords
     tone(BUZZER_PIN, 800, 100);  delay(120);
     tone(BUZZER_PIN, 1000, 100); delay(120);
     tone(BUZZER_PIN, 1300, 120); delay(140);
@@ -903,7 +961,7 @@ void setup() {
   } else {
     isOfflineStandby = true;
     forceHardwareRFIDReset();
-    displayProvisioningInstructions("ERR: BLAD LACZENIA!");
+    displayProvisioningInstructions("ERR: NETWORK TIMEOUT");
 
     WiFi.disconnect();
     delay(1000); 
@@ -919,16 +977,22 @@ void setup() {
 }
 
 void loop() {
-  // --- NON-BLOCKING GRAPHIC FRAMERATE TIMER MATRIX ---
-  // Loops and calculates vector translations every 80ms (~12 FPS animation engine)
+  // --- GRAPHIC FRAMERATE TIMER MATRIX ---
+  // Calculates animation loops precisely at ~12 frames per second
   if (millis() - lastFrameTick > 80) {
     lastFrameTick = millis();
     globalAnimFrame++;
-    renderSystemUI(); // Redraws screen dynamically to maintain live clock and moving elements
+    renderSystemUI(); 
   }
 
-  // --- AUTOMATED RFID HEARTBEAT WATCHDOG ---
-  if (!doorOpen && !learningMode && (millis() - lastRfidWatchdogTime > 120000)) {
+  // --- ACCESS DENIED ALIVE WATCHDOG TIMER ---
+  if (deniedActive && millis() > deniedEndTime) {
+    deniedActive = false;
+    globalDisplayInfo = "";
+  }
+
+  // --- AUTOMATED RFID HARDWARE REJUVENATOR WATCHDOG ---
+  if (!doorOpen && !learningMode && !deniedActive && (millis() - lastRfidWatchdogTime > 120000)) {
     lastRfidWatchdogTime = millis();
     forceHardwareRFIDReset(); 
   }
@@ -938,8 +1002,6 @@ void loop() {
 
     if (millis() - lastWifiRetryTime > 60000) {
       lastWifiRetryTime = millis();
-
-      updateDisplay("RESCUE WATCHDOG", "Sprawdzam Wi-Fi...");
       WiFi.begin(ssid, pass);
       unsigned long checkStart = millis();
       while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) {
@@ -948,14 +1010,13 @@ void loop() {
 
       if (WiFi.status() == WL_CONNECTED) {
         isOfflineStandby = false;
-        timeClient.begin();
         timeClient.update();
         unsigned long epochTime = timeClient.getEpochTime();
-        RTCTime localTime(epochTime);
-        RTC.setTime(localTime);
-
+        if(epochTime > 1000000000) {
+          RTCTime localTime(epochTime);
+          RTC.setTime(localTime);
+        }
         server.begin();
-        updateDisplay("Gotowy", WiFi.localIP().toString());
         addLog("Polaczenie Wi-Fi przywrocone");
         tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
       } else {
@@ -964,14 +1025,13 @@ void loop() {
         WiFi.beginAP("ZAMEK_SETUP");
         delay(500);
         server.begin();
-        displayProvisioningInstructions("ERR: REKONEKCJA FAIL");
       }
     }
   } else {
     handleWebServer(); 
   }
 
-  if (rfidResetPending && !doorOpen && (millis() - lastScanTime > 1000)) {
+  if (rfidResetPending && !doorOpen && !deniedActive && (millis() - lastScanTime > 1000)) {
     forceHardwareRFIDReset();
     rfidResetPending = false;
     if (learningMode) {
@@ -1003,7 +1063,7 @@ void loop() {
     }
   }
 
-  if (!rfidResetPending && !doorOpen && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+  if (!rfidResetPending && !doorOpen && !deniedActive && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     lastRfidWatchdogTime = millis(); 
     String uidStr = "";
     for (byte i = 0; i < rfid.uid.size; i++) {
@@ -1046,10 +1106,16 @@ void loop() {
           openDoor(String(users[matchedIndex].name)); 
         } else {
           addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
+          deniedActive = true; 
+          globalAnimFrame = 0;
+          deniedEndTime = millis() + 1800; // Trigger shake timeout
           tone(BUZZER_PIN, 200, 600);
         }
       } else {
         addLog("Odmowa: Nieznany [" + uidStr + "]");
+        deniedActive = true; 
+        globalAnimFrame = 0;
+        deniedEndTime = millis() + 1800; // Trigger shake timeout
         tone(BUZZER_PIN, 200, 500);
       }
     }
