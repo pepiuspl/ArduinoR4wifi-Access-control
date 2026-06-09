@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.8.0 - Genesis Core";
+const char* app_version = "v2.9.0 - Reactive Core";
 
 // --- USER DATABASE STRUCTURES ---
 struct User {
@@ -31,7 +31,7 @@ char proxmox_log_server[16] = "";
 int proxmox_log_port = 5000;
 bool telemetryEnabled = false;
 
-// --- NEW NOTIFICATION CONFIGURATION STORAGE ---
+// --- NOTIFICATION CONFIGURATION STORAGE ---
 char webhook_server[64] = ""; 
 bool notifyOnAccess = false;
 bool notifyOnAlarm = false;
@@ -136,12 +136,9 @@ void loadConfiguration() {
     EEPROM.get(340, proxmox_log_server);
     EEPROM.get(356, proxmox_log_port);
     telemetryEnabled = (EEPROM.read(251) == 0x01);
-    
-    // Load new webhook notification parameters
     EEPROM.get(360, webhook_server);
     notifyOnAccess = (EEPROM.read(424) == 0x01);
     notifyOnAlarm = (EEPROM.read(425) == 0x01);
-    
     provisioningMode = false; 
     hasSavedConfig = true;
   } else {
@@ -160,7 +157,6 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   newTeleIP.toCharArray(proxmox_log_server, 16);
   proxmox_log_port = newTelePort;
   telemetryEnabled = enableTele;
-  
   newHookIP.toCharArray(webhook_server, 64);
   notifyOnAccess = notifAccess;
   notifyOnAlarm = notifAlarm;
@@ -171,11 +167,9 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   EEPROM.put(340, proxmox_log_server);
   EEPROM.put(356, proxmox_log_port);
   EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
-  
   EEPROM.put(360, webhook_server);
   EEPROM.write(424, notifyOnAccess ? 0x01 : 0x00);
   EEPROM.write(425, notifyOnAlarm ? 0x01 : 0x00);
-  
   EEPROM.write(250, 0x55); 
 
   hasTemporaryPassword = false;
@@ -241,33 +235,26 @@ String getFormattedSystemTime() {
   return "--:--";
 }
 
-// NATIVE UNENCRYPTED OUTBOUND WEBHOOK DISPATCHER
 void dispatchWebhookAlert(String category, String logData) {
   if (strlen(webhook_server) < 4 || WiFi.status() != WL_CONNECTED) return;
-  
   WiFiClient alertClient;
   alertClient.setTimeout(250);
-  
   if (alertClient.connect(webhook_server, 80)) {
     alertClient.println("POST /webhook HTTP/1.1");
     alertClient.print("Host: "); alertClient.println(webhook_server);
     alertClient.println("Content-Type: application/json; charset=utf-8");
-    
     String payload = "{\"event\":\"" + category + "\",\"message\":\"" + logData + "\",\"time\":\"" + getFormattedSystemTime() + "\"}";
-    
     alertClient.print("Content-Length: "); alertClient.println(payload.length());
     alertClient.println("Connection: close");
     alertClient.println();
     alertClient.print(payload);
-    alertClient.flush();
-    alertClient.stop();
+    alertClient.flush(); alertClient.stop();
   }
 }
 
 // --- GRAPHICS ENGINE MAIN DAEMON ---
 void renderSystemUI() {
   display.clearDisplay();
-  
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(4, 2);
@@ -282,29 +269,22 @@ void renderSystemUI() {
     display.setCursor(12, 20);
     display.setTextSize(2);
     display.print("LEARNING");
-    
     display.setTextSize(1);
     display.setCursor(12, 42);
     display.print("User: " + pendingUsername);
-    
     int radarRadius = 4 + (globalAnimFrame % 3) * 5;
     display.drawCircle(114, 32, radarRadius, SH110X_WHITE);
     display.fillCircle(114, 32, 2, SH110X_WHITE);
   } 
   else if (deniedActive) {
     int shakeOffset = (globalAnimFrame % 2 == 0) ? -3 : 3; 
-    
     display.fillRoundRect(6 + shakeOffset, 32, 22, 18, 2, SH110X_WHITE);
     display.fillCircle(17 + shakeOffset, 39, 2, SH110X_BLACK);
     display.drawFastVLine(17 + shakeOffset, 41, 5, SH110X_BLACK);
     display.drawCircleHelper(17 + shakeOffset, 32, 7, 1|2, SH110X_WHITE);
     display.drawFastVLine(10 + shakeOffset, 32, 4, SH110X_WHITE);
     display.drawFastVLine(24 + shakeOffset, 32, 4, SH110X_WHITE);
-
-    display.setTextSize(2);
-    display.setCursor(38, 24);
-    display.print("DENIED");
-    
+    display.setTextSize(2); display.setCursor(38, 24); display.print("DENIED");
     if (globalAnimFrame % 4 < 3) {
       display.drawLine(106, 22, 122, 38, SH110X_WHITE);
       display.drawLine(122, 22, 106, 38, SH110X_WHITE);
@@ -312,19 +292,13 @@ void renderSystemUI() {
   } 
   else if (doorOpen) {
     int shackleSlide = (globalAnimFrame > 4) ? 5 : globalAnimFrame; 
-    
     display.fillRoundRect(6, 34, 22, 16, 2, SH110X_WHITE);
     display.fillCircle(17, 40, 2, SH110X_BLACK);
     display.drawFastVLine(17, 42, 4, SH110X_BLACK);
     display.drawCircleHelper(17, 34 - shackleSlide, 7, 1|2, SH110X_WHITE); 
     display.drawFastVLine(10, 34 - shackleSlide, 4, SH110X_WHITE);        
-    
-    display.setTextSize(2);
-    display.setCursor(38, 18); 
-    display.print("OPEN");
-    
-    display.setTextSize(1);
-    display.setCursor(38, 38); 
+    display.setTextSize(2); display.setCursor(38, 18); display.print("OPEN");
+    display.setTextSize(1); display.setCursor(38, 38); 
     if (globalDisplayInfo.length() > 11) {
       int scrollShift = (globalAnimFrame / 2) % (globalDisplayInfo.length());
       String marqueeStr = globalDisplayInfo.substring(scrollShift) + "   " + globalDisplayInfo.substring(0, scrollShift);
@@ -332,7 +306,6 @@ void renderSystemUI() {
     } else {
       display.print(globalDisplayInfo);
     }
-    
     if (globalAnimFrame > 1) {
       int checkTicks = min(globalAnimFrame - 1, 6);
       display.drawLine(110, 32, 110 + min(checkTicks, 3), 32 + min(checkTicks, 3), SH110X_WHITE);
@@ -348,11 +321,7 @@ void renderSystemUI() {
     display.drawCircleHelper(17, 32, 7, 1|2, SH110X_WHITE);
     display.drawFastVLine(10, 32, 4, SH110X_WHITE);
     display.drawFastVLine(24, 32, 4, SH110X_WHITE);
-
-    display.setTextSize(2);
-    display.setCursor(38, 24); 
-    display.print("LOCKED");
-
+    display.setTextSize(2); display.setCursor(38, 24); display.print("LOCKED");
     int pulsePhase = (globalAnimFrame / 3) % 4; 
     display.fillCircle(118, 36, 1, SH110X_WHITE);
     if (pulsePhase >= 1) display.drawCircleHelper(118, 36, 4, 2|4, SH110X_WHITE); 
@@ -360,23 +329,17 @@ void renderSystemUI() {
     if (pulsePhase >= 3) display.drawCircleHelper(118, 36, 12, 2|4, SH110X_WHITE);
   }
 
-  // 3. BOTTOM FOOTER BAR (FIXED POINT 2: IP BROADCAST REMOVED)
   display.drawFastHLine(0, 53, 128, SH110X_WHITE);
-  display.setTextSize(1);
-  display.setCursor(4, 56);
-  
+  display.setTextSize(1); display.setCursor(4, 56);
   if (WiFi.status() == WL_CONNECTED) {
-    display.print("SYSTEM ONLINE"); // Hidden IP address
+    display.print("SYSTEM ONLINE"); 
   } else if (isOfflineStandby) {
     display.print("HOTSPOT ACTIVE");
   } else {
     display.print("NO NETWORK");
   }
-  
   String liveClock = getFormattedSystemTime();
-  display.setCursor(98, 56);
-  display.print(liveClock);
-
+  display.setCursor(98, 56); display.print(liveClock);
   display.display();
 }
 
@@ -396,20 +359,15 @@ void displayProvisioningInstructions(String errorContext = "") {
 
 void sendExternalTelemetry(String logData) {
   if (!telemetryEnabled || WiFi.status() != WL_CONNECTED) return;
-
-  WiFiClient telemetryClient;
-  telemetryClient.setTimeout(150); 
-
+  WiFiClient telemetryClient; telemetryClient.setTimeout(150); 
   if (telemetryClient.connect(proxmox_log_server, proxmox_log_port)) {
     telemetryClient.println("POST /log HTTP/1.1");
     telemetryClient.print("Host: "); telemetryClient.println(proxmox_log_server);
     telemetryClient.println("Content-Type: text/plain; charset=utf-8");
     telemetryClient.print("Content-Length: "); telemetryClient.println(logData.length());
-    telemetryClient.println("Connection: close");
-    telemetryClient.println();
+    telemetryClient.println("Connection: close\r\n");
     telemetryClient.print(logData);
-    telemetryClient.flush();
-    telemetryClient.stop();
+    telemetryClient.flush(); telemetryClient.stop();
   }
 }
 
@@ -430,9 +388,7 @@ void addLog(String msg) {
 }
 
 void openDoor(String source) {
-  doorOpen = true; 
-  deniedActive = false; 
-  globalAnimFrame = 0;  
+  doorOpen = true; deniedActive = false; globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source;
   digitalWrite(RELAY_PIN, LOW);
@@ -440,7 +396,6 @@ void openDoor(String source) {
   digitalWrite(LED_RED, LOW);
   tone(BUZZER_PIN, 1000, 200);
   addLog("Otwarto: " + source);
-  
   if (notifyOnAccess) {
     dispatchWebhookAlert("ACCESS_GRANTED", "Lock opened by: " + source);
   }
@@ -449,13 +404,11 @@ void openDoor(String source) {
 void handleProvisioningServer() {
   WiFiClient client = server.available();
   if (!client) return;
-
   String reqHeader = "";
   unsigned long webTimeout = millis() + 200; 
   while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
-      char c = client.read();
-      reqHeader += c;
+      char c = client.read(); reqHeader += c;
       if (c == '\n') break; 
     }
   }
@@ -478,50 +431,19 @@ void handleProvisioningServer() {
     int nextAmp = reqHeader.indexOf("&", tpIdx);
     int endPortPos = (nextAmp != -1 && nextAmp < spacePos) ? nextAmp : spacePos;
     String nTelePort = reqHeader.substring(tpIdx, endPortPos);
-
     bool runTele = (teIdx != -1);
 
-    String decodedSSID = urlDecode(rawSSID);
-    String decodedPass = urlDecode(rawPass);
-    String decodedAdmin = urlDecode(rawAdmin);
-    String decodedTeleIP = urlDecode(rawTeleIP);
+    String decodedSSID = urlDecode(rawSSID); String decodedPass = urlDecode(rawPass);
+    String decodedAdmin = urlDecode(rawAdmin); String decodedTeleIP = urlDecode(rawTeleIP);
 
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele, "", false, false);
-
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2><p>Urzadzenie restartuje sie i sprobuje polaczyc z Twoja siecia domowa...</p></body></html>");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nUruchamianie ponowne...");
     delay(500); client.stop();
-
-    tone(BUZZER_PIN, 2000, 800);
-    delay(1000);
-    NVIC_SystemReset(); 
-    return;
+    tone(BUZZER_PIN, 2000, 800); delay(1000);
+    NVIC_SystemReset(); return;
   }
-
-  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
-  client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
-  client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);}");
-  client.println("input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#2e7d32;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;} .desc{font-size:12px;color:#888;margin-top:-5px;margin-bottom:10px;display:block;} .warn{background:#b71c1c;padding:12px;border-radius:5px;font-size:14px;margin-bottom:15px;line-height:1.4;}</style>");
-  client.println("<script>function togglePassVisibility(id){var x=document.getElementById(id); if(x.type==='password'){x.type='text';}else{x.type='password';}}</script></head><body>");
-  client.println("<h2>⚙️ Kreator Pierwszej Konfiguracji</h2>");
-
-  if (hasSavedConfig) {
-    client.print("<div class='box' style='border:2px solid #b71c1c;'><div class='warn'>⚠️ <strong>BLAD POLACZENIA!</strong><br>Urzadzenie nie moglo polaczyc sie z siecia: ");
-    client.print(ssid); client.println("<br>Sprawdz czy nazwa i haslo sa poprawne. Formularz ponizej zostal uzupełniony blednymi danymi w celu poprawki.</div></div>");
-  }
-
-  client.println("<div class='box'><form method='GET' action='/save_setup'>");
-  client.print("<h3>1. Siec Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
-  client.print("<input type='password' id='wifi-pass-field' name='p' placeholder='Haslo do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
-  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"wifi-pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
-
-  client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='password' id='admin-pass-field' name='a' placeholder='Hasło Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
-  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"admin-pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
-  client.println("<span class='desc'>Bedziesz uzywac tego hasla do zarzadzania kartami i otwierania zamku przez przegladarke.</span>");
-
-  client.print("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logow' value='"); client.print(proxmox_log_server); client.print("'><br>");
-  client.print("<input type='text' name='tp' placeholder='Port Telemetrii' value='"); client.print(proxmox_log_port); client.print("'><br>");
-  client.print("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' "); client.print(telemetryEnabled ? "checked" : ""); client.println("> Wlacz automatyczna wysylke telemetryczna</label><br>");
-  client.println("<input type='submit' class='btn' value='Zapisz Ustawienia i Uruchom'></form></div></body></html>");
+  // Lightweight text backup fallback response for raw provisioning configurations
+  client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"provisioning\":true}");
   delay(1); client.stop();
 }
 
@@ -533,47 +455,25 @@ void handleWebServer() {
   unsigned long webTimeout = millis() + 200; 
   while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
-      char c = client.read();
-      reqHeader += c;
+      char c = client.read(); reqHeader += c;
       if (c == '\n') break; 
     }
   }
   while (client.available()) { client.read(); }
 
-  if (reqHeader.indexOf("GET /init") != -1) {
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
-    client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
-    client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5); input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#7b1fa2;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;} .desc{font-size:12px;color:#888;margin-top:-5px;margin-bottom:10px;display:block;}</style>");
-    client.println("<script>function togglePassVisibility(id){var x=document.getElementById(id); if(x.type==='password'){x.type='text';}else{x.type='password';}}</script></head><body>");
-    client.println("<h2>⚙️ [SANDBOX] Kreator Konfiguracji</h2><div style='color:#ff8f00; font-size:13px;'>PROFIL TESTOWY INTERFEJSU</div>");
-    client.println("<div class='box'><form method='GET' action='/save_setup'>");
-    client.print("<h3>1. Siec Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa domowego Wi-Fi (SSID)' value='"); client.print(ssid); client.print("' required><br>");
-    client.print("<input type='password' id='wifi-pass-field' name='p' placeholder='Haslo do Wi-Fi' value='"); client.print(pass); client.print("' required><br>");
-    client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"wifi-pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
-    client.print("<h3>2. Bezpieczenstwo Panelu</h3><input type='password' id='admin-pass-field' name='a' placeholder='Hasło Administratora WWW' maxlength='15' value='"); client.print(admin_password); client.print("' required><br>");
-    client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"admin-pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
-    client.print("<h3>3. Telemetria Serwera</h3><input type='text' name='ti' placeholder='IP Serwera Logow' value='"); client.print(proxmox_log_server); client.print("'><br>");
-    client.print("<input type='text' name='tp' placeholder='Port Telemetrii' value='"); client.print(proxmox_log_port); client.print("'><br>");
-    client.print("<label style='font-size:13px;color:#aaa;'><input type='checkbox' name='te' value='1' "); client.print(telemetryEnabled ? "checked" : ""); client.println("> Wlacz automatyczna wysylke telemetryczna</label><br>");
-    client.println("<input type='submit' class='btn' value='Zapisz i Zrestartuj Urządzenie'></form></div></body></html>");
-    delay(1); client.stop(); return;
-  }
-
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
     sprintf(temporary_password, "%ld", tokenNum);
     hasTemporaryPassword = true;
-
     addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
     globalDisplayInfo = "Klucz tymczasowy wyslany";
     tone(BUZZER_PIN, 1400, 400);
-
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
     delay(1); client.stop(); return;
   }
 
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
-    client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
+    client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{\"error\":\"lockout\"}");
     delay(1); client.stop(); return;
   }
 
@@ -582,13 +482,11 @@ void handleWebServer() {
   if (passPos != -1) {
     int spacePos = reqHeader.indexOf(" ", passPos);
     int ampPos = reqHeader.indexOf("&", passPos);
-    int endPos = spacePos;
-    if (ampPos != -1 && ampPos < spacePos) endPos = ampPos;
+    int endPos = (ampPos != -1 && ampPos < spacePos) ? ampPos : spacePos;
     attemptedPass = reqHeader.substring(passPos + 5, endPos);
   }
 
   String decodedAttempt = urlDecode(attemptedPass);
-
   bool authPermanent = (passPos != -1 && decodedAttempt == String(admin_password));
   bool authTemporary = (passPos != -1 && hasTemporaryPassword && decodedAttempt == String(temporary_password));
   bool isAuthenticated = (authPermanent || authTemporary);
@@ -600,9 +498,7 @@ void handleWebServer() {
       if (failedLoginAttempts >= 5) {
         lockoutEndTime = millis() + 300000; 
         addLog("ALARM: Atak BruteForce!");
-        if (notifyOnAlarm) {
-          dispatchWebhookAlert("BRUTEFORCE_ALARM", "Multiple invalid login attempts detected!");
-        }
+        if (notifyOnAlarm) dispatchWebhookAlert("BRUTEFORCE_ALARM", "Multiple invalid login attempts detected!");
       }
     } else if (isAuthenticated) {
       failedLoginAttempts = 0; 
@@ -610,11 +506,7 @@ void handleWebServer() {
   }
 
   if (reqHeader.indexOf("GET /api/data") != -1) {
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json");
-    client.println("Connection: close");
-    client.println();
-
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n");
     if (!isAuthenticated) {
       client.println("{\"auth\":false}");
     } else {
@@ -623,7 +515,6 @@ void handleWebServer() {
       client.print("\",\"pending\":\""); client.print(pendingUsername);
       client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
       client.print(",\"total\":"); client.print(totalCards);
-
       client.print(",\"users\":[");
       for (int i = 0; i < totalCards; i++) {
         client.print("{\"idx\":"); client.print(i);
@@ -645,7 +536,6 @@ void handleWebServer() {
       }
       client.print("],\"ssid\":\""); client.print(ssid);
       client.print("\",\"admin_pass\":\""); client.print(admin_password);
-      // New output values sent down to web client
       client.print("\",\"webhook_srv\":\""); client.print(webhook_server);
       client.print("\",\"ntf_access\":"); client.print(notifyOnAccess ? "true" : "false");
       client.print(",\"ntf_alarm\":"); client.print(notifyOnAlarm ? "true" : "false");
@@ -656,33 +546,27 @@ void handleWebServer() {
 
   if (isAuthenticated) {
     if (reqHeader.indexOf("/api/unlock") != -1) {
-      openDoor("Panel WWW");
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      openDoor("App API");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
-      learningMode = !learningMode;
-      autoExitLearn = false; 
+      learningMode = !learningMode; autoExitLearn = false; 
       if (learningMode) {
         if (reqHeader.indexOf("username=") != -1) {
           int startIdx = reqHeader.indexOf("username=") + 9;
           int endIdx = reqHeader.indexOf(" ", startIdx);
-          if (reqHeader.indexOf("&", startIdx) != -1 && reqHeader.indexOf("&", startIdx) < endIdx) {
-            endIdx = reqHeader.indexOf("&", startIdx);
-          }
+          if (reqHeader.indexOf("&", startIdx) != -1 && reqHeader.indexOf("&", startIdx) < endIdx) endIdx = reqHeader.indexOf("&", startIdx);
           pendingUsername = reqHeader.substring(startIdx, endIdx);
           pendingUsername.replace("+", " "); 
           if(pendingUsername.length() == 0) pendingUsername = "Uzytkownik R4";
         }
-        forceHardwareRFIDReset();
-        globalAnimFrame = 0;
-        addLog("Tryb Ucz. [" + pendingUsername + "]");
-        tone(BUZZER_PIN, 1500, 300);
+        forceHardwareRFIDReset(); globalAnimFrame = 0;
+        addLog("Tryb Ucz. [" + pendingUsername + "]"); tone(BUZZER_PIN, 1500, 300);
       } else {
-        addLog("Stop Ucz: Panel WWW");
-        tone(BUZZER_PIN, 800, 300);
+        addLog("Stop Ucz: App API"); tone(BUZZER_PIN, 800, 300);
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/delete_user") != -1) {
@@ -691,37 +575,29 @@ void handleWebServer() {
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
         if (targetIdx >= 0 && targetIdx < totalCards) {
           String deletedName = String(users[targetIdx].name);
-          deleteUser(targetIdx);
-          addLog("Usunieto: " + deletedName);
-          tone(BUZZER_PIN, 600, 400);
+          deleteUser(targetIdx); addLog("Usunieto: " + deletedName); tone(BUZZER_PIN, 600, 400);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
-    // FIXED POINT 1: SAFELY EXTRACTION RE-ENGINEERED TO PREVENT CORES APPENDING &pass=ad
     else if (reqHeader.indexOf("/api/rename_user") != -1) {
-      int idxPos = reqHeader.indexOf("idx=");
-      int namePos = reqHeader.indexOf("name=");
+      int idxPos = reqHeader.indexOf("idx="); int namePos = reqHeader.indexOf("name=");
       if (idxPos != -1 && namePos != -1) {
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf("&", idxPos)).toInt();
-        
         int spacePos = reqHeader.indexOf(" ", namePos);
         int ampPos = reqHeader.indexOf("&", namePos + 5);
         int endPos = (ampPos != -1 && ampPos < spacePos) ? ampPos : spacePos;
-        
         String newName = reqHeader.substring(namePos + 5, endPos);
         newName = urlDecode(newName);
-        
         if (targetIdx >= 0 && targetIdx < totalCards && newName.length() > 0) {
           memset(users[targetIdx].name, 0, 16);
           newName.toCharArray(users[targetIdx].name, 16);
           EEPROM.put(10 + (targetIdx * sizeof(User)), users[targetIdx]); 
-          addLog("Zmiana nazwy slot [" + String(targetIdx) + "]");
-          tone(BUZZER_PIN, 1200, 150);
+          addLog("Zmiana nazwy slot [" + String(targetIdx) + "]"); tone(BUZZER_PIN, 1200, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
@@ -735,7 +611,7 @@ void handleWebServer() {
           tone(BUZZER_PIN, 1100, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/clear_logs") != -1) {
@@ -744,10 +620,8 @@ void handleWebServer() {
         int spaceIdx = reqHeader.indexOf(" ", tPos);
         String cutoffVal = reqHeader.substring(tPos + 5, spaceIdx);
         cutoffVal.replace("%3A", ":"); 
-
         if (cutoffVal == "all") {
-          logCount = 0;
-          addLog("Wyczyszczono caly dziennik");
+          logCount = 0; addLog("Wyczyszczono caly dziennik");
         } else if (cutoffVal.indexOf(":") != -1) {
           int targetH = cutoffVal.substring(0, cutoffVal.indexOf(":")).toInt();
           int targetM = cutoffVal.substring(cutoffVal.indexOf(":") + 1).toInt();
@@ -758,326 +632,151 @@ void handleWebServer() {
             int logM = lastActions[i].time.substring(3, 5).toInt();
             int logMinutesWeight = (logH * 60) + logM;
             if (logMinutesWeight < targetMinutesWeight) {
-              for (int j = i; j < logCount - 1; j++) {
-                lastActions[j] = lastActions[j + 1];
-              }
+              for (int j = i; j < logCount - 1; j++) lastActions[j] = lastActions[j + 1];
               logCount--;
-            } else {
-              i++; 
-            }
+            } else { i++; }
           }
           addLog("Usunieto logi starsze niz " + cutoffVal);
         }
         tone(BUZZER_PIN, 900, 150);
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
-    // RE-ENGINEERED COMPOSITE SAVE CONFIGURATION DESTRUCTOR INTERFACE
     else if (reqHeader.indexOf("/api/save_settings") != -1) {
-      int sIdx = reqHeader.indexOf("s=") + 2;
-      int pIdx = reqHeader.indexOf("&p=") + 3;
-      int aIdx = reqHeader.indexOf("&a=") + 3;
-      int wIdx = reqHeader.indexOf("&w=");
-      int naIdx = reqHeader.indexOf("&na=");
-      int nalIdx = reqHeader.indexOf("&nal=");
+      int sIdx = reqHeader.indexOf("s=") + 2; int pIdx = reqHeader.indexOf("&p=") + 3;
+      int aIdx = reqHeader.indexOf("&a=") + 3; int wIdx = reqHeader.indexOf("&w=");
+      int naIdx = reqHeader.indexOf("&na="); int nalIdx = reqHeader.indexOf("&nal=");
 
       String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
       String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
-      
-      int spaceIdxA = reqHeader.indexOf(" ", aIdx);
-      int nextAmpA = reqHeader.indexOf("&", aIdx);
+      int spaceIdxA = reqHeader.indexOf(" ", aIdx); int nextAmpA = reqHeader.indexOf("&", aIdx);
       int endAdmin = (nextAmpA != -1 && nextAmpA < spaceIdxA) ? nextAmpA : spaceIdxA;
       String nAdmin = reqHeader.substring(aIdx, endAdmin);
       
       String nHook = "";
       if (wIdx != -1) {
-        int spaceW = reqHeader.indexOf(" ", wIdx);
-        int ampW = reqHeader.indexOf("&", wIdx + 3);
+        int spaceW = reqHeader.indexOf(" ", wIdx); int ampW = reqHeader.indexOf("&", wIdx + 3);
         int endW = (ampW != -1 && ampW < spaceW) ? ampW : spaceW;
         nHook = reqHeader.substring(wIdx + 3, endW);
       }
-
       String decSSID = urlDecode(nSSID); String decPass = urlDecode(nPass); String decAdmin = urlDecode(nAdmin);
       String decHook = urlDecode(nHook);
       
       saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled, decHook, (naIdx != -1), (nalIdx != -1));
       addLog("Zapisano ustawienia");
-
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
   }
 
-  client.println("HTTP/1.1 200 OK");
-  client.println("Content-Type: text/html");
-  client.println("Connection: close");
-  client.println();
-  client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
-  client.println("<style>body{background:#121212;color:#e0e0e0;font-family:sans-serif;text-align:center;padding:20px;}");
-  client.println(".box{background:#1e1e1e;border-radius:10px;padding:20px;max-width:500px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);}");
-  client.println(".btn{display:block;width:80%;margin:15px auto;padding:12px;color:#fff;font-weight:bold;border:none;border-radius:5px;cursor:pointer;text-decoration:none;font-size:16px;box-sizing:border-box;}");
-  client.println(".btn-open{background:#2e7d32;} .btn-learn{background:#1565c0;} .btn-stop-learn{background:#cc3333;} .btn-login{background:#ff8f00;width:50%;}");
-  client.println("input[type=password], input[type=text]{padding:10px;width:75%;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;font-size:16px;text-align:center;margin-bottom:12px;box-sizing:border-box;}");
-  client.println(".log-table{width:100%;text-align:left;margin-top:15px;border-collapse:collapse;} .log-table td{padding:8px;border-bottom:1px solid #333;} .time{color:#888;font-size:13px;width:80px;} .hide{display:none;}</style>");
-  client.println("<script>function togglePassVisibility(id){var x=document.getElementById(id); if(x.type==='password'){x.type='text';}else{x.type='password';}}</script>");
-  client.println("<script>var pass=''; var dataTimer; function getParam(n){return new URLSearchParams(window.location.search).get(n);} ");
-  client.println("function runCmd(url){fetch(url+(url.includes('?')?'&':'?')+'pass='+pass).then(()=>updateData());} ");
-  client.println("function renameUser(idx, oldName){ let n=prompt('Wpisz nową nazwę uzytkownika (max 15 znaków):', oldName); if(n && n.trim().length>0){ runCmd('/api/rename_user?idx='+idx+'&name='+encodeURIComponent(n.trim())); } } ");
-  client.println("function downloadCSV(){ fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ let csv='Data/Czas,Wpis\\n'; d.logs.forEach(l=>{ let clean=l.replace('[','').split('] '); csv+=`\"${clean[0]}\",\"${clean[1]}\"\\n`; }); let b=new Blob([csv],{type:'text/csv;charset=utf-8;'}); let a=document.createElement('a'); a.href=URL.createObjectURL(b); a.setAttribute('download','dziennik_zamka.csv'); document.body.appendChild(a); a.click(); document.body.removeChild(a); }); } ");
-  client.println("function handleClearLogs(){ let v=prompt('Wpisz godzinę w formacie HH:MM (np. 18:00), aby usunąć logi STARSZE niż podany czas, lub wpisz \"all\" aby wyczyścić cały dziennik:', 'all'); if(v && v.trim().length > 0){ runCmd('/api/clear_logs?time='+encodeURIComponent(v.trim())); } } ");
-  client.println("function triggerReset(){ if(confirm('Wygenerować jednorazowe hasło ratunkowe? Zostanie ono zapisane w logach systemowych.')){ fetch('/api/forgot_password').then(()=>alert('Hasło tymczasowe wygenerowane! Sprawdź ekran OLED lub logi Proxmox.')); } } ");
-  client.println("function updateData(){fetch('/api/data?pass='+pass).then(r=>r.json()).then(d=>{ ");
-  client.println("if(!d.auth){document.getElementById('login-view').classList.remove('hide');document.getElementById('app-view').classList.add('hide');pass='';return;} ");
-  client.println("document.getElementById('login-view').classList.add('hide'); document.getElementById('app-view').classList.remove('hide'); ");
-  client.println("document.getElementById('v-mode').innerHTML=d.mode; document.getElementById('v-lock').innerHTML=d.lock?'OTWARTY':'ZAMKNIĘTY'; ");
-  client.println("document.getElementById('v-lock').style.color=d.lock?'#81c784':'#e57373'; ");
-  client.println("let uH=''; d.users.forEach(u=>{ uH+=`<tr><td><strong>${u.name}</strong><br><span style=\"font-size:11px;color:#666;\">${u.uid}</span></td><td style=\"text-align:right;white-space:nowrap;\"><a href=\"#\" onclick=\"runCmd('/api/toggle_user_active?idx='+${u.idx})\" style=\"color:${u.active?'#81c784':'#ffb300'};text-decoration:none;margin-right:16px;font-weight:bold;\">${u.active?'🟢 Aktywna':'🔴 Zablokowana'}</a><a href=\"#\" onclick=\"renameUser(${u.idx},'${u.name}')\" style=\"color:#64b5f6;text-decoration:none;margin-right:12px;\">✏️ Edytuj</a><a href=\"#\" onclick=\"runCmd('/api/delete_user?idx='+${u.idx})\" style=\"color:#e57373;text-decoration:none;\">❌ Usuń</a></td></tr>`; }); ");
-  client.println("document.getElementById('v-users').innerHTML=uH?uH:'<tr><td>Baza pusta</td></tr>'; ");
-  client.println("let lH=''; d.logs.forEach(l=>{ lH+=`<tr><td>${l}</td></tr>`; }); document.getElementById('v-logs').innerHTML=lH; ");
-  client.println("if(document.activeElement.id !== 'cfg-ssid') document.getElementById('cfg-ssid').value=d.ssid; ");
-  client.println("if(document.activeElement.id !== 'cfg-admin') document.getElementById('cfg-admin').value=d.admin_pass; ");
-  // Web browser synchronization updates for notifications
-  client.println("if(document.activeElement.id !== 'cfg-webhook') document.getElementById('cfg-webhook').value=d.webhook_srv; ");
-  client.println("document.getElementById('cfg-notif-access').checked=d.ntf_access; ");
-  client.println("document.getElementById('cfg-notif-alarm').checked=d.ntf_alarm; ");
-  client.println("});} ");
-  client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); dataTimer=setInterval(updateData,2000);}; ");
-  client.println("function saveCfg(){ clearInterval(dataTimer); let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); let w=encodeURIComponent(document.getElementById('cfg-webhook').value); let na=document.getElementById('cfg-notif-access').checked?'&na=1':''; let nal=document.getElementById('cfg-notif-alarm').checked?'&nal=1':''; runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}&w=${w}${na}${nal}`); alert('Zapisano! Urządzenie zostanie zaktualizowane.');} </script></head><body>");
-
-  client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
-  client.println("<div class='box'><form method='GET' action='/'>");
-  client.println("<input type='password' id='pass-field' name='pass' placeholder='Wpisz hasło klucza' required><br>");
-  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"pass-field\")'> 👁️ Pokaz wpisane haslo</label>");
-  client.println("<input type='submit' class='btn btn-login' value='Zaloguj'></form>");
-  client.println("<br><a href='#' onclick='triggerReset()' style='color:#e57373;text-decoration:none;font-size:13px;letter-spacing:0.3px;'>Nie pamiętasz hasła? Wygeneruj klucz tymczasowy</a></div></div>");
-
-  client.println("<div id='app-view' class='hide'><h2>🛠️ Panel Sterowania Access Control</h2>");
-  client.println("<div class='box'><h3>Status Urządzenia</h3><p>Tryb: <strong id='v-mode'>-</strong></p><p>Rygiel: <strong id='v-lock'>-</strong></p></div>");
-  client.println("<div class='box'><h3>Działania Zdalne</h3><button onclick=\"runCmd('/api/unlock')\" class='btn btn-open'>🔓 Otwórz Zamek zdalnie</button>");
-  client.println("<div style='margin-top:20px;'><input type='text' id='new-user-name' placeholder='Imię dla nowej karty' maxlength='15'><button onclick=\"runCmd('/api/toggle_learn?username='+encodeURIComponent(document.getElementById('new-user-name').value))\" class='btn btn-learn'>➕ Przełącz Tryb Uczenia</button></div></div>");
-
-  client.println("<div class='box'><h3>👥 Baza Użytkowników</h3><table class='log-table' id='v-users'></table></div>");
-
-  // POINT 3: WEB USER INTERFACE ADDITIONS FOR NOTIFICATION OVERLAYS
-  client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
-  client.println("<input type='text' id='cfg-ssid' placeholder='WiFi SSID'><br>");
-  client.println("<input type='password' id='cfg-pass' placeholder='Wpisz nowe hasło do Wi-Fi (opcjonalnie)'><br>");
-  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-pass\")'> 👁️ Pokaz wpisane haslo</label>");
-  client.println("<input type='password' id='cfg-admin' placeholder='Hasło Panelu Administratora'><br>");
-  client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-admin\")'> 👁️ Pokaz wpisane haslo</label>");
-  
-  client.println("<h3 style='margin-top:25px;'>📬 Usługi Powiadomień (Webhook Host)</h3>");
-  client.println("<input type='text' id='cfg-webhook' placeholder='IP/Host Serwera Webhook'><br>");
-  client.println("<label style='font-size:14px;display:block;margin-bottom:6px;'><input type='checkbox' id='cfg-notif-access'> Wysyłaj alert przy każdym otwarciu drzwi</label>");
-  client.println("<label style='font-size:14px;display:block;margin-bottom:15px;'><input type='checkbox' id='cfg-notif-alarm'> Wysyłaj alert przy alarmie sabotażu/blokady</label>");
-  
-  client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
-
-  client.println("<div class='box'><h3>Dziennik Zdarzeń (Max 30 wpisów)</h3>");
-  client.println("<button onclick='downloadCSV()' class='btn' style='background:#0288d1;margin-bottom:10px;'>📥 Pobierz jako plik Excel (CSV)</button>");
-  client.println("<button onclick='handleClearLogs()' class='btn' style='background:#b71c1c;'>🗑️ Wyczyść Dziennik</button>");
-  client.println("<table class='log-table' id='v-logs'></table></div></div>");
-
-  client.println("<div style='margin-top: 40px; font-size: 11px; color: #555; letter-spacing: 0.5px;'>");
-  client.println("System Hardware ID: Renesas RA4M1 Core | " + String(app_version));
-  client.println("</div></body></html>");
-
+  // --- STANDARD FALLBACK FOR WRONG API CALLS ---
+  client.println("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"unauthorized\"}");
   delay(1); client.stop();
 }
 
 void setup() {
   Serial.begin(9600);
   delay(1500); 
-
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-
   if (digitalRead(BUTTON_PIN) == LOW) {
     delay(2000);
     if (digitalRead(BUTTON_PIN) == LOW) {
-      factoryResetSettings(); 
-      Serial.println("[FACTORY RESET COMPLETE]");
+      factoryResetSettings(); Serial.println("[FACTORY RESET COMPLETE]");
     }
   }
 
-  loadConfiguration(); 
-  loadCards();
+  loadConfiguration(); loadCards();
+  pinMode(RELAY_PIN, OUTPUT); pinMode(LED_GREEN, OUTPUT); pinMode(LED_RED, OUTPUT);
+  pinMode(RST_PIN, OUTPUT); digitalWrite(RST_PIN, HIGH); delay(50);
+  digitalWrite(RELAY_PIN, HIGH); digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, HIGH);
 
-  pinMode(RELAY_PIN, OUTPUT);
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_RED, OUTPUT);
-
-  pinMode(RST_PIN, OUTPUT); 
-  digitalWrite(RST_PIN, HIGH);
-  delay(50);
-
-  digitalWrite(RELAY_PIN, HIGH);
-  digitalWrite(LED_GREEN, LOW);
-  digitalWrite(LED_RED, HIGH);
-
-  SPI.begin();
-  RTC.begin(); 
-
-  randomSeed(analogRead(0));
-
-  delay(300); 
-  display.begin(0x3C, true); 
-  display.clearDisplay();
+  SPI.begin(); RTC.begin(); randomSeed(analogRead(0));
+  delay(300); display.begin(0x3C, true); display.clearDisplay();
 
   if (provisioningMode) {
-    displayProvisioningInstructions(); 
-    WiFi.beginAP("ZAMEK_SETUP");
-    server.begin();
-    while (true) {
-      handleProvisioningServer();
-      delay(10);
-    }
+    displayProvisioningInstructions(); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
+    while (true) { handleProvisioningServer(); delay(10); }
   }
 
   WiFi.begin(ssid, pass);
-  unsigned long startAttempt = millis();
-  int juiceCounter = 0;
-  
+  unsigned long startAttempt = millis(); int juiceCounter = 0;
   while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) {
-    juiceCounter++;
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(14, 16);
-    display.print("CONNECTING WIFI...");
-    
+    juiceCounter++; display.clearDisplay();
+    display.setTextSize(1); display.setTextColor(SH110X_WHITE);
+    display.setCursor(14, 16); display.print("CONNECTING WIFI...");
     display.drawRect(14, 34, 100, 12, SH110X_WHITE);
     display.fillRect(17, 37, (juiceCounter * 6) % 94, 6, SH110X_WHITE);
-    display.display();
-    delay(250);
+    display.display(); delay(250);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     timeClient.begin();
-    
-    display.clearDisplay();
-    display.setCursor(14, 24);
-    display.print("SYNCING NTP CLOCK...");
-    display.display();
-    
-    int ntpRetryAttempts = 0;
-    unsigned long validEpochTimestamp = 0;
-    
+    display.clearDisplay(); display.setCursor(14, 24); display.print("SYNCING NTP CLOCK..."); display.display();
+    int ntpRetryAttempts = 0; unsigned long validEpochTimestamp = 0;
     while (validEpochTimestamp < 1000000000 && ntpRetryAttempts < 15) {
-      timeClient.update();
-      validEpochTimestamp = timeClient.getEpochTime();
-      if (validEpochTimestamp < 1000000000) {
-        delay(600);
-        ntpRetryAttempts++;
-      }
+      timeClient.update(); validEpochTimestamp = timeClient.getEpochTime();
+      if (validEpochTimestamp < 1000000000) { delay(600); ntpRetryAttempts++; }
     }
-
     if (validEpochTimestamp > 1000000000) {
-      RTCTime localTime(validEpochTimestamp);
-      RTC.setTime(localTime);
-      addLog("System online");
-    } else {
-      addLog("System online (NTP fail backup)");
-    }
+      RTCTime localTime(validEpochTimestamp); RTC.setTime(localTime); addLog("System online");
+    } else { addLog("System online (NTP fail backup)"); }
 
-    server.begin(); 
-    forceHardwareRFIDReset();
-
+    server.begin(); forceHardwareRFIDReset();
     tone(BUZZER_PIN, 800, 100);  delay(120);
     tone(BUZZER_PIN, 1000, 100); delay(120);
     tone(BUZZER_PIN, 1300, 120); delay(140);
     tone(BUZZER_PIN, 1600, 300);
   } else {
-    isOfflineStandby = true;
-    forceHardwareRFIDReset();
+    isOfflineStandby = true; forceHardwareRFIDReset();
     displayProvisioningInstructions("ERR: NETWORK TIMEOUT");
-
-    WiFi.disconnect();
-    delay(1000); 
-    WiFi.beginAP("ZAMEK_SETUP");
-    delay(500);
-    server.begin();
-    tone(BUZZER_PIN, 300, 600);
-    lastWifiRetryTime = millis(); 
+    WiFi.disconnect(); delay(1000); WiFi.beginAP("ZAMEK_SETUP"); delay(500); server.begin();
+    tone(BUZZER_PIN, 300, 600); lastWifiRetryTime = millis(); 
   }
-  
-  lastRfidWatchdogTime = millis(); 
-  lastFrameTick = millis();
+  lastRfidWatchdogTime = millis(); lastFrameTick = millis();
 }
 
 void loop() {
   if (millis() - lastFrameTick > 80) {
-    lastFrameTick = millis();
-    globalAnimFrame++;
-    renderSystemUI(); 
+    lastFrameTick = millis(); globalAnimFrame++; renderSystemUI(); 
   }
-
-  if (deniedActive && millis() > deniedEndTime) {
-    deniedActive = false;
-    globalDisplayInfo = "";
-  }
-
+  if (deniedActive && millis() > deniedEndTime) { deniedActive = false; globalDisplayInfo = ""; }
   if (!doorOpen && !learningMode && !deniedActive && (millis() - lastRfidWatchdogTime > 120000)) {
-    lastRfidWatchdogTime = millis();
-    forceHardwareRFIDReset(); 
+    lastRfidWatchdogTime = millis(); forceHardwareRFIDReset(); 
   }
 
   if (isOfflineStandby) {
     handleProvisioningServer();
-
     if (millis() - lastWifiRetryTime > 60000) {
-      lastWifiRetryTime = millis();
-      WiFi.begin(ssid, pass);
+      lastWifiRetryTime = millis(); WiFi.begin(ssid, pass);
       unsigned long checkStart = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) {
-        delay(200);
-      }
-
+      while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) { delay(200); }
       if (WiFi.status() == WL_CONNECTED) {
-        isOfflineStandby = false;
-        timeClient.update();
+        isOfflineStandby = false; timeClient.update();
         unsigned long epochTime = timeClient.getEpochTime();
-        if(epochTime > 1000000000) {
-          RTCTime localTime(epochTime);
-          RTC.setTime(localTime);
-        }
-        server.begin();
-        addLog("Polaczenie Wi-Fi przywrocone");
+        if(epochTime > 1000000000) { RTCTime localTime(epochTime); RTC.setTime(localTime); }
+        server.begin(); addLog("Polaczenie Wi-Fi przywrocone");
         tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
       } else {
-        WiFi.disconnect();
-        delay(1000); 
-        WiFi.beginAP("ZAMEK_SETUP");
-        delay(500);
-        server.begin();
+        WiFi.disconnect(); delay(1000); WiFi.beginAP("ZAMEK_SETUP"); delay(500); server.begin();
       }
     }
-  } else {
-    handleWebServer(); 
-  }
+  } else { handleWebServer(); }
 
   if (rfidResetPending && !doorOpen && !deniedActive && (millis() - lastScanTime > 1000)) {
-    forceHardwareRFIDReset();
-    rfidResetPending = false;
-    if (learningMode) {
-      globalAnimFrame = 0;
-    } else {
-      globalDisplayInfo = "";
-    }
+    forceHardwareRFIDReset(); rfidResetPending = false;
+    if (learningMode) { globalAnimFrame = 0; } else { globalDisplayInfo = ""; }
   }
 
   if (learningMode) {
     if (millis() % 500 < 250) {
-      digitalWrite(LED_RED, HIGH);
-      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH); digitalWrite(LED_GREEN, LOW);
     } else {
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);
+      digitalWrite(LED_RED, LOW); digitalWrite(LED_GREEN, HIGH);
     }
   } else if (!doorOpen) {
     if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
-      digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW);
-      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW); digitalWrite(LED_GREEN, LOW);
     } else {
       if (isOfflineStandby) {
         digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH);
@@ -1089,8 +788,7 @@ void loop() {
   }
 
   if (!rfidResetPending && !doorOpen && !deniedActive && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    lastRfidWatchdogTime = millis(); 
-    String uidStr = "";
+    lastRfidWatchdogTime = millis(); String uidStr = "";
     for (byte i = 0; i < rfid.uid.size; i++) {
       if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
       uidStr += String(rfid.uid.uidByte[i], HEX);
@@ -1101,100 +799,55 @@ void loop() {
     if (learningMode) {
       saveNewCard(rfid.uid.uidByte, pendingUsername);
       addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
-      
-      globalAnimFrame = 0;
-      globalDisplayInfo = "DODANO KARTE";
-
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);
-
-      tone(BUZZER_PIN, 1000, 150); delay(150);
-      tone(BUZZER_PIN, 1500, 150); delay(150);
-      tone(BUZZER_PIN, 2000, 400);
-
-      if (autoExitLearn) {
-        learningMode = false;
-        autoExitLearn = false;
-      }
+      globalAnimFrame = 0; globalDisplayInfo = "DODANO KARTE";
+      digitalWrite(LED_RED, LOW); digitalWrite(LED_GREEN, HIGH);
+      tone(BUZZER_PIN, 1000, 150); delay(150); tone(BUZZER_PIN, 1500, 150); delay(150); tone(BUZZER_PIN, 2000, 400);
+      if (autoExitLearn) { learningMode = false; autoExitLearn = false; }
     } else {
-      bool valid = false;
-      int matchedIndex = -1;
+      bool valid = false; int matchedIndex = -1;
       for (int i = 0; i < totalCards; i++) {
-        if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) {
-          valid = true;
-          matchedIndex = i;
-          break;
-        }
+        if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) { valid = true; matchedIndex = i; break; }
       }
       if (valid) {
         if (isCardActive[matchedIndex]) {
           openDoor(String(users[matchedIndex].name)); 
         } else {
           addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
-          deniedActive = true; 
-          globalAnimFrame = 0;
-          deniedEndTime = millis() + 1800; 
-          tone(BUZZER_PIN, 200, 600);
-          if (notifyOnAlarm) {
-            dispatchWebhookAlert("ACCESS_DENIED_LOCKED", "Blocked card attempt by user: " + String(users[matchedIndex].name));
-          }
+          deniedActive = true; globalAnimFrame = 0; deniedEndTime = millis() + 1800; tone(BUZZER_PIN, 200, 600);
+          if (notifyOnAlarm) dispatchWebhookAlert("ACCESS_DENIED_LOCKED", "Blocked card attempt by user: " + String(users[matchedIndex].name));
         }
       } else {
         addLog("Odmowa: Nieznany [" + uidStr + "]");
-        deniedActive = true; 
-        globalAnimFrame = 0;
-        deniedEndTime = millis() + 1800; 
-        tone(BUZZER_PIN, 200, 500);
-        if (notifyOnAlarm) {
-          dispatchWebhookAlert("UNKNOWN_CARD_SWIPE", "Unauthorized card scan attempted: " + uidStr);
-        }
+        deniedActive = true; globalAnimFrame = 0; deniedEndTime = millis() + 1800; tone(BUZZER_PIN, 200, 500);
+        if (notifyOnAlarm) dispatchWebhookAlert("UNKNOWN_CARD_SWIPE", "Unauthorized card scan attempted: " + uidStr);
       }
     }
-    rfid.PICC_HaltA();
-    rfidResetPending = true;
-    lastScanTime = millis();
+    rfid.PICC_HaltA(); rfidResetPending = true; lastScanTime = millis();
   }
 
   if (digitalRead(BUTTON_PIN) == LOW) {
-    unsigned long pressTime = millis();
-    bool longPressed = false;
+    unsigned long pressTime = millis(); bool longPressed = false;
     while (digitalRead(BUTTON_PIN) == LOW) {
       if (millis() - pressTime > 3000) { 
-        longPressed = true;
-        learningMode = !learningMode; 
-        autoExitLearn = true; 
+        longPressed = true; learningMode = !learningMode; autoExitLearn = true; 
         if (learningMode) {
-          pendingUsername = "Przycisk"; 
-          forceHardwareRFIDReset();
-          lastRfidWatchdogTime = millis(); 
-          globalAnimFrame = 0;
+          pendingUsername = "Przycisk"; forceHardwareRFIDReset(); lastRfidWatchdogTime = millis(); globalAnimFrame = 0;
           tone(BUZZER_PIN, 1500, 400);
         } else {
-          globalDisplayInfo = "";
-          tone(BUZZER_PIN, 800, 400);
+          globalDisplayInfo = ""; tone(BUZZER_PIN, 800, 400);
         }
-        while(digitalRead(BUTTON_PIN) == LOW); 
-        break;
+        while(digitalRead(BUTTON_PIN) == LOW); break;
       }
       delay(10);
     }
     if (!longPressed && (millis() - pressTime > 50)) {
-      failedLoginAttempts = 0;
-      lockoutEndTime = 0;
-      lastRfidWatchdogTime = millis(); 
-      openDoor("PRZYCISK");
+      failedLoginAttempts = 0; lockoutEndTime = 0; lastRfidWatchdogTime = millis(); openDoor("PRZYCISK");
     }
   }
 
   if (doorOpen && millis() > accessEndTime) {
-    doorOpen = false;
-    digitalWrite(RELAY_PIN, HIGH); 
-    delay(100); 
-    forceHardwareRFIDReset();
-    lastRfidWatchdogTime = millis(); 
-    rfidResetPending = false; 
-    globalDisplayInfo = "";
-    digitalWrite(LED_GREEN, LOW);
-    digitalWrite(LED_RED, HIGH);
+    doorOpen = false; digitalWrite(RELAY_PIN, HIGH); delay(100); 
+    forceHardwareRFIDReset(); lastRfidWatchdogTime = millis(); rfidResetPending = false; 
+    globalDisplayInfo = ""; digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, HIGH);
   }
 }
