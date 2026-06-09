@@ -10,9 +10,9 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.8.0 - Design Core";
+const char* app_version = "v2.8.0 - Genesis Core";
 
-// --- USER DATABASE STRUCTURES (Declared first to fix compile order) ---
+// --- USER DATABASE STRUCTURES ---
 struct User {
   byte uid[4];
   char name[16]; 
@@ -30,6 +30,11 @@ char admin_password[16] = "";
 char proxmox_log_server[16] = ""; 
 int proxmox_log_port = 5000;
 bool telemetryEnabled = false;
+
+// --- NEW NOTIFICATION CONFIGURATION STORAGE ---
+char webhook_server[64] = ""; 
+bool notifyOnAccess = false;
+bool notifyOnAlarm = false;
 
 // --- RECOVERY LIFELINE STORAGE ---
 char temporary_password[8] = "";
@@ -131,6 +136,12 @@ void loadConfiguration() {
     EEPROM.get(340, proxmox_log_server);
     EEPROM.get(356, proxmox_log_port);
     telemetryEnabled = (EEPROM.read(251) == 0x01);
+    
+    // Load new webhook notification parameters
+    EEPROM.get(360, webhook_server);
+    notifyOnAccess = (EEPROM.read(424) == 0x01);
+    notifyOnAlarm = (EEPROM.read(425) == 0x01);
+    
     provisioningMode = false; 
     hasSavedConfig = true;
   } else {
@@ -138,16 +149,21 @@ void loadConfiguration() {
     hasSavedConfig = false;
     strcpy(admin_password, "admin");
     strcpy(proxmox_log_server, "192.168.1.100");
+    strcpy(webhook_server, "");
   }
 }
 
-void saveConfiguration(String newSSID, String newPass, String newAdmin, String newTeleIP, int newTelePort, bool enableTele) {
+void saveConfiguration(String newSSID, String newPass, String newAdmin, String newTeleIP, int newTelePort, bool enableTele, String newHookIP, bool notifAccess, bool notifAlarm) {
   newSSID.toCharArray(ssid, 32);
   newPass.toCharArray(pass, 32);
   newAdmin.toCharArray(admin_password, 16);
   newTeleIP.toCharArray(proxmox_log_server, 16);
   proxmox_log_port = newTelePort;
   telemetryEnabled = enableTele;
+  
+  newHookIP.toCharArray(webhook_server, 64);
+  notifyOnAccess = notifAccess;
+  notifyOnAlarm = notifAlarm;
 
   EEPROM.put(260, ssid);
   EEPROM.put(292, pass);
@@ -155,6 +171,11 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   EEPROM.put(340, proxmox_log_server);
   EEPROM.put(356, proxmox_log_port);
   EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
+  
+  EEPROM.put(360, webhook_server);
+  EEPROM.write(424, notifyOnAccess ? 0x01 : 0x00);
+  EEPROM.write(425, notifyOnAlarm ? 0x01 : 0x00);
+  
   EEPROM.write(250, 0x55); 
 
   hasTemporaryPassword = false;
@@ -220,18 +241,39 @@ String getFormattedSystemTime() {
   return "--:--";
 }
 
-// --- GRAPHICS ENGINE MAIN DAEMON (CORRECTED LAYOUT MARGINS) ---
+// NATIVE UNENCRYPTED OUTBOUND WEBHOOK DISPATCHER
+void dispatchWebhookAlert(String category, String logData) {
+  if (strlen(webhook_server) < 4 || WiFi.status() != WL_CONNECTED) return;
+  
+  WiFiClient alertClient;
+  alertClient.setTimeout(250);
+  
+  if (alertClient.connect(webhook_server, 80)) {
+    alertClient.println("POST /webhook HTTP/1.1");
+    alertClient.print("Host: "); alertClient.println(webhook_server);
+    alertClient.println("Content-Type: application/json; charset=utf-8");
+    
+    String payload = "{\"event\":\"" + category + "\",\"message\":\"" + logData + "\",\"time\":\"" + getFormattedSystemTime() + "\"}";
+    
+    alertClient.print("Content-Length: "); alertClient.println(payload.length());
+    alertClient.println("Connection: close");
+    alertClient.println();
+    alertClient.print(payload);
+    alertClient.flush();
+    alertClient.stop();
+  }
+}
+
+// --- GRAPHICS ENGINE MAIN DAEMON ---
 void renderSystemUI() {
   display.clearDisplay();
   
-  // 1. TOP BOUNDARY PARTITION STRIP
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(4, 2);
   display.print("SMART LOCK SYSTEM");
   display.drawFastHLine(0, 12, 128, SH110X_WHITE);
 
-  // 2. MAIN DYNAMIC RENDERING PANEL
   if (provisioningMode || isOfflineStandby) {
     display.setCursor(0, 18);
     display.println(globalDisplayInfo);
@@ -252,16 +294,13 @@ void renderSystemUI() {
   else if (deniedActive) {
     int shakeOffset = (globalAnimFrame % 2 == 0) ? -3 : 3; 
     
-    // Draw Shaking Lock Base (FIXED: Left margin offset to X=6)
     display.fillRoundRect(6 + shakeOffset, 32, 22, 18, 2, SH110X_WHITE);
     display.fillCircle(17 + shakeOffset, 39, 2, SH110X_BLACK);
     display.drawFastVLine(17 + shakeOffset, 41, 5, SH110X_BLACK);
-    
     display.drawCircleHelper(17 + shakeOffset, 32, 7, 1|2, SH110X_WHITE);
     display.drawFastVLine(10 + shakeOffset, 32, 4, SH110X_WHITE);
     display.drawFastVLine(24 + shakeOffset, 32, 4, SH110X_WHITE);
 
-    // Text Warning (FIXED: Shifted left to X=38)
     display.setTextSize(2);
     display.setCursor(38, 24);
     display.print("DENIED");
@@ -274,7 +313,6 @@ void renderSystemUI() {
   else if (doorOpen) {
     int shackleSlide = (globalAnimFrame > 4) ? 5 : globalAnimFrame; 
     
-    // Padlock body (FIXED: Left margin offset to X=6)
     display.fillRoundRect(6, 34, 22, 16, 2, SH110X_WHITE);
     display.fillCircle(17, 40, 2, SH110X_BLACK);
     display.drawFastVLine(17, 42, 4, SH110X_BLACK);
@@ -282,11 +320,11 @@ void renderSystemUI() {
     display.drawFastVLine(10, 34 - shackleSlide, 4, SH110X_WHITE);        
     
     display.setTextSize(2);
-    display.setCursor(38, 18); // FIXED: Shifted left to X=38
+    display.setCursor(38, 18); 
     display.print("OPEN");
     
     display.setTextSize(1);
-    display.setCursor(38, 38); // FIXED: Shifted left to X=38
+    display.setCursor(38, 38); 
     if (globalDisplayInfo.length() > 11) {
       int scrollShift = (globalAnimFrame / 2) % (globalDisplayInfo.length());
       String marqueeStr = globalDisplayInfo.substring(scrollShift) + "   " + globalDisplayInfo.substring(0, scrollShift);
@@ -304,8 +342,6 @@ void renderSystemUI() {
     }
   } 
   else {
-    // --- SECURED IDLE STATE ---
-    // Padlock Drawing (FIXED: Shifted left to X=6)
     display.fillRoundRect(6, 32, 22, 18, 2, SH110X_WHITE);
     display.fillCircle(17, 39, 2, SH110X_BLACK);
     display.drawFastVLine(17, 41, 5, SH110X_BLACK);
@@ -314,10 +350,9 @@ void renderSystemUI() {
     display.drawFastVLine(24, 32, 4, SH110X_WHITE);
 
     display.setTextSize(2);
-    display.setCursor(38, 24); // FIXED: Shifted left to X=38 to prevent overlaying the waves
+    display.setCursor(38, 24); 
     display.print("LOCKED");
 
-    // STANDBY RADAR PULSE WAVES (FIXED: Center shifted right to X=118, radii compressed for alignment)
     int pulsePhase = (globalAnimFrame / 3) % 4; 
     display.fillCircle(118, 36, 1, SH110X_WHITE);
     if (pulsePhase >= 1) display.drawCircleHelper(118, 36, 4, 2|4, SH110X_WHITE); 
@@ -325,13 +360,13 @@ void renderSystemUI() {
     if (pulsePhase >= 3) display.drawCircleHelper(118, 36, 12, 2|4, SH110X_WHITE);
   }
 
-  // 3. BOTTOM BOUNDARY FOUNDATION BAR
+  // 3. BOTTOM FOOTER BAR (FIXED POINT 2: IP BROADCAST REMOVED)
   display.drawFastHLine(0, 53, 128, SH110X_WHITE);
   display.setTextSize(1);
   display.setCursor(4, 56);
   
   if (WiFi.status() == WL_CONNECTED) {
-    display.print(WiFi.localIP().toString());
+    display.print("SYSTEM ONLINE"); // Hidden IP address
   } else if (isOfflineStandby) {
     display.print("HOTSPOT ACTIVE");
   } else {
@@ -405,6 +440,10 @@ void openDoor(String source) {
   digitalWrite(LED_RED, LOW);
   tone(BUZZER_PIN, 1000, 200);
   addLog("Otwarto: " + source);
+  
+  if (notifyOnAccess) {
+    dispatchWebhookAlert("ACCESS_GRANTED", "Lock opened by: " + source);
+  }
 }
 
 void handleProvisioningServer() {
@@ -447,7 +486,7 @@ void handleProvisioningServer() {
     String decodedAdmin = urlDecode(rawAdmin);
     String decodedTeleIP = urlDecode(rawTeleIP);
 
-    saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
+    saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele, "", false, false);
 
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2><p>Urzadzenie restartuje sie i sprobuje polaczyc z Twoja siecia domowa...</p></body></html>");
     delay(500); client.stop();
@@ -520,40 +559,6 @@ void handleWebServer() {
     delay(1); client.stop(); return;
   }
 
-  if (reqHeader.indexOf("/save_setup") != -1) {
-    int sIdx = reqHeader.indexOf("s=") + 2;
-    int pIdx = reqHeader.indexOf("&p=") + 3;
-    int aIdx = reqHeader.indexOf("&a=") + 3;
-    int tiIdx = reqHeader.indexOf("&ti=") + 4;
-    int tpIdx = reqHeader.indexOf("&tp=") + 4;
-    int teIdx = reqHeader.indexOf("&te=");
-
-    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
-    String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
-
-    int nextAmpA = reqHeader.indexOf("&", aIdx);
-    int spaceIdxA = reqHeader.indexOf(" ", aIdx);
-    int endAdminPos = (nextAmpA != -1 && nextAmpA < spaceIdxA) ? nextAmpA : spaceIdxA;
-    String rawAdmin = reqHeader.substring(aIdx, endAdminPos);
-    String rawTeleIP = (tiIdx != -1) ? reqHeader.substring(tiIdx, reqHeader.indexOf("&tp=")) : "";
-
-    int spacePos = reqHeader.indexOf(" ", tpIdx);
-    int nextAmp = reqHeader.indexOf("&", tpIdx);
-    int endPortPos = (nextAmp != -1 && nextAmp < spacePos) ? nextAmp : spacePos;
-    String nTelePort = (tpIdx != -1) ? reqHeader.substring(tpIdx, endPortPos) : "5000";
-    bool runTele = (teIdx != -1);
-
-    String decodedSSID = urlDecode(rawSSID); String decodedPass = urlDecode(rawPass);
-    String decodedAdmin = urlDecode(rawAdmin); String decodedTeleIP = urlDecode(rawTeleIP);
-
-    saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>Zapisano w EEPROM!</h2><p>Uruchamianie ponowne...</p></body></html>");
-    delay(500); client.stop();
-    tone(BUZZER_PIN, 2000, 800); delay(1000);
-    NVIC_SystemReset();
-    return;
-  }
-
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
     sprintf(temporary_password, "%ld", tokenNum);
@@ -595,6 +600,9 @@ void handleWebServer() {
       if (failedLoginAttempts >= 5) {
         lockoutEndTime = millis() + 300000; 
         addLog("ALARM: Atak BruteForce!");
+        if (notifyOnAlarm) {
+          dispatchWebhookAlert("BRUTEFORCE_ALARM", "Multiple invalid login attempts detected!");
+        }
       }
     } else if (isAuthenticated) {
       failedLoginAttempts = 0; 
@@ -637,7 +645,11 @@ void handleWebServer() {
       }
       client.print("],\"ssid\":\""); client.print(ssid);
       client.print("\",\"admin_pass\":\""); client.print(admin_password);
-      client.print("\"}");
+      // New output values sent down to web client
+      client.print("\",\"webhook_srv\":\""); client.print(webhook_server);
+      client.print("\",\"ntf_access\":"); client.print(notifyOnAccess ? "true" : "false");
+      client.print(",\"ntf_alarm\":"); client.print(notifyOnAlarm ? "true" : "false");
+      client.print("}");
     }
     delay(1); client.stop(); return;
   }
@@ -687,13 +699,20 @@ void handleWebServer() {
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
+    // FIXED POINT 1: SAFELY EXTRACTION RE-ENGINEERED TO PREVENT CORES APPENDING &pass=ad
     else if (reqHeader.indexOf("/api/rename_user") != -1) {
       int idxPos = reqHeader.indexOf("idx=");
       int namePos = reqHeader.indexOf("name=");
       if (idxPos != -1 && namePos != -1) {
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf("&", idxPos)).toInt();
-        String newName = reqHeader.substring(namePos + 5, reqHeader.indexOf(" ", namePos));
-        newName.replace("+", " ");
+        
+        int spacePos = reqHeader.indexOf(" ", namePos);
+        int ampPos = reqHeader.indexOf("&", namePos + 5);
+        int endPos = (ampPos != -1 && ampPos < spacePos) ? ampPos : spacePos;
+        
+        String newName = reqHeader.substring(namePos + 5, endPos);
+        newName = urlDecode(newName);
+        
         if (targetIdx >= 0 && targetIdx < totalCards && newName.length() > 0) {
           memset(users[targetIdx].name, 0, 16);
           newName.toCharArray(users[targetIdx].name, 16);
@@ -754,21 +773,35 @@ void handleWebServer() {
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
+    // RE-ENGINEERED COMPOSITE SAVE CONFIGURATION DESTRUCTOR INTERFACE
     else if (reqHeader.indexOf("/api/save_settings") != -1) {
       int sIdx = reqHeader.indexOf("s=") + 2;
       int pIdx = reqHeader.indexOf("&p=") + 3;
       int aIdx = reqHeader.indexOf("&a=") + 3;
+      int wIdx = reqHeader.indexOf("&w=");
+      int naIdx = reqHeader.indexOf("&na=");
+      int nalIdx = reqHeader.indexOf("&nal=");
 
       String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
       String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
-
-      int nextAmp = reqHeader.indexOf("&", aIdx);
-      int spaceIdx = reqHeader.indexOf(" ", aIdx);
-      int endPortPos = (nextAmp != -1 && nextAmp < spaceIdx) ? nextAmp : spaceIdx;
-      String nAdmin = reqHeader.substring(aIdx, endPortPos);
+      
+      int spaceIdxA = reqHeader.indexOf(" ", aIdx);
+      int nextAmpA = reqHeader.indexOf("&", aIdx);
+      int endAdmin = (nextAmpA != -1 && nextAmpA < spaceIdxA) ? nextAmpA : spaceIdxA;
+      String nAdmin = reqHeader.substring(aIdx, endAdmin);
+      
+      String nHook = "";
+      if (wIdx != -1) {
+        int spaceW = reqHeader.indexOf(" ", wIdx);
+        int ampW = reqHeader.indexOf("&", wIdx + 3);
+        int endW = (ampW != -1 && ampW < spaceW) ? ampW : spaceW;
+        nHook = reqHeader.substring(wIdx + 3, endW);
+      }
 
       String decSSID = urlDecode(nSSID); String decPass = urlDecode(nPass); String decAdmin = urlDecode(nAdmin);
-      saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled);
+      String decHook = urlDecode(nHook);
+      
+      saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled, decHook, (naIdx != -1), (nalIdx != -1));
       addLog("Zapisano ustawienia");
 
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
@@ -804,9 +837,13 @@ void handleWebServer() {
   client.println("let lH=''; d.logs.forEach(l=>{ lH+=`<tr><td>${l}</td></tr>`; }); document.getElementById('v-logs').innerHTML=lH; ");
   client.println("if(document.activeElement.id !== 'cfg-ssid') document.getElementById('cfg-ssid').value=d.ssid; ");
   client.println("if(document.activeElement.id !== 'cfg-admin') document.getElementById('cfg-admin').value=d.admin_pass; ");
+  // Web browser synchronization updates for notifications
+  client.println("if(document.activeElement.id !== 'cfg-webhook') document.getElementById('cfg-webhook').value=d.webhook_srv; ");
+  client.println("document.getElementById('cfg-notif-access').checked=d.ntf_access; ");
+  client.println("document.getElementById('cfg-notif-alarm').checked=d.ntf_alarm; ");
   client.println("});} ");
   client.println("window.onload=function(){pass=getParam('pass')||''; if(pass){document.getElementById('pass-field').value=pass;} updateData(); dataTimer=setInterval(updateData,2000);}; ");
-  client.println("function saveCfg(){ clearInterval(dataTimer); let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}`); alert('Zapisano! Urządzenie zostanie zaktualizowane.');} </script></head><body>");
+  client.println("function saveCfg(){ clearInterval(dataTimer); let s=encodeURIComponent(document.getElementById('cfg-ssid').value); let p=encodeURIComponent(document.getElementById('cfg-pass').value); let a=encodeURIComponent(document.getElementById('cfg-admin').value); let w=encodeURIComponent(document.getElementById('cfg-webhook').value); let na=document.getElementById('cfg-notif-access').checked?'&na=1':''; let nal=document.getElementById('cfg-notif-alarm').checked?'&nal=1':''; runCmd(`/api/save_settings?s=${s}&p=${p}&a=${a}&w=${w}${na}${nal}`); alert('Zapisano! Urządzenie zostanie zaktualizowane.');} </script></head><body>");
 
   client.println("<div id='login-view' class='hide'><h2>🔒 Autoryzacja Zamku R4</h2>");
   client.println("<div class='box'><form method='GET' action='/'>");
@@ -822,12 +859,19 @@ void handleWebServer() {
 
   client.println("<div class='box'><h3>👥 Baza Użytkowników</h3><table class='log-table' id='v-users'></table></div>");
 
+  // POINT 3: WEB USER INTERFACE ADDITIONS FOR NOTIFICATION OVERLAYS
   client.println("<div class='box'><h3>⚙️ Konfiguracja Sprzętowa</h3>");
   client.println("<input type='text' id='cfg-ssid' placeholder='WiFi SSID'><br>");
   client.println("<input type='password' id='cfg-pass' placeholder='Wpisz nowe hasło do Wi-Fi (opcjonalnie)'><br>");
   client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-pass\")'> 👁️ Pokaz wpisane haslo</label>");
   client.println("<input type='password' id='cfg-admin' placeholder='Hasło Panelu Administratora'><br>");
   client.println("<label style='font-size:12px;color:#bbb;display:block;margin-bottom:15px;'><input type='checkbox' onclick='togglePassVisibility(\"cfg-admin\")'> 👁️ Pokaz wpisane haslo</label>");
+  
+  client.println("<h3 style='margin-top:25px;'>📬 Usługi Powiadomień (Webhook Host)</h3>");
+  client.println("<input type='text' id='cfg-webhook' placeholder='IP/Host Serwera Webhook'><br>");
+  client.println("<label style='font-size:14px;display:block;margin-bottom:6px;'><input type='checkbox' id='cfg-notif-access'> Wysyłaj alert przy każdym otwarciu drzwi</label>");
+  client.println("<label style='font-size:14px;display:block;margin-bottom:15px;'><input type='checkbox' id='cfg-notif-alarm'> Wysyłaj alert przy alarmie sabotażu/blokady</label>");
+  
   client.println("<button onclick='saveCfg()' class='btn' style='background:#7b1fa2;'>💾 Zapisz Ustawienia EEPROM</button></div>");
 
   client.println("<div class='box'><h3>Dziennik Zdarzeń (Max 30 wpisów)</h3>");
@@ -1091,6 +1135,9 @@ void loop() {
           globalAnimFrame = 0;
           deniedEndTime = millis() + 1800; 
           tone(BUZZER_PIN, 200, 600);
+          if (notifyOnAlarm) {
+            dispatchWebhookAlert("ACCESS_DENIED_LOCKED", "Blocked card attempt by user: " + String(users[matchedIndex].name));
+          }
         }
       } else {
         addLog("Odmowa: Nieznany [" + uidStr + "]");
@@ -1098,6 +1145,9 @@ void loop() {
         globalAnimFrame = 0;
         deniedEndTime = millis() + 1800; 
         tone(BUZZER_PIN, 200, 500);
+        if (notifyOnAlarm) {
+          dispatchWebhookAlert("UNKNOWN_CARD_SWIPE", "Unauthorized card scan attempted: " + uidStr);
+        }
       }
     }
     rfid.PICC_HaltA();
