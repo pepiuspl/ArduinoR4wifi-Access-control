@@ -545,12 +545,9 @@ void handleWebServer() {
   }
 
   // 🌟 FIX POINT: Re-engineered using the community-standard variable InternalStorage instance handlers
-  if (
-    reqHeader.indexOf("/api/update") != -1
-)
-{
-    addLog("OTA REQUEST DETECTED");
-{
+  if (reqHeader.indexOf("/api/update") != -1)
+  {
+  addLog("OTA REQUEST DETECTED");
 if (!isAuthenticated)
 {
 client.println("HTTP/1.1 401 Unauthorized");
