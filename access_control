@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.9.1 - Reactive Core Cloud Solution";
+const char* app_version = "v2.9.3 - Reactive Core Cloud Solution";
 
 // --- STRUCTURE DEFINITIONS ---
 struct User {
@@ -28,11 +28,12 @@ String getFormattedSystemTime();
 void addLog(String msg);
 void openLocalDoor(String source);
 void forceHardwareRFIDReset();
-void displayProvisioningInstructions(String errorContext = ""); // Default argument stays here
+void displayProvisioningInstructions(String errorContext = ""); 
 void saveCardToLocalMemory(byte* uid, String label);
 void dispatchWebhookAlert(String eventType, String detail);
 void renderSystemUI();
 void handleProvisioningServer();
+void handleOnlineInstallerServer(); // 🌟 Registered hidden online engine scanner scope
 void executeCloudSynchronization();
 String urlDecode(String str);
 void loadConfiguration();
@@ -291,7 +292,6 @@ void renderSystemUI() {
   display.display();
 }
 
-// 🌟 FIX POINT: Removed the default assignment `= ""` from the body implementation
 void displayProvisioningInstructions(String errorContext) {
   if (errorContext != "") {
     globalDisplayInfo = errorContext + "\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
@@ -350,6 +350,62 @@ void handleProvisioningServer() {
   client.println("<input type='text' name='tp' value='" + String(proxmox_log_port) + "' placeholder='Port Target' required>");
   client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Commit & Run Hybrid Layer'></form></div></body></html>");
   delay(50); client.stop();
+}
+
+// 🌟 RE-ENGINEERED: HIDDEN SECURE ONLINE INSTALLER WEB BACKDOOR GATEWAY
+void handleOnlineInstallerServer() {
+  WiFiClient client = server.available();
+  if (!client) return;
+  String reqHeader = "";
+  unsigned long webTimeout = millis() + 250; 
+  while (client.connected() && millis() < webTimeout) { 
+    if (client.available()) {
+      char c = client.read(); reqHeader += c;
+      if (c == '\n') break; 
+    }
+  }
+  while (client.available()) { client.read(); }
+
+  // Processes incoming network parameter re-writes dynamically
+  if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) {
+    int sIdx = reqHeader.indexOf("s=") + 2; int pIdx = reqHeader.indexOf("&p=") + 3;
+    int aIdx = reqHeader.indexOf("&a=") + 3; int tiIdx = reqHeader.indexOf("&ti=") + 4;
+    int tpIdx = reqHeader.indexOf("&tp=") + 4;
+
+    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
+    String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
+    String rawAdmin = reqHeader.substring(aIdx, reqHeader.indexOf("&ti="));
+    String rawTeleIP = reqHeader.substring(tiIdx, reqHeader.indexOf("&tp="));
+    int spacePos = reqHeader.indexOf(" ", tpIdx);
+    String nTelePort = reqHeader.substring(tpIdx, spacePos);
+
+    saveConfiguration(urlDecode(rawSSID), urlDecode(rawPass), urlDecode(rawAdmin), urlDecode(rawTeleIP), nTelePort.toInt(), true, "", false, false);
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;text-align:center;padding:50px;'><h2>💾 Config Updated Natively!</h2><p>Rebooting hardware node...</p></body></html>");
+    delay(100); client.stop();
+    tone(BUZZER_PIN, 2000, 800); delay(1000);
+    NVIC_SystemReset(); return;
+  }
+
+  // Strict Tokenized Validation Logic Gate: http://<arduino_ip>/installer?pass=YOUR_ADMIN_PASSWORD
+  String expectedAuthSignature = "pass=" + String(admin_password);
+  if (reqHeader.indexOf("GET /installer") != -1 && reqHeader.indexOf(expectedAuthSignature) != -1) {
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
+    client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+    client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
+    client.println("<h2 style='text-align:center;'>⚙️ Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
+    client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
+    client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
+    client.println("<input type='password' name='a' value='" + String(admin_password) + "' placeholder='Admin Master Password' required>");
+    client.println("<input type='text' name='ti' value='" + String(proxmox_log_server) + "' placeholder='Backend Address / Domain Link' required>");
+    client.println("<input type='text' name='tp' value='" + String(proxmox_log_port) + "' placeholder='Port Target' required>");
+    client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Update & Reboot Hardware'></form></div></body></html>");
+    delay(50); client.stop();
+    return;
+  }
+
+  // Returns a silent 404 to non-authenticated queries to blend into the background
+  client.println("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+  client.stop();
 }
 
 // --- ACTIVE CLOUD PROCESSING PIPELINE DAEMONS ---
@@ -432,7 +488,6 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   String payloadResponse = ""; bool bodyStarted = false;
   while (httpPost.connected() && millis() < deadline) {
     if (httpPost.available()) {
-      // 🌟 FIX POINT: Corrected variable identifier mismatch pattern from legacy buffers
       String line = httpPost.readStringUntil('\n');
       if (line == "\r") { bodyStarted = true; continue; }
       if (bodyStarted) { payloadResponse += line; break; }
@@ -471,15 +526,15 @@ String getFormattedSystemTime() {
 // --- CORE SYSTEM SETUP HOOKS ---
 void setup() {
   pinMode(BUZZER_PIN, OUTPUT); tone(BUZZER_PIN, 1200, 100); delay(100);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
   
+  loadConfiguration(); loadCards(); 
+  
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   if (digitalRead(BUTTON_PIN) == LOW) {
     delay(2000);
     if (digitalRead(BUTTON_PIN) == LOW) { provisioningMode = true; }
   }
 
-  loadConfiguration(); loadCards(); 
-  
   pinMode(RELAY_PIN, OUTPUT); pinMode(LED_GREEN, OUTPUT); pinMode(LED_RED, OUTPUT);
   pinMode(RST_PIN, OUTPUT); digitalWrite(RST_PIN, HIGH); delay(50);
   digitalWrite(RELAY_PIN, HIGH); digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, HIGH);
@@ -500,6 +555,10 @@ void setup() {
     unsigned long epoch = timeClient.getEpochTime();
     if (epoch > 1000000000) { RTCTime local(epoch); RTC.setTime(local); }
     forceHardwareRFIDReset(); lastSuccessfulPollTime = millis();
+    
+    // 🌟 FIX POINT: Active HTTP daemon fires up alongside client sync threads while online
+    server.begin(); 
+    
     tone(BUZZER_PIN, 800, 100); delay(120); tone(BUZZER_PIN, 1600, 300);
   } else {
     isOfflineStandby = true; forceHardwareRFIDReset();
@@ -517,6 +576,9 @@ void loop() {
   if (isOfflineStandby) {
     handleProvisioningServer();
   } else {
+    // 🌟 FIX POINT: Continually watches for hidden setup transactions over local Wi-Fi bands
+    handleOnlineInstallerServer(); 
+    
     if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) {
       lastPollTime = millis(); executeCloudSynchronization();
     }
