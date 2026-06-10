@@ -606,7 +606,8 @@ if (contentLength <= 0)
     return;
 }
 
-addLog("OTA START: " + String(contentLength) + " bytes");
+addLog("OTA START");
+addLog("OTA SIZE: " + String(contentLength));
 
 if (!InternalStorage.open(contentLength))
 {
@@ -618,6 +619,13 @@ if (!InternalStorage.open(contentLength))
     addLog("OTA FAILED: InternalStorage.open()");
     return;
 }
+
+addLog(
+    "OTA RECEIVED: " +
+    String(receivedBytes) +
+    "/" +
+    String(contentLength)
+);
 
 uint32_t receivedBytes = 0;
 
@@ -680,6 +688,8 @@ delay(100);
 tone(BUZZER_PIN, 2200, 500);
 
 delay(1000);
+
+addLog("OTA APPLY");
 
 InternalStorage.apply();
 
