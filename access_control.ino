@@ -1073,7 +1073,8 @@ void setup() {
     RTC.setTime(localTime);
     forceHardwareRFIDReset(); 
     lastSuccessfulPollTime = millis(); 
-    server.begin(); 
+    server.begin();
+    Serial.println("INIT OTA");
     updateDisplay("Gotowy", WiFi.localIP().toString()); 
     addLog("System online");
     tone(BUZZER_PIN, 800, 100);  delay(120); 
@@ -1140,7 +1141,7 @@ void loop() {
     }
   } else {
     handleWebServer(); // Intercepts local upload data streams sent from the phone app bridge
-    handleOnlineInstallerServer(); 
+    // handleOnlineInstallerServer(); 
     if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) { 
       lastPollTime = millis(); 
       executeCloudSynchronization(); 
