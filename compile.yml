@@ -1,0 +1,53 @@
+name: Automated Firmware Compiler & Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Wakes up automatically whenever you push a version tag (like v2.9.3)
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Pull down your C++ source code files
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    # 2. Install the official Arduino CLI compiler engine
+    - name: Setup Arduino CLI
+      uses: arduino/setup-arduino-cli@v2
+
+    # 3. Download the specific Renesas Uno R4 board cores
+    - name: Install Board Cores and Platform Toolchains
+      run: |
+        arduino-cli core update-index
+        arduino-cli core install arduino:renesas_uno
+
+    # 4. Pull down the exact community libraries your code depends on
+    - name: Install Project Dependencies
+      run: |
+        arduino-cli lib install "Adafruit GFX Library"
+        arduino-cli lib install "Adafruit SH110X"
+        arduino-cli lib install "MFRC522"
+        arduino-cli lib install "NTPClient"
+        arduino-cli lib install "ArduinoOTA"
+
+    # 5. Compile the C++ code into a machine language binary file
+    - name: Compile Firmware to Binary
+      run: |
+        # Creates a build directory and compiles the code
+        arduino-cli compile --fqbn arduino:renesas_uno:wifi --output-dir ./build ./
+
+    # 6. Rename the output file dynamically to match your server's naming convention
+    - name: Package Update Asset
+      run: |
+        mv ./build/*.bin ./lock_${{ github.ref_name }}.bin
+
+    # 7. Create the official GitHub release and attach the freshly compiled .bin file
+    - name: Broadcast Release to Proxmox Network
+      uses: softprops/action-gh-release@v2
+      with:
+        files: lock_${{ github.ref_name }}.bin
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Built-in token, no configuration needed
