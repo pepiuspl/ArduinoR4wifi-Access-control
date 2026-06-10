@@ -373,8 +373,8 @@ void openDoor(String source) {
   globalDisplayInfo = source;
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(LED_GREEN, HIGH);
-  digitalWrite(LED_RED, LOW); // Red LED turns off completely when open
-  tone(BUZZER_PIN, 1000, 200); // One initial sharp confirmation tone
+  digitalWrite(LED_RED, LOW); 
+  tone(BUZZER_PIN, 1000, 200); 
   addLog("Otwarto: " + source);
 }
 
@@ -531,7 +531,10 @@ HEADER_COMPLETE:
         return;
     }
     addLog("OTA START. SIZE: " + String(contentLength));
-    if (!InternalStorage.open(contentLength)) {
+    
+    // 🌟 FIX 2: DEFENSIVE FLASH SECTOR ALLOCATION PATRICIAN RECOVERY (PREVENTS 500 FAULTS)
+    InternalStorage.close(); 
+    if (!InternalStorage.open(contentLength)) { [cite: 119]
         client.println("HTTP/1.1 500 Internal Error\r\nConnection: close\r\n");
         client.stop();
         addLog("OTA FAILED: InternalStorage.open()");
@@ -542,7 +545,7 @@ HEADER_COMPLETE:
     while (receivedBytes < contentLength && millis() < receiveDeadline) {
         while (client.available()) {
             uint8_t b = client.read();
-            InternalStorage.write(b);
+            InternalStorage.write(b); [cite: 122]
             receivedBytes++;
             receiveDeadline = millis() + 120000;
             if (receivedBytes >= contentLength) break;
@@ -580,13 +583,13 @@ HEADER_COMPLETE:
       client.print(learningMode ? "Uczenie" : "Czuwanie");
       client.print("\",\"pending\":\""); client.print(pendingUsername);
       client.print("\",\"lock\":");
-      client.print(doorOpen ? "true" : "false");
+      client.print(doorOpen ? "true" : "false"); [cite: 129]
       client.print(",\"total\":"); client.print(totalCards);
       client.print(",\"version\":\""); client.print(app_version); client.print("\"");
       client.print(",\"users\":[");
       for (int i = 0; i < totalCards; i++) {
         client.print("{\"idx\":"); client.print(i);
-        client.print(",\"name\":\""); client.print(users[i].name);
+        client.print(",\"name\":\""); client.print(users[i].name); [cite: 131]
         client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false");
         client.print(",\"uid\":\"");
         for(byte j=0; j<4; j++) {
@@ -599,7 +602,7 @@ HEADER_COMPLETE:
       }
       client.print("],\"logs\":[");
       for (int i = logCount - 1; i >= 0; i--) {
-        client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\"");
+        client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\""); [cite: 134]
         if (i > 0) client.print(",");
       }
       client.print("],\"ssid\":\""); client.print(ssid);
@@ -611,7 +614,7 @@ HEADER_COMPLETE:
 
   if (isAuthenticated) {
     if (reqHeader.indexOf("/api/unlock") != -1) {
-      if (!doorOpen) openDoor("Panel API"); // Prevent beep/relay spamming
+      if (!doorOpen) openDoor("Panel API"); 
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     } 
@@ -792,7 +795,7 @@ void executeCloudSynchronization() {
   }
   httpCheck.stop();
   if (payloadResponse.indexOf("\"unlock\":true") != -1) {
-    if (!doorOpen) openDoor("Zdalne Wywolanie"); // --- FIX 1: Prevent beeping loop spam ---
+    if (!doorOpen) openDoor("Zdalne Wywolanie"); 
   }
   if (payloadResponse.indexOf("\"learn\":true") != -1) {
     learningMode = true;
@@ -852,7 +855,7 @@ void setup() {
   delay(50);
   digitalWrite(RELAY_PIN, HIGH); 
   digitalWrite(LED_GREEN, LOW);
-  digitalWrite(LED_RED, LOW); // --- FIX 2: Dark on Standby ---
+  digitalWrite(LED_RED, LOW); 
   SPI.begin(); 
   RTC.begin(); 
   randomSeed(analogRead(0)); 
@@ -986,10 +989,9 @@ void loop() {
     }
   }
 
-  // --- FIX 2: LED STATUS MATRIX ROUTINES ---
   if (learningMode) {
     if (millis() % 500 < 250) { 
-      digitalWrite(LED_RED, HIGH); // Flash Red on program/learning cycle
+      digitalWrite(LED_RED, HIGH); 
       digitalWrite(LED_GREEN, LOW); 
     } else { 
       digitalWrite(LED_RED, LOW); 
@@ -997,13 +999,13 @@ void loop() {
     }
   } else if (!doorOpen) {
     if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
-      digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW); // Flash rapid error alert code
+      digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW); 
       digitalWrite(LED_GREEN, LOW);
     } else {
       if (isOfflineStandby) { 
-        digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH); // Pulse error alert
+        digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH); 
       } else { 
-        digitalWrite(LED_RED, LOW); // --- Dark on Standby ---
+        digitalWrite(LED_RED, LOW); 
       }
       digitalWrite(LED_GREEN, LOW);
     }
@@ -1112,6 +1114,6 @@ void loop() {
     rfidResetPending = false; 
     globalDisplayInfo = "";
     digitalWrite(LED_GREEN, LOW); 
-    digitalWrite(LED_RED, LOW); // --- Dark on Standby ---
+    digitalWrite(LED_RED, LOW); 
   }
 }
