@@ -546,48 +546,147 @@ void handleWebServer() {
   }
 
   // 🌟 FIX POINT: Re-engineered using the community-standard variable InternalStorage instance handlers
-  if (reqHeader.indexOf("POST /api/update") != -1) {
-    if (!isAuthenticated) {
-      client.println("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
-      client.stop(); return;
+  if (reqHeader.indexOf("POST /api/update") != -1)
+{
+if (!isAuthenticated)
+{
+client.println("HTTP/1.1 401 Unauthorized");
+client.println("Connection: close");
+client.println();
+client.stop();
+return;
+}
+
+updateDisplay("OTA UPDATE", "Receiving firmware...");
+tone(BUZZER_PIN, 1500, 100);
+
+String fullHeader = reqHeader;
+
+unsigned long headerDeadline = millis() + 5000;
+
+while (millis() < headerDeadline)
+{
+    while (client.available())
+    {
+        char c = client.read();
+        fullHeader += c;
+
+        if (fullHeader.endsWith("\r\n\r\n"))
+        {
+            goto HEADER_COMPLETE;
+        }
+    }
+}
+
+HEADER_COMPLETE:
+
+int contentLength = 0;
+
+int clPos = fullHeader.indexOf("Content-Length:");
+
+if (clPos != -1)
+{
+    int clEnd = fullHeader.indexOf("\r\n", clPos);
+
+    String lengthStr =
+        fullHeader.substring(clPos + 15, clEnd);
+
+    lengthStr.trim();
+
+    contentLength = lengthStr.toInt();
+}
+
+if (contentLength <= 0)
+{
+    client.println("HTTP/1.1 400 Bad Request");
+    client.println("Connection: close");
+    client.println();
+    client.stop();
+
+    addLog("OTA FAILED: Invalid Content-Length");
+    return;
+}
+
+addLog("OTA START: " + String(contentLength) + " bytes");
+
+if (!InternalStorage.open(contentLength))
+{
+    client.println("HTTP/1.1 500 Internal Server Error");
+    client.println("Connection: close");
+    client.println();
+    client.stop();
+
+    addLog("OTA FAILED: InternalStorage.open()");
+    return;
+}
+
+uint32_t receivedBytes = 0;
+
+unsigned long receiveDeadline = millis() + 120000;
+
+while (receivedBytes < contentLength &&
+       millis() < receiveDeadline)
+{
+    while (client.available())
+    {
+        uint8_t b = client.read();
+
+        InternalStorage.write(b);
+
+        receivedBytes++;
+
+        receiveDeadline = millis() + 120000;
+
+        if (receivedBytes >= contentLength)
+        {
+            break;
+        }
     }
 
-    updateDisplay("OTA FLASHING", "Writing Flash Bank...");
-    tone(BUZZER_PIN, 1500, 100);
+    delay(1);
+}
 
-    // Parse the data packet size passed from the phone app bridge headers
-    int contentLength = 0;
-    int clPos = reqHeader.indexOf("Content-Length: ");
-    if (clPos != -1) {
-      int clEnd = reqHeader.indexOf("\r\n", clPos);
-      contentLength = reqHeader.substring(clPos + 16, clEnd).toInt();
-    }
+InternalStorage.close();
 
-    // Open flash layer blocks via the external abstraction driver variables
-    if (!InternalStorage.open(contentLength)) {
-      client.println("HTTP/1.1 500 Storage Error\r\n\r\n");
-      client.stop(); return;
-    }
+if (receivedBytes != contentLength)
+  {
+    client.println("HTTP/1.1 408 Request Timeout");
+    client.println("Connection: close");
+    client.println();
+    client.stop();
 
-    // Securely pull down byte blocks directly from the active socket cache layout
-    while (client.connected() || client.available()) {
-      while (client.available()) {
-        char bufferByte = client.read();
-        InternalStorage.write(bufferByte);
-      }
-    }
-    
-    InternalStorage.close();
-    
-    client.println("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
-    delay(100); client.stop();
+    addLog(
+        "OTA FAILED: Received " +
+        String(receivedBytes) +
+        "/" +
+        String(contentLength));
 
-    tone(BUZZER_PIN, 1800, 300); delay(100); tone(BUZZER_PIN, 2200, 500);
-    delay(1000);
-    
-    InternalStorage.apply(); // Rewrites the operational vector layout map and resets the MCU automatically
     return;
   }
+
+client.println("HTTP/1.1 200 OK");
+client.println("Content-Type: application/json");
+client.println("Connection: close");
+client.println();
+client.println("{\"success\":true}");
+
+delay(100);
+
+client.stop();
+
+addLog("OTA COMPLETE");
+
+tone(BUZZER_PIN, 1800, 300);
+delay(100);
+tone(BUZZER_PIN, 2200, 500);
+
+delay(1000);
+
+InternalStorage.apply();
+
+return;
+
+}
 
   if (reqHeader.indexOf("GET /api/data") != -1) {
     client.println("HTTP/1.1 200 OK");
