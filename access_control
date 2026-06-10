@@ -28,7 +28,7 @@ char ssid[32] = "";
 char pass[32] = "";     
 char admin_password[16] = "";       
 char proxmox_log_server[16] = ""; 
-int proxmox_log_port = 3000; // Defaulting standard pool matrix port to 3000
+int proxmox_log_port = 3000; 
 bool telemetryEnabled = false;
 
 // --- NOTIFICATION CONFIGURATION STORAGE ---
@@ -57,7 +57,7 @@ Adafruit_SH1106G display = Adafruit_SH1106G(128, 64, &Wire, OLED_RESET);
 MFRC522 rfid(SS_PIN, RST_PIN);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200); 
-WiFiServer server(80); // Maintains captive setup portal architecture
+WiFiServer server(80); 
 
 // --- SYSTEM VARIABLES ---
 bool doorOpen = false;
@@ -152,7 +152,7 @@ void loadConfiguration() {
     provisioningMode = true; 
     hasSavedConfig = false;
     strcpy(admin_password, "admin");
-    strcpy(proxmox_log_server, "192.168.0.100"); // Standard default out of box node target
+    strcpy(proxmox_log_server, "192.168.0.100"); 
     strcpy(webhook_server, "");
   }
 }
@@ -276,6 +276,16 @@ void renderSystemUI() {
   display.display();
 }
 
+// 🌟 RESTORED MISSING DISPLAY PROVISIONAL INSTRUCTIONS FUNCTION FOR WRAPPER SCOPES
+void displayProvisioningInstructions(String errorContext = "") {
+  if (errorContext != "") {
+    globalDisplayInfo = errorContext + "\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
+  } else {
+    globalDisplayInfo = "INITIAL CONFIG!\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
+  }
+  renderSystemUI();
+}
+
 void openLocalDoor(String source) {
   doorOpen = true; deniedActive = false; globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
@@ -285,7 +295,6 @@ void openLocalDoor(String source) {
   tone(BUZZER_PIN, 1000, 200);
 }
 
-// 🌟 RESTORED INITIAL CAPTIVE PORTAL SETUP SYSTEM FROM V3.3
 void handleProvisioningServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -336,7 +345,6 @@ void handleProvisioningServer() {
   delay(50); client.stop();
 }
 
-// 🌟 CLOUD INTERFACE DATA CONDUIT (POLLS DESTINATION PARAMETERS LOADED FROM EEPROM)
 void executeCloudSynchronization() {
   if (strlen(proxmox_log_server) < 4) return;
   WiFiClient httpCheck;
@@ -448,7 +456,6 @@ void setup() {
   SPI.begin(); RTC.begin();
   display.begin(0x3C, true); display.clearDisplay();
 
-  // If EEPROM is fresh, host fallback configuration access point directly
   if (provisioningMode) {
     displayProvisioningInstructions(); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
     tone(BUZZER_PIN, 600, 300); delay(350); tone(BUZZER_PIN, 600, 300);
