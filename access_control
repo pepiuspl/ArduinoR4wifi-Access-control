@@ -140,7 +140,6 @@ void loadConfiguration() {
     notifyOnAccess = (EEPROM.read(424) == 0x01);
     notifyOnAlarm = (EEPROM.read(425) == 0x01);
     
-    // 🌟 FORCE STRICT TERMINAL BOUNDS TO PREVENT MEMORY BLEEDING
     ssid[31] = '\0';
     pass[31] = '\0';
     admin_password[15] = '\0';
@@ -202,18 +201,14 @@ void loadCards() {
   
   for (int i = 0; i < totalCards; i++) {
     EEPROM.get(10 + (i * sizeof(User)), users[i]);
-    
-    // 🌟 INJECT BOUNDARY BARRIERS TO CLEAN CORRUPT TEXT SLOTS ON LOAD
     users[i].name[15] = '\0';
     
-    // Sanitize non-printable characters out of names to protect JSON parser integrity
     for(int k = 0; k < 15; k++) {
       if(users[i].name[k] == '\0') break;
       if(users[i].name[k] < 32 || users[i].name[k] > 126) {
-         users[i].name[k] = '?'; // Swaps memory noise into generic placeholders
+         users[i].name[k] = '?'; 
       }
     }
-    
     isCardActive[i] = (EEPROM.read(220 + i) != 0x00); 
   }
 }
@@ -223,7 +218,7 @@ void saveNewCard(byte* uid, String nameStr) {
   memset(&users[totalCards], 0, sizeof(User));
   memcpy(users[totalCards].uid, uid, 4);
   nameStr.toCharArray(users[totalCards].name, 16);
-  users[totalCards].name[15] = '\0'; // Hard boundary enforcement
+  users[totalCards].name[15] = '\0'; 
   
   EEPROM.put(10 + (totalCards * sizeof(User)), users[totalCards]);
   isCardActive[totalCards] = true; 
@@ -431,6 +426,52 @@ void openDoor(String source) {
   }
 }
 
+// 🌟 RESTORED MISSING FUNCTION: PROVISIONING SYSTEM AP BACKUP
+void handleProvisioningServer() {
+  WiFiClient client = server.available();
+  if (!client) return;
+  String reqHeader = "";
+  unsigned long webTimeout = millis() + 200; 
+  while (client.connected() && millis() < webTimeout) { 
+    if (client.available()) {
+      char c = client.read(); reqHeader += c;
+      if (c == '\n') break; 
+    }
+  }
+  while (client.available()) { client.read(); }
+
+  if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) {
+    int sIdx = reqHeader.indexOf("s=") + 2;
+    int pIdx = reqHeader.indexOf("&p=") + 3;
+    int aIdx = reqHeader.indexOf("&a=") + 3;
+    int tiIdx = reqHeader.indexOf("&ti=") + 4;
+    int tpIdx = reqHeader.indexOf("&tp=") + 4;
+    int teIdx = reqHeader.indexOf("&te=");
+
+    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
+    String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
+    String rawAdmin = reqHeader.substring(aIdx, reqHeader.indexOf("&ti="));
+    String rawTeleIP = reqHeader.substring(tiIdx, reqHeader.indexOf("&tp="));
+
+    int spacePos = reqHeader.indexOf(" ", tpIdx);
+    int nextAmp = reqHeader.indexOf("&", tpIdx);
+    int endPortPos = (nextAmp != -1 && nextAmp < spacePos) ? nextAmp : spacePos;
+    String nTelePort = reqHeader.substring(tpIdx, endPortPos);
+    bool runTele = (teIdx != -1);
+
+    String decodedSSID = urlDecode(rawSSID); String decodedPass = urlDecode(rawPass);
+    String decodedAdmin = urlDecode(rawAdmin); String decodedTeleIP = urlDecode(rawTeleIP);
+
+    saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele, "", false, false);
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nUruchamianie ponowne...");
+    delay(50); client.stop();
+    tone(BUZZER_PIN, 2000, 800); delay(1000);
+    NVIC_SystemReset(); return;
+  }
+  client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"provisioning\":true}");
+  delay(50); client.stop();
+}
+
 void handleWebServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -511,7 +552,7 @@ void handleWebServer() {
     }
   }
 
-  // 🌟 NEW MASTER EEPROM WIPE VECTOR TO ALLOW FRESH SYNC FOR SLOTS
+  // MASTER EEPROM WIPE VECTOR TO ALLOW FRESH SYNC FOR SLOTS
   if (reqHeader.indexOf("GET /api/wipe_eeprom") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -702,7 +743,7 @@ void handleWebServer() {
     }
     else if (reqHeader.indexOf("/api/save_settings") != -1) {
       int sIdx = reqHeader.indexOf("s=") + 2; int pIdx = reqHeader.indexOf("&p=") + 3;
-      int aIdx = reqHeader.indexOf("&a=") + 3; int wIdx = reqHeader.indexOf("&w=");
+      int aIdx = reqHeader.indexOf("&a="); int wIdx = reqHeader.indexOf("&w=");
       int naIdx = reqHeader.indexOf("&na="); int nalIdx = reqHeader.indexOf("&nal=");
 
       String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
@@ -754,7 +795,7 @@ void setup() {
   }
 
   loadConfiguration(); 
-  loadCards(); // 🌟 Runs our new sanitization loops immediately
+  loadCards(); 
   
   pinMode(RELAY_PIN, OUTPUT); pinMode(LED_GREEN, OUTPUT); pinMode(LED_RED, OUTPUT);
   pinMode(RST_PIN, OUTPUT); digitalWrite(RST_PIN, HIGH); delay(50);
