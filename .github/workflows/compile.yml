@@ -61,7 +61,8 @@ jobs:
         
         # Compile out of this perfectly normalized temporary path
         mkdir -p build
-        arduino-cli compile --fqbn arduino:renesas_uno:wifi --output-dir ./build "./$SKETCH_NAME"
+        # 🌟 FIXED: Changed board flag string assignment to unor4wifi
+        arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi --output-dir ./build "./$SKETCH_NAME"
 
     # 6. Rename the output file dynamically to match your server's naming convention
     - name: Package Update Asset
