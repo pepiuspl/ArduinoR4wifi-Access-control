@@ -620,13 +620,6 @@ if (!InternalStorage.open(contentLength))
     return;
 }
 
-addLog(
-    "OTA RECEIVED: " +
-    String(receivedBytes) +
-    "/" +
-    String(contentLength)
-);
-
 uint32_t receivedBytes = 0;
 
 unsigned long receiveDeadline = millis() + 120000;
@@ -652,6 +645,13 @@ while (receivedBytes < contentLength &&
 
     delay(1);
 }
+
+addLog(
+    "OTA RECEIVED: " +
+    String(receivedBytes) +
+    "/" +
+    String(contentLength)
+);
 
 InternalStorage.close();
 
