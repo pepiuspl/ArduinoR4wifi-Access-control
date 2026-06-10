@@ -116,7 +116,7 @@ unsigned long lastSuccessfulPollTime = 0;
 int globalAnimFrame = 0;
 unsigned long lastFrameTick = 0;
 
-// 🛡️ NETWORK SAFETY SHIELD: Disables outbound tracking sockets while streaming files or handling requests
+// 🛡️ NET PROTECTION SHIELD: Prevents log dispatch telemetry socket collisions
 bool blockTelemetry = false;
 
 String urlDecode(String str) {
@@ -310,7 +310,7 @@ void renderSystemUI() {
   display.setTextSize(1);
   display.setCursor(4, 56);
   
-  // 🌟 VERIFICATION UNIQUE RULE: Displays the app version instead of the local router IP address
+  // 🌟 UNIQUE OLED AUDIT LOG PATTERN: Hardcoded version code string output
   if (WiFi.status() == WL_CONNECTED) {
     display.print(app_version); 
   } else if (isOfflineStandby) {
@@ -346,6 +346,8 @@ void sendExternalTelemetry(String logData) {
   if (telemetryClient.connect(proxmox_log_server, proxmox_log_port)) {
     telemetryClient.println("POST /log HTTP/1.1");
     telemetryClient.print("Host: "); telemetryClient.println(proxmox_log_server);
+    telemetryClient.println("Content-Type: text/plain; charset=utf-8");
+    telemetryClient.print("Content-Length: "); telemetryClient.println(logData.length());
     telemetryClient.println("Connection: close\r\n");
     telemetryClient.print(logData);
     telemetryClient.flush();
@@ -355,10 +357,13 @@ void sendExternalTelemetry(String logData) {
 
 void addLog(String msg) {
   RTCTime currentRTCTime;
-  RTC.getTime(currentRTCTime);
-  char timeBuffer[12];
-  sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
-  String currentTime = String(timeBuffer);
+  // Fallback if local RTC hardware registers drop out completely (Point 6)
+  String currentTime = "--:--:--";
+  if (RTC.getTime(currentRTCTime)) {
+    char timeBuffer[12];
+    sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
+    currentTime = String(timeBuffer);
+  }
   if (logCount < MAX_LOGS) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
@@ -378,7 +383,7 @@ void openDoor(String source) {
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED, LOW); 
-  tone(BUZZER_PIN, 1000, 200); // One initial sharp confirmation chirp
+  tone(BUZZER_PIN, 1000, 200); 
   addLog("Otwarto: " + source);
 }
 
@@ -419,7 +424,7 @@ void handleProvisioningServer() {
     String decodedTeleIP = urlDecode(rawTeleIP);
 
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;\'><h2>Ustawienia Zapisane Pomyslnie!</h2></body></html>");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;\'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>");
     delay(50); client.stop();
     tone(BUZZER_PIN, 2000, 800);
     delay(1000);
@@ -430,7 +435,7 @@ void handleProvisioningServer() {
   client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
-  client.println("<h2 style='text-align:center;'>⚙       Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
+  client.println("<h2 style='text-align:center;'>⚙       Installer Setup Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
   client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
   client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
   client.println("<input type='password' name='a' value='" + String(admin_password) + "' placeholder='Admin Master Password' required>");
@@ -455,12 +460,13 @@ void handleWebServer() {
     }
   }
 
+  // Fallback Emergency Local Access Token Generator Mechanism (Point 6)
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
     sprintf(temporary_password, "%ld", tokenNum);
     hasTemporaryPassword = true;
-    addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
-    globalDisplayInfo = "Klucz tymczasowy wyslany";
+    addLog("RESET: Wygenerowano token lokalny [" + String(temporary_password) + "]");
+    globalDisplayInfo = "TOKEN: " + String(temporary_password);
     tone(BUZZER_PIN, 1400, 400);
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
     delay(1); client.stop(); blockTelemetry = false; return;
@@ -540,7 +546,6 @@ HEADER_COMPLETE:
     }
     addLog("OTA START. SIZE: " + String(contentLength));
     
-    // 🛡️ RECOVERY DEFENSIVE SHIELD: Resets flash arrays to prevent 500 fault rejections
     InternalStorage.close(); 
     if (!InternalStorage.open(contentLength)) {
         client.println("HTTP/1.1 500 Internal Error\r\nConnection: close\r\n");
@@ -843,7 +848,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   String payloadResponse = ""; 
   while ((httpPost.available() || httpPost.connected()) && millis() < deadline) { 
     if (httpPost.available()) { 
-      char c = httpPost.read(); 
+      char c = httpCheck.read(); 
       payloadResponse += c; 
     } 
   } 
@@ -924,7 +929,7 @@ void setup() {
     server.begin(); 
     updateDisplay("Gotowy", WiFi.localIP().toString()); 
     
-    addLog("REVOLUTION FIXED CODE LIVE 2026");
+    addLog("System online");
     
     tone(BUZZER_PIN, 800, 100);  delay(120); 
     tone(BUZZER_PIN, 1000, 100); delay(120); 
@@ -1112,7 +1117,7 @@ void loop() {
       buttonLogClient.setTimeout(150); 
       if (buttonLogClient.connect(proxmox_log_server, proxmox_log_port)) { 
         buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1"); 
-        buttonLogClient.print("Host: "); buttonLogClient.println(proxmox_log_server); 
+        buttonLogClient.print("Host: "); buttonLogClient.println(proxmox_log_server); //
         buttonLogClient.println("Connection: close\r\n"); 
         buttonLogClient.stop(); 
       } 
