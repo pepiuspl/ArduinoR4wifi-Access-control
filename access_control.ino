@@ -116,7 +116,6 @@ unsigned long lastSuccessfulPollTime = 0;
 int globalAnimFrame = 0;
 unsigned long lastFrameTick = 0;
 
-// 🛡️ NET PROTECTION SHIELD: Prevents log dispatch telemetry socket collisions
 bool blockTelemetry = false;
 
 String urlDecode(String str) {
@@ -309,8 +308,6 @@ void renderSystemUI() {
   display.drawFastHLine(0, 53, 128, SH110X_WHITE);
   display.setTextSize(1);
   display.setCursor(4, 56);
-  
-  // 🌟 UNIQUE OLED AUDIT LOG PATTERN: Hardcoded version code string output
   if (WiFi.status() == WL_CONNECTED) {
     display.print(app_version); 
   } else if (isOfflineStandby) {
@@ -318,7 +315,6 @@ void renderSystemUI() {
   } else {
     display.print("DISCONNECTED");
   }
-  
   String liveTime = getFormattedSystemTime();
   display.setCursor(94, 56);
   display.print(liveTime);
@@ -346,8 +342,6 @@ void sendExternalTelemetry(String logData) {
   if (telemetryClient.connect(proxmox_log_server, proxmox_log_port)) {
     telemetryClient.println("POST /log HTTP/1.1");
     telemetryClient.print("Host: "); telemetryClient.println(proxmox_log_server);
-    telemetryClient.println("Content-Type: text/plain; charset=utf-8");
-    telemetryClient.print("Content-Length: "); telemetryClient.println(logData.length());
     telemetryClient.println("Connection: close\r\n");
     telemetryClient.print(logData);
     telemetryClient.flush();
@@ -357,13 +351,10 @@ void sendExternalTelemetry(String logData) {
 
 void addLog(String msg) {
   RTCTime currentRTCTime;
-  // Fallback if local RTC hardware registers drop out completely (Point 6)
-  String currentTime = "--:--:--";
-  if (RTC.getTime(currentRTCTime)) {
-    char timeBuffer[12];
-    sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
-    currentTime = String(timeBuffer);
-  }
+  RTC.getTime(currentRTCTime);
+  char timeBuffer[12];
+  sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
+  String currentTime = String(timeBuffer);
   if (logCount < MAX_LOGS) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
@@ -424,7 +415,7 @@ void handleProvisioningServer() {
     String decodedTeleIP = urlDecode(rawTeleIP);
 
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;\'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;\'><h2>Ustawienia Zapisane Pomyslnie!</h2></body></html>");
     delay(50); client.stop();
     tone(BUZZER_PIN, 2000, 800);
     delay(1000);
@@ -435,13 +426,13 @@ void handleProvisioningServer() {
   client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
-  client.println("<h2 style='text-align:center;'>⚙       Installer Setup Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
+  client.println("<h2 style='text-align:center;'>⚙       Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
   client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
   client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
   client.println("<input type='password' name='a' value='" + String(admin_password) + "' placeholder='Admin Master Password' required>");
   client.println("<input type='text' name='ti' value='" + String(proxmox_log_server) + "' placeholder='Backend Address / Domain Link' required>");
   client.println("<input type='text' name='tp' value='" + String(proxmox_log_port) + "' placeholder='Port Target' required>");
-  client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Save Infrastructure Settings'></form></div></body></html>");
+  client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Update & Reboot Hardware'></form></div></body></html>");
   delay(50); client.stop();
 }
 
@@ -460,13 +451,12 @@ void handleWebServer() {
     }
   }
 
-  // Fallback Emergency Local Access Token Generator Mechanism (Point 6)
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
     sprintf(temporary_password, "%ld", tokenNum);
     hasTemporaryPassword = true;
-    addLog("RESET: Wygenerowano token lokalny [" + String(temporary_password) + "]");
-    globalDisplayInfo = "TOKEN: " + String(temporary_password);
+    addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
+    globalDisplayInfo = "Klucz tymczasowy wyslany";
     tone(BUZZER_PIN, 1400, 400);
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
     delay(1); client.stop(); blockTelemetry = false; return;
@@ -830,6 +820,7 @@ void executeCloudSynchronization() {
   } 
 }
 
+// Fixed core lookup assignment: maps compilation reads safely to its native function client pointer
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   if (strlen(proxmox_log_server) < 4) return;
   WiFiClient httpPost; 
@@ -848,7 +839,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   String payloadResponse = ""; 
   while ((httpPost.available() || httpPost.connected()) && millis() < deadline) { 
     if (httpPost.available()) { 
-      char c = httpCheck.read(); 
+      char c = httpPost.read(); 
       payloadResponse += c; 
     } 
   } 
@@ -929,7 +920,7 @@ void setup() {
     server.begin(); 
     updateDisplay("Gotowy", WiFi.localIP().toString()); 
     
-    addLog("System online");
+    addLog("REVOLUTION FIXED CODE LIVE 2026");
     
     tone(BUZZER_PIN, 800, 100);  delay(120); 
     tone(BUZZER_PIN, 1000, 100); delay(120); 
@@ -1117,7 +1108,7 @@ void loop() {
       buttonLogClient.setTimeout(150); 
       if (buttonLogClient.connect(proxmox_log_server, proxmox_log_port)) { 
         buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1"); 
-        buttonLogClient.print("Host: "); buttonLogClient.println(proxmox_log_server); //
+        buttonLogClient.print("Host: "); buttonLogClient.println(proxmox_log_server); 
         buttonLogClient.println("Connection: close\r\n"); 
         buttonLogClient.stop(); 
       } 
