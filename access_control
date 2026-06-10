@@ -23,11 +23,27 @@ struct LogEntry {
   String msg; 
 };
 
+// --- 🛠️ COMPILER FORWARD DECLARATIONS (FIXES SCOPE ERRORS) ---
+String getFormattedSystemTime();
+void addLog(String msg);
+void openLocalDoor(String source);
+void forceHardwareRFIDReset();
+void displayProvisioningInstructions(String errorContext = "");
+void saveCardToLocalMemory(byte* uid, String label);
+void dispatchWebhookAlert(String eventType, String detail);
+void renderSystemUI();
+void handleProvisioningServer();
+void executeCloudSynchronization();
+String urlDecode(String str);
+void loadConfiguration();
+void loadCards();
+void factoryResetSettings();
+
 // --- DYNAMIC CONFIGURATION MEMORY MAP (RESTORED FROM EEPROM) ---
 char ssid[32] = "";         
 char pass[32] = "";     
 char admin_password[16] = "";       
-char proxmox_log_server[64] = ""; // Expanded to support clean alphanumeric domains
+char proxmox_log_server[64] = ""; 
 int proxmox_log_port = 3000; 
 bool telemetryEnabled = false;
 
@@ -298,7 +314,6 @@ void handleProvisioningServer() {
   }
   while (client.available()) { client.read(); }
 
-  // Brute force lockout check gates
   if (millis() < lockoutEndTime) {
     client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\n\r\nLocked.");
     client.stop(); return;
@@ -323,7 +338,6 @@ void handleProvisioningServer() {
     NVIC_SystemReset(); return;
   }
   
-  // Base deployment html page rendering
   client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
@@ -337,14 +351,13 @@ void handleProvisioningServer() {
   delay(50); client.stop();
 }
 
-// --- 🌟 ACTIVE CLOUD PROCESSING PIPELINE DAEMONS 🌟 ---
+// --- ACTIVE CLOUD PROCESSING PIPELINE DAEMONS ---
 void executeCloudSynchronization() {
   if (strlen(proxmox_log_server) < 4) return;
   WiFiClient httpCheck;
   httpCheck.setTimeout(150);
   
   if (!httpCheck.connect(proxmox_log_server, proxmox_log_port)) {
-    // 🌟 SEAMLESS FAILOVER WORKAROUND: If dropouts exceed 30 seconds, deploy recovery AP in background thread!
     if (millis() - lastSuccessfulPollTime > 30000) {
       isOfflineStandby = true;
       displayProvisioningInstructions("ERR: CLOUD LOSS");
@@ -353,7 +366,7 @@ void executeCloudSynchronization() {
     return;
   }
 
-  lastSuccessfulPollTime = millis(); // Refresh health state check benchmarks
+  lastSuccessfulPollTime = millis(); 
 
   httpCheck.println("GET /api/hardware/poll HTTP/1.1");
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server);
@@ -383,7 +396,6 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   if (strlen(proxmox_log_server) < 4) return;
   WiFiClient httpPost; httpPost.setTimeout(350);
   
-  // 🌟 LOCAL FAILOVER ATTRIBUTE ROUTINE: If cloud is down, run full evaluation locally against EEPROM maps!
   if (!httpPost.connect(proxmox_log_server, proxmox_log_port)) { 
     bool foundLocal = false;
     for (int i = 0; i < totalCards; i++) {
@@ -419,7 +431,8 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   String payloadResponse = ""; bool bodyStarted = false;
   while (httpPost.connected() && millis() < deadline) {
     if (httpPost.available()) {
-      String line = httpCheck.readStringUntil('\n');
+      // 🌟 FIXED TYPO: Changed 'httpCheck' to 'httpPost'
+      String line = httpPost.readStringUntil('\n');
       if (line == "\r") { bodyStarted = true; continue; }
       if (bodyStarted) { payloadResponse += line; break; }
     }
@@ -428,7 +441,6 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 
   if (runRegister) {
     if (payloadResponse.indexOf("\"status\":\"created\"") != -1) {
-      // Mirror the new user entry inside local EEPROM registers as well for future offline coverage
       saveCardToLocalMemory(rawUid, pendingUsername);
       globalAnimFrame = 0; tone(BUZZER_PIN, 1000, 100); delay(100); tone(BUZZER_PIN, 1800, 300);
     } else { tone(BUZZER_PIN, 150, 600); }
@@ -444,12 +456,22 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   }
 }
 
+// --- SYSTEM TIME FORMATTER ---
+String getFormattedSystemTime() {
+  RTCTime currentRTCTime;
+  if (RTC.getTime(currentRTCTime)) {
+    char timeBuffer[6];
+    sprintf(timeBuffer, "%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes());
+    return String(timeBuffer);
+  }
+  return "--:--";
+}
+
 // --- CORE SYSTEM SETUP HOOKS ---
 void setup() {
   pinMode(BUZZER_PIN, OUTPUT); tone(BUZZER_PIN, 1200, 100); delay(100);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   
-  // HARDWARE BACKDOOR DETECTOR: Hold the manual button for 2 seconds straight during boot to force open AP mode
   if (digitalRead(BUTTON_PIN) == LOW) {
     delay(2000);
     if (digitalRead(BUTTON_PIN) == LOW) { provisioningMode = true; }
@@ -479,7 +501,6 @@ void setup() {
     forceHardwareRFIDReset(); lastSuccessfulPollTime = millis();
     tone(BUZZER_PIN, 800, 100); delay(120); tone(BUZZER_PIN, 1600, 300);
   } else {
-    // If local network cannot connect, trigger fallback portal immediately
     isOfflineStandby = true; forceHardwareRFIDReset();
     displayProvisioningInstructions("ERR: CONN TIMEOUT");
     WiFi.disconnect(); delay(500); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
@@ -513,12 +534,10 @@ void loop() {
     }
     uidStr.toUpperCase();
     
-    // Process authorization request using both hex strings and raw byte matching arrays simultaneously
     transmitCardPayloadToCloud(uidStr, rfid.uid.uidByte, learningMode);
     rfid.PICC_HaltA(); rfidResetPending = true; lastScanTime = millis();
   }
 
-  // Physical Exit Button Override Handler
   if (digitalRead(BUTTON_PIN) == LOW) {
     delay(50);
     if (digitalRead(BUTTON_PIN) == LOW) {
