@@ -430,7 +430,7 @@ void handleProvisioningServer() {
     }
   }
   while (client.available()) { client.read(); }
-  
+
   addLog("REQ=" + reqHeader);
 
   if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) {
@@ -488,14 +488,18 @@ void handleWebServer() {
 
   String reqHeader = "";
   unsigned long webTimeout = millis() + 200; 
-  while (client.connected() && millis() < webTimeout) { 
-    if (client.available()) {
-      char c = client.read();
-      reqHeader += c;
-      if (c == '\n') break; 
+  while (client.connected() && millis() < webTimeout)
+  {
+    if (client.available())
+    {
+        char c = client.read();
+        reqHeader += c;
+
+        if (c == '\n')
+            break;
     }
   }
-  while (client.available()) { client.read(); }
+
 
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
