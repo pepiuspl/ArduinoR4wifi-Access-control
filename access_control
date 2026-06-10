@@ -460,15 +460,15 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
-  // 🌟 INTERCEPT WEB UTILITY CORS OPTIONS PREFLIGHT HANDSHAKES
+  // 🌟 CLEAN INTERCEPT FOR CORS OPTIONS PREFLIGHT HANDSHAKES
   if (reqHeader.indexOf("OPTIONS ") != -1) {
     client.println("HTTP/1.1 204 No Content");
     client.println("Access-Control-Allow-Origin: *");
     client.println("Access-Control-Allow-Methods: GET, POST, OPTIONS");
     client.println("Access-Control-Allow-Headers: *");
     client.println("Connection: close");
-    client.println();
-    delay(1); client.stop(); return;
+    client.println(); // Single clean blank line separating headers from body
+    delay(30); client.stop(); return;
   }
 
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
@@ -478,21 +478,24 @@ void handleWebServer() {
     addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
     globalDisplayInfo = "Klucz tymczasowy wyslany";
     tone(BUZZER_PIN, 1400, 400);
+    
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
-    client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-    client.println("Connection: close\r\n");
+    client.println("Access-Control-Allow-Origin: *"); 
+    client.println("Connection: close");
+    client.println();
     client.println("{\"status\":\"ok\"}");
-    delay(1); client.stop(); return;
+    delay(50); client.stop(); return;
   }
 
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
     client.println("HTTP/1.1 403 Forbidden");
     client.println("Content-Type: application/json");
-    client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-    client.println("Connection: close\r\n");
+    client.println("Access-Control-Allow-Origin: *"); 
+    client.println("Connection: close");
+    client.println();
     client.println("{\"error\":\"lockout\"}");
-    delay(1); client.stop(); return;
+    delay(50); client.stop(); return;
   }
 
   String attemptedPass = "";
@@ -525,17 +528,18 @@ void handleWebServer() {
 
   if (reqHeader.indexOf("GET /api/data") != -1) {
     if (!isAuthenticated) {
-      // 🌟 UPDATED FROM 401 TO 200 FOR SMOOTH NATIVE FE-FETCH OBJECT PARSING
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"auth\":false}");
     } else {
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.print("{\"auth\":true,\"mode\":\"");
       client.print(learningMode ? "Uczenie" : "Czuwanie");
       client.print("\",\"pending\":\""); client.print(pendingUsername);
@@ -567,7 +571,7 @@ void handleWebServer() {
       client.print(",\"ntf_alarm\":"); client.print(notifyOnAlarm ? "true" : "false");
       client.print("}");
     }
-    delay(1); client.stop(); return;
+    delay(50); client.stop(); return; // 🌟 Stabilized transmission buffer delay
   }
 
   if (isAuthenticated) {
@@ -575,10 +579,11 @@ void handleWebServer() {
       openDoor("App API");
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"status\":\"ok\"}");
-      delay(30); client.stop(); return;
+      delay(50); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
       learningMode = !learningMode; autoExitLearn = false; 
@@ -598,10 +603,11 @@ void handleWebServer() {
       }
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"status\":\"ok\"}");
-      delay(30); client.stop(); return;
+      delay(50); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/delete_user") != -1) {
       int idxPos = reqHeader.indexOf("idx=");
@@ -614,10 +620,11 @@ void handleWebServer() {
       }
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"status\":\"ok\"}");
-      delay(30); client.stop(); return;
+      delay(50); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/rename_user") != -1) {
       int idxPos = reqHeader.indexOf("idx="); int namePos = reqHeader.indexOf("name=");
@@ -637,10 +644,11 @@ void handleWebServer() {
       }
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"status\":\"ok\"}");
-      delay(30); client.stop(); return;
+      delay(50); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
       int idxPos = reqHeader.indexOf("idx=");
@@ -655,10 +663,11 @@ void handleWebServer() {
       }
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"status\":\"ok\"}");
-      delay(30); client.stop(); return;
+      delay(50); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/clear_logs") != -1) {
       int tPos = reqHeader.indexOf("time=");
@@ -688,10 +697,11 @@ void handleWebServer() {
       }
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"status\":\"ok\"}");
-      delay(30); client.stop(); return;
+      delay(50); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/save_settings") != -1) {
       int sIdx = reqHeader.indexOf("s=") + 2; int pIdx = reqHeader.indexOf("&p=") + 3;
@@ -717,22 +727,23 @@ void handleWebServer() {
       addLog("Zapisano ustawienia");
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
-      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-      client.println("Connection: close\r\n");
+      client.println("Access-Control-Allow-Origin: *"); 
+      client.println("Connection: close");
+      client.println();
       client.println("{\"status\":\"ok\"}");
-      delay(30); client.stop(); return;
+      delay(50); client.stop(); return;
     }
   }
 
   // --- STANDARD FALLBACK FOR WRONG API CALLS ---
   client.println("HTTP/1.1 401 Unauthorized");
   client.println("Content-Type: application/json");
-  client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
-  client.println("Connection: close\r\n");
+  client.println("Access-Control-Allow-Origin: *"); 
+  client.println("Connection: close");
+  client.println();
   client.println("{\"error\":\"unauthorized\"}");
-  delay(1); client.stop();
+  delay(50); client.stop();
 }
-
 void setup() {
   Serial.begin(9600);
   delay(1500); 
