@@ -127,7 +127,7 @@ String urlDecode(String str) {
   return decoded;
 }
 
-// --- STORAGE MANAGEMENT ENGINE WITH PROTECTION SHIELDS ---
+// --- STORAGE MANAGEMENT ENGINE ---
 void loadConfiguration() {
   if (EEPROM.read(250) == 0x55) {
     EEPROM.get(260, ssid);
@@ -426,7 +426,7 @@ void openDoor(String source) {
   }
 }
 
-// 🌟 RESTORED MISSING FUNCTION: PROVISIONING SYSTEM AP BACKUP
+// 🌟 RESTORED CAPTIVE PORTAL SEED ROUTINE (WIFI CONFIG WEB UI FORM INJECTED)
 void handleProvisioningServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -463,12 +463,29 @@ void handleProvisioningServer() {
     String decodedAdmin = urlDecode(rawAdmin); String decodedTeleIP = urlDecode(rawTeleIP);
 
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele, "", false, false);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\nUruchamianie ponowne...");
-    delay(50); client.stop();
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2><p>Urzadzenie restartuje sie i sprobuje polaczyc z Twoja siecia domowa...</p></body></html>");
+    delay(100); client.stop();
     tone(BUZZER_PIN, 2000, 800); delay(1000);
     NVIC_SystemReset(); return;
   }
-  client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"provisioning\":true}");
+  
+  // 🌟 RESPONSIVE VISUAL FORM SERVED EXCLUSIVELY DURING FIRST BOOT PROVISIONING AP STAGE
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+  client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;box-shadow:0 4px 10px rgba(0,0,0,0.5);}");
+  client.println("input[type=text],input[type=password]{width:85%;padding:10px;margin:10px 0;border-radius:5px;border:1px solid #444;background:#2a2a2a;color:#fff;text-align:center;} .btn{background:#2e7d32;color:#fff;font-weight:bold;padding:12px;width:90%;border:none;border-radius:5px;cursor:pointer;font-size:16px;margin-top:15px;}</style></head><body>");
+  client.println("<h2>⚙️ Panel Pierwszej Konfiguracji Zamku</h2>");
+  client.println("<div class='box'><form method='GET' action='/save_setup'>");
+  client.println("<h3>1. Siec Wi-Fi</h3><input type='text' name='s' placeholder='Nazwa Domowego Wi-Fi (SSID)' required><br>");
+  client.println("<input type='password' name='p' placeholder='Haslo do Wi-Fi' required><br>");
+  client.println("<h3>2. Bezpieczenstwo Administratora</h3><input type='password' name='a' placeholder='Hasło Panelu / Aplikacji' required><br>");
+  client.println("<h3>3. Telemetria Serwera (Opcjonalnie)</h3><input type='text' name='ti' placeholder='IP Serwera Logow' value='192.168.1.100'><br>");
+  client.println("<input type='text' name='tp' placeholder='Port Telemetrii' value='5000'><br>");
+  client.println("<label><input type='checkbox' name='te' value='1' checked> Wlacz automatyczna wysylke logow</label><br>");
+  client.println("<input type='submit' class='btn' value='Zapisz Ustawienia i Polacz'></form></div></body></html>");
   delay(50); client.stop();
 }
 
@@ -552,7 +569,7 @@ void handleWebServer() {
     }
   }
 
-  // MASTER EEPROM WIPE VECTOR TO ALLOW FRESH SYNC FOR SLOTS
+  // MASTER EEPROM WIPE VECTOR TO ALLOW FRESH SYNC FOR SLOTS (CARDS SPECIFIC SAFEGARD)
   if (reqHeader.indexOf("GET /api/wipe_eeprom") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -562,9 +579,10 @@ void handleWebServer() {
     if (!isAuthenticated) {
       client.println("{\"auth\":false}");
     } else {
-      factoryResetSettings();
-      addLog("Wiped card DB!");
-      client.println("{\"status\":\"wiped\"}");
+      EEPROM.put(0, 0); 
+      totalCards = 0;
+      addLog("Purged cards matrix!");
+      client.println("{\"status\":\"cards_purged_wifi_safe\"}");
     }
     delay(50); client.stop(); return;
   }
@@ -786,6 +804,11 @@ void handleWebServer() {
 void setup() {
   Serial.begin(9600);
   delay(1500); 
+  
+  // 🌟 IMMEDIATE STARTUP AUDIO FEEDBACK FOR TROUBLESHOOTING
+  pinMode(BUZZER_PIN, OUTPUT);
+  tone(BUZZER_PIN, 1200, 100); delay(100);
+  
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   if (digitalRead(BUTTON_PIN) == LOW) {
     delay(2000);
@@ -805,7 +828,14 @@ void setup() {
   delay(300); display.begin(0x3C, true); display.clearDisplay();
 
   if (provisioningMode) {
-    displayProvisioningInstructions(); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
+    displayProvisioningInstructions(); 
+    WiFi.beginAP("ZAMEK_SETUP"); 
+    server.begin();
+    
+    // 🌟 AUDIO ALERT CONFIRMING PROVISIONING SYSTEM HOTSPOT CHANNELS ARE LIVE
+    tone(BUZZER_PIN, 600, 300); delay(350);
+    tone(BUZZER_PIN, 600, 300);
+    
     while (true) { handleProvisioningServer(); delay(10); }
   }
 
@@ -833,6 +863,8 @@ void setup() {
     } else { addLog("System online (NTP fail backup)"); }
 
     server.begin(); forceHardwareRFIDReset();
+    
+    // Standard system home loop success chimes
     tone(BUZZER_PIN, 800, 100);  delay(120);
     tone(BUZZER_PIN, 1000, 100); delay(120);
     tone(BUZZER_PIN, 1300, 120); delay(140);
