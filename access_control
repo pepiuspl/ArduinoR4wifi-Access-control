@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.9.3 - Reactive Core Cloud Solution";
+const char* app_version = "v2.9.4 - Reactive Core Cloud Solution";
 
 // --- STRUCTURE DEFINITIONS ---
 struct User {
@@ -33,7 +33,7 @@ void saveCardToLocalMemory(byte* uid, String label);
 void dispatchWebhookAlert(String eventType, String detail);
 void renderSystemUI();
 void handleProvisioningServer();
-void handleOnlineInstallerServer(); // 🌟 Registered hidden online engine scanner scope
+void handleOnlineInstallerServer(); 
 void executeCloudSynchronization();
 String urlDecode(String str);
 void loadConfiguration();
@@ -142,7 +142,8 @@ void addLog(String msg) {
 
 // --- STORAGE MANAGEMENT ENGINE ---
 void loadConfiguration() {
-  if (EEPROM.read(250) == 0x55) {
+  // 🌟 FIX POINT: Shifted verification initialization signature to isolated address slot 500
+  if (EEPROM.read(500) == 0xAA) {
     EEPROM.get(260, ssid);
     EEPROM.get(292, pass);
     EEPROM.get(324, admin_password);
@@ -154,6 +155,10 @@ void loadConfiguration() {
     notifyOnAlarm = (EEPROM.read(475) == 0x01);
     
     ssid[31] = '\0'; pass[31] = '\0'; admin_password[15] = '\0'; proxmox_log_server[63] = '\0'; webhook_server[63] = '\0';
+    
+    // Safety check: Defend stack configurations against parsing control junk values
+    if (ssid[0] < 32 || ssid[0] > 126) { provisioningMode = true; return; }
+    
     provisioningMode = false; hasSavedConfig = true;
   } else {
     provisioningMode = true; hasSavedConfig = false;
@@ -178,7 +183,9 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   EEPROM.put(404, proxmox_log_port); EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
   EEPROM.put(410, webhook_server); EEPROM.write(474, notifyOnAccess ? 0x01 : 0x00);
   EEPROM.write(475, notifyOnAlarm ? 0x01 : 0x00);
-  EEPROM.write(250, 0x55); 
+  
+  // 🌟 FIX POINT: Store production validation keys securely at verification segment 500
+  EEPROM.write(500, 0xAA); 
 }
 
 void factoryResetSettings() {
@@ -352,7 +359,6 @@ void handleProvisioningServer() {
   delay(50); client.stop();
 }
 
-// 🌟 RE-ENGINEERED: HIDDEN SECURE ONLINE INSTALLER WEB BACKDOOR GATEWAY
 void handleOnlineInstallerServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -366,7 +372,6 @@ void handleOnlineInstallerServer() {
   }
   while (client.available()) { client.read(); }
 
-  // Processes incoming network parameter re-writes dynamically
   if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) {
     int sIdx = reqHeader.indexOf("s=") + 2; int pIdx = reqHeader.indexOf("&p=") + 3;
     int aIdx = reqHeader.indexOf("&a=") + 3; int tiIdx = reqHeader.indexOf("&ti=") + 4;
@@ -386,7 +391,6 @@ void handleOnlineInstallerServer() {
     NVIC_SystemReset(); return;
   }
 
-  // Strict Tokenized Validation Logic Gate: http://<arduino_ip>/installer?pass=YOUR_ADMIN_PASSWORD
   String expectedAuthSignature = "pass=" + String(admin_password);
   if (reqHeader.indexOf("GET /installer") != -1 && reqHeader.indexOf(expectedAuthSignature) != -1) {
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
@@ -403,7 +407,6 @@ void handleOnlineInstallerServer() {
     return;
   }
 
-  // Returns a silent 404 to non-authenticated queries to blend into the background
   client.println("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
   client.stop();
 }
@@ -542,7 +545,7 @@ void setup() {
   SPI.begin(); RTC.begin(); display.begin(0x3C, true); display.clearDisplay();
 
   if (provisioningMode) {
-    displayProvisioningInstructions(); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
+    displayProvisioningInstructions(""); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
     while (true) { handleProvisioningServer(); delay(10); }
   }
 
@@ -556,7 +559,6 @@ void setup() {
     if (epoch > 1000000000) { RTCTime local(epoch); RTC.setTime(local); }
     forceHardwareRFIDReset(); lastSuccessfulPollTime = millis();
     
-    // 🌟 FIX POINT: Active HTTP daemon fires up alongside client sync threads while online
     server.begin(); 
     
     tone(BUZZER_PIN, 800, 100); delay(120); tone(BUZZER_PIN, 1600, 300);
@@ -576,7 +578,6 @@ void loop() {
   if (isOfflineStandby) {
     handleProvisioningServer();
   } else {
-    // 🌟 FIX POINT: Continually watches for hidden setup transactions over local Wi-Fi bands
     handleOnlineInstallerServer(); 
     
     if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) {
