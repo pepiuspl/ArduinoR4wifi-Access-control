@@ -430,6 +430,8 @@ void handleProvisioningServer() {
     }
   }
   while (client.available()) { client.read(); }
+  
+  addLog("REQ=" + reqHeader);
 
   if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) {
     int sIdx = reqHeader.indexOf("s=") + 2;
