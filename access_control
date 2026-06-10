@@ -442,7 +442,6 @@ void handleProvisioningServer() {
     tone(BUZZER_PIN, 2000, 800); delay(1000);
     NVIC_SystemReset(); return;
   }
-  // Lightweight text backup fallback response for raw provisioning configurations
   client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"provisioning\":true}");
   delay(1); client.stop();
 }
@@ -461,6 +460,17 @@ void handleWebServer() {
   }
   while (client.available()) { client.read(); }
 
+  // 🌟 INTERCEPT WEB UTILITY CORS OPTIONS PREFLIGHT HANDSHAKES
+  if (reqHeader.indexOf("OPTIONS ") != -1) {
+    client.println("HTTP/1.1 204 No Content");
+    client.println("Access-Control-Allow-Origin: *");
+    client.println("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+    client.println("Access-Control-Allow-Headers: *");
+    client.println("Connection: close");
+    client.println();
+    delay(1); client.stop(); return;
+  }
+
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
     long tokenNum = random(100000, 999999);
     sprintf(temporary_password, "%ld", tokenNum);
@@ -468,12 +478,20 @@ void handleWebServer() {
     addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
     globalDisplayInfo = "Klucz tymczasowy wyslany";
     tone(BUZZER_PIN, 1400, 400);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+    client.println("Connection: close\r\n");
+    client.println("{\"status\":\"ok\"}");
     delay(1); client.stop(); return;
   }
 
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
-    client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{\"error\":\"lockout\"}");
+    client.println("HTTP/1.1 403 Forbidden");
+    client.println("Content-Type: application/json");
+    client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+    client.println("Connection: close\r\n");
+    client.println("{\"error\":\"lockout\"}");
     delay(1); client.stop(); return;
   }
 
@@ -506,10 +524,18 @@ void handleWebServer() {
   }
 
   if (reqHeader.indexOf("GET /api/data") != -1) {
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n");
     if (!isAuthenticated) {
+      // 🌟 UPDATED FROM 401 TO 200 FOR SMOOTH NATIVE FE-FETCH OBJECT PARSING
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
       client.println("{\"auth\":false}");
     } else {
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
       client.print("{\"auth\":true,\"mode\":\"");
       client.print(learningMode ? "Uczenie" : "Czuwanie");
       client.print("\",\"pending\":\""); client.print(pendingUsername);
@@ -547,7 +573,11 @@ void handleWebServer() {
   if (isAuthenticated) {
     if (reqHeader.indexOf("/api/unlock") != -1) {
       openDoor("App API");
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
+      client.println("{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
@@ -566,7 +596,11 @@ void handleWebServer() {
       } else {
         addLog("Stop Ucz: App API"); tone(BUZZER_PIN, 800, 300);
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
+      client.println("{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/delete_user") != -1) {
@@ -578,7 +612,11 @@ void handleWebServer() {
           deleteUser(targetIdx); addLog("Usunieto: " + deletedName); tone(BUZZER_PIN, 600, 400);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
+      client.println("{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/rename_user") != -1) {
@@ -597,7 +635,11 @@ void handleWebServer() {
           addLog("Zmiana nazwy slot [" + String(targetIdx) + "]"); tone(BUZZER_PIN, 1200, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
+      client.println("{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
@@ -611,7 +653,11 @@ void handleWebServer() {
           tone(BUZZER_PIN, 1100, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
+      client.println("{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/clear_logs") != -1) {
@@ -640,7 +686,11 @@ void handleWebServer() {
         }
         tone(BUZZER_PIN, 900, 150);
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
+      client.println("{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/save_settings") != -1) {
@@ -665,13 +715,21 @@ void handleWebServer() {
       
       saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled, decHook, (naIdx != -1), (nalIdx != -1));
       addLog("Zapisano ustawienia");
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}");
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: application/json");
+      client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+      client.println("Connection: close\r\n");
+      client.println("{\"status\":\"ok\"}");
       delay(1); client.stop(); return;
     }
   }
 
   // --- STANDARD FALLBACK FOR WRONG API CALLS ---
-  client.println("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"unauthorized\"}");
+  client.println("HTTP/1.1 401 Unauthorized");
+  client.println("Content-Type: application/json");
+  client.println("Access-Control-Allow-Origin: *"); // 🌟 CORS BYPASS INJECTED
+  client.println("Connection: close\r\n");
+  client.println("{\"error\":\"unauthorized\"}");
   delay(1); client.stop();
 }
 
