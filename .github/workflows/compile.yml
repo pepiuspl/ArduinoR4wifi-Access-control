@@ -3,14 +3,14 @@ name: Automated Firmware Compiler & Release
 on:
   push:
     tags:
-      - 'v*' # Wakes up automatically whenever you push a version tag (like v2.9.3)
+      - 'v*' # Triggers automatically whenever you push a version tag (e.g., v2.9.3)
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. Pull down your C++ source code files
+    # 1. Pull down your C++ source code files from the private repo
     - name: Checkout Source Code
       uses: actions/checkout@v4
 
@@ -29,15 +29,39 @@ jobs:
       run: |
         arduino-cli lib install "Adafruit GFX Library"
         arduino-cli lib install "Adafruit SH110X"
+        arduino-cli lib install "Adafruit BusIO"
         arduino-cli lib install "MFRC522"
         arduino-cli lib install "NTPClient"
         arduino-cli lib install "ArduinoOTA"
 
-    # 5. Compile the C++ code into a machine language binary file
+    # 5. Hyper-Robust Workspace Assembly & Compilation
     - name: Compile Firmware to Binary
       run: |
-        # Creates a build directory and compiles the code
-        arduino-cli compile --fqbn arduino:renesas_uno:wifi --output-dir ./build ./
+        # Search recursively to locate the true path of the .ino file
+        INO_FILE=$(find . -name "*.ino" | head -n 1)
+        if [ -z "$INO_FILE" ]; then
+          echo "❌ ERROR: No .ino file found anywhere in this repository layout!"
+          exit 1
+        fi
+        
+        SKETCH_NAME=$(basename "$INO_FILE" .ino)
+        SKETCH_DIR=$(dirname "$INO_FILE")
+        echo "🎯 Target sketch file found: $INO_FILE"
+        echo "⚙️ Creating clean workspace folder named: $SKETCH_NAME"
+        
+        # Force a clean workspace matching the filename rules
+        mkdir -p "$SKETCH_NAME"
+        
+        # Copy the main code file into it matching the folder name perfectly
+        cp "$INO_FILE" "$SKETCH_NAME/$SKETCH_NAME.ino"
+        
+        # Safely pull any supporting header files or config blocks from its source directory
+        cp "$SKETCH_DIR"/*.h "$SKETCH_NAME"/ 2>/dev/null || true
+        cp "$SKETCH_DIR"/*.cpp "$SKETCH_NAME"/ 2>/dev/null || true
+        
+        # Compile out of this perfectly normalized temporary path
+        mkdir -p build
+        arduino-cli compile --fqbn arduino:renesas_uno:wifi --output-dir ./build "./$SKETCH_NAME"
 
     # 6. Rename the output file dynamically to match your server's naming convention
     - name: Package Update Asset
@@ -50,4 +74,4 @@ jobs:
       with:
         files: lock_${{ github.ref_name }}.bin
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Built-in token, no configuration needed
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
