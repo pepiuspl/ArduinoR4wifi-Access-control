@@ -48,6 +48,25 @@ void executeCloudSynchronization();
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister);
 void sendExternalTelemetry(String logData);
 String urlDecode(String str);
+String urlEncode(String str);
+
+String urlEncode(String str) {
+  String encoded = "";
+  char c;
+  char hex[3];
+  for (unsigned int i = 0; i < str.length(); i++) {
+    c = str[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += c;
+    } else if (c == ' ') {
+      encoded += '+';
+    } else {
+      sprintf(hex, "%%%02X", c);
+      encoded += hex;
+    }
+  }
+  return encoded;
+}
 
 // --- DYNAMIC CONFIGURATION HOLDER STRINGS ---
 char ssid[32] = "";         
