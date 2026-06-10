@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.9.4 - Reactive Core Cloud Solution";
+const char* app_version = "v2.9.1 - Reactive Core Cloud Solution";
 
 // --- STRUCTURE DEFINITIONS ---
 struct User {
@@ -142,7 +142,6 @@ void addLog(String msg) {
 
 // --- STORAGE MANAGEMENT ENGINE ---
 void loadConfiguration() {
-  // 🌟 FIX POINT: Shifted verification initialization signature to isolated address slot 500
   if (EEPROM.read(500) == 0xAA) {
     EEPROM.get(260, ssid);
     EEPROM.get(292, pass);
@@ -156,7 +155,6 @@ void loadConfiguration() {
     
     ssid[31] = '\0'; pass[31] = '\0'; admin_password[15] = '\0'; proxmox_log_server[63] = '\0'; webhook_server[63] = '\0';
     
-    // Safety check: Defend stack configurations against parsing control junk values
     if (ssid[0] < 32 || ssid[0] > 126) { provisioningMode = true; return; }
     
     provisioningMode = false; hasSavedConfig = true;
@@ -183,8 +181,6 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   EEPROM.put(404, proxmox_log_port); EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
   EEPROM.put(410, webhook_server); EEPROM.write(474, notifyOnAccess ? 0x01 : 0x00);
   EEPROM.write(475, notifyOnAlarm ? 0x01 : 0x00);
-  
-  // 🌟 FIX POINT: Store production validation keys securely at verification segment 500
   EEPROM.write(500, 0xAA); 
 }
 
@@ -544,9 +540,32 @@ void setup() {
 
   SPI.begin(); RTC.begin(); display.begin(0x3C, true); display.clearDisplay();
 
+  // 🌟 FIX POINT: Restored full chimes, OLED refreshers, and alternating status LEDs inside the infinite AP block
   if (provisioningMode) {
-    displayProvisioningInstructions(""); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
-    while (true) { handleProvisioningServer(); delay(10); }
+    displayProvisioningInstructions(""); 
+    WiFi.beginAP("ZAMEK_SETUP"); 
+    server.begin();
+    
+    // Play dual tone chime signaling access point deployment completion
+    tone(BUZZER_PIN, 600, 250); delay(300); tone(BUZZER_PIN, 600, 250);
+    
+    unsigned long lastSetupTick = 0;
+    bool alternateState = false;
+    
+    while (true) { 
+      handleProvisioningServer(); 
+      
+      if (millis() - lastSetupTick > 400) {
+        lastSetupTick = millis();
+        globalAnimFrame++;
+        renderSystemUI(); // Redraws display frames continuously
+        
+        alternateState = !alternateState;
+        digitalWrite(LED_RED, alternateState ? HIGH : LOW);
+        digitalWrite(LED_GREEN, alternateState ? LOW : HIGH); // Alternates red/green diagnostic flash
+      }
+      delay(10); 
+    }
   }
 
   WiFi.begin(ssid, pass);
