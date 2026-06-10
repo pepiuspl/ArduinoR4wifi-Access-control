@@ -545,7 +545,11 @@ void handleWebServer() {
   }
 
   // 🌟 FIX POINT: Re-engineered using the community-standard variable InternalStorage instance handlers
-  if (reqHeader.indexOf("POST /api/update") != -1)
+  if (
+    reqHeader.indexOf("/api/update") != -1
+)
+{
+    addLog("OTA REQUEST DETECTED");
 {
 if (!isAuthenticated)
 {
@@ -883,6 +887,10 @@ void handleOnlineInstallerServer() {
   String reqHeader = ""; unsigned long webTimeout = millis() + 250; 
   while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read(); reqHeader += c; if (c == '\n') break; } }
   while (client.available()) { client.read(); }
+  Serial.println("REQUEST:");
+  Serial.println(reqHeader);
+
+addLog("REQ: " + reqHeader);
 
   String expectedAuthSignature = "pass=" + String(admin_password);
   if (reqHeader.indexOf("GET /installer") != -1 && reqHeader.indexOf(expectedAuthSignature) != -1) {
