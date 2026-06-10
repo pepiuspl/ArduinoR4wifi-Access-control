@@ -66,7 +66,8 @@ jobs:
     # 6. Rename the output file dynamically to match your server's naming convention
     - name: Package Update Asset
       run: |
-        mv ./build/*.bin ./lock_${{ github.ref_name }}.bin
+        BIN_FILE=$(find ./build -name "*.bin" | head -n 1)
+        cp "$BIN_FILE" "./lock_${{ github.ref_name }}.bin"
 
     # 7. Create the official GitHub release and attach the freshly compiled .bin file
     - name: Broadcast Release to Proxmox Network

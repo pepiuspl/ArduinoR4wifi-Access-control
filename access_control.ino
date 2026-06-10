@@ -7,11 +7,10 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <EEPROM.h>
-#include "RTC.h" 
-
-// 🌟 FIX POINT: Swapped built-in library for Andrassy's streaming framework
-#define NO_OTA_PORT // Disables background upload listeners to keep memory space optimized
+#include "RTC.h"
 #include <ArduinoOTA.h> 
+
+// 🌟 FIX POINT: Swapped built-in library for Andrassy's streaming framework 
 
 // --- VERSION CONTROL SNAPSHOT ---
 const char* app_version = "v2.9.3 - Cloud Solution";
