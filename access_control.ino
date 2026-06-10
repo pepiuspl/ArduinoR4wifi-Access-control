@@ -116,6 +116,7 @@ unsigned long lastSuccessfulPollTime = 0;
 int globalAnimFrame = 0;
 unsigned long lastFrameTick = 0;
 
+// 🛡️ NETWORK SAFETY SHIELD: Disables outbound tracking sockets while streaming files or handling requests
 bool blockTelemetry = false;
 
 String urlDecode(String str) {
@@ -308,13 +309,16 @@ void renderSystemUI() {
   display.drawFastHLine(0, 53, 128, SH110X_WHITE);
   display.setTextSize(1);
   display.setCursor(4, 56);
+  
+  // 🌟 VERIFICATION UNIQUE RULE: Displays the app version instead of the local router IP address
   if (WiFi.status() == WL_CONNECTED) {
-    display.print(app_version); // Hardcoded to display version instead of local network IP
+    display.print(app_version); 
   } else if (isOfflineStandby) {
     display.print("AP: SETUP");
   } else {
     display.print("DISCONNECTED");
   }
+  
   String liveTime = getFormattedSystemTime();
   display.setCursor(94, 56);
   display.print(liveTime);
@@ -374,7 +378,7 @@ void openDoor(String source) {
   digitalWrite(RELAY_PIN, LOW);
   digitalWrite(LED_GREEN, HIGH);
   digitalWrite(LED_RED, LOW); 
-  tone(BUZZER_PIN, 1000, 200); 
+  tone(BUZZER_PIN, 1000, 200); // One initial sharp confirmation chirp
   addLog("Otwarto: " + source);
 }
 
@@ -536,6 +540,7 @@ HEADER_COMPLETE:
     }
     addLog("OTA START. SIZE: " + String(contentLength));
     
+    // 🛡️ RECOVERY DEFENSIVE SHIELD: Resets flash arrays to prevent 500 fault rejections
     InternalStorage.close(); 
     if (!InternalStorage.open(contentLength)) {
         client.println("HTTP/1.1 500 Internal Error\r\nConnection: close\r\n");
@@ -1079,7 +1084,7 @@ void loop() {
   if (digitalRead(BUTTON_PIN) == LOW) { 
     unsigned long pressTime = millis(); 
     bool longPressed = false; 
-    while (digitalRead(BUTTON_PIN) == LOW) { //
+    while (digitalRead(BUTTON_PIN) == LOW) { 
       if (millis() - pressTime > 3000) { 
         longPressed = true; 
         learningMode = !learningMode; 
