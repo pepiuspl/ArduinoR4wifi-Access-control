@@ -790,7 +790,10 @@ void executeCloudSynchronization() {
   }
   lastSuccessfulPollTime = millis(); 
 
-  httpCheck.println("GET /api/hardware/poll HTTP/1.1");
+  // 🌟 INJECTION POINT: Appends the lock's true version to the URL query string
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version));
+
+  httpCheck.println("GET " + pollPath + " HTTP/1.1");
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server);
   httpCheck.println("Connection: close\r\n");
 
