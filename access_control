@@ -23,12 +23,12 @@ struct LogEntry {
   String msg; 
 };
 
-// --- 🛠️ COMPILER FORWARD DECLARATIONS (FIXES SCOPE ERRORS) ---
+// --- COMPILER FORWARD DECLARATIONS ---
 String getFormattedSystemTime();
 void addLog(String msg);
 void openLocalDoor(String source);
 void forceHardwareRFIDReset();
-void displayProvisioningInstructions(String errorContext = "");
+void displayProvisioningInstructions(String errorContext = ""); // Default argument stays here
 void saveCardToLocalMemory(byte* uid, String label);
 void dispatchWebhookAlert(String eventType, String detail);
 void renderSystemUI();
@@ -291,7 +291,8 @@ void renderSystemUI() {
   display.display();
 }
 
-void displayProvisioningInstructions(String errorContext = "") {
+// 🌟 FIX POINT: Removed the default assignment `= ""` from the body implementation
+void displayProvisioningInstructions(String errorContext) {
   if (errorContext != "") {
     globalDisplayInfo = errorContext + "\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
   } else {
@@ -431,7 +432,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   String payloadResponse = ""; bool bodyStarted = false;
   while (httpPost.connected() && millis() < deadline) {
     if (httpPost.available()) {
-      // 🌟 FIXED TYPO: Changed 'httpCheck' to 'httpPost'
+      // 🌟 FIX POINT: Corrected variable identifier mismatch pattern from legacy buffers
       String line = httpPost.readStringUntil('\n');
       if (line == "\r") { bodyStarted = true; continue; }
       if (bodyStarted) { payloadResponse += line; break; }
