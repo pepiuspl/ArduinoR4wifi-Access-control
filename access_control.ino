@@ -421,7 +421,7 @@ void handleProvisioningServer() {
   if (!client) return;
 
   String reqHeader = "";
-  unsigned long webTimeout = millis() + 200; 
+  unsigned long webTimeout = millis() + 2000; 
   while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
       char c = client.read();
@@ -585,6 +585,10 @@ while (millis() < headerDeadline)
 }
 
 HEADER_COMPLETE:
+
+addLog("HEADER START");
+addLog(fullHeader);
+addLog("HEADER END");
 
 int contentLength = 0;
 
