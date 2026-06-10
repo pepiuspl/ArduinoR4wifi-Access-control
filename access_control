@@ -8,7 +8,10 @@
 #include <NTPClient.h>
 #include <EEPROM.h>
 #include "RTC.h" 
-#include <OTAUpdate.h> // 🌟 Built-in Renesas hardware flash library integration hook
+
+// 🌟 FIX POINT: Swapped built-in library for Andrassy's streaming framework
+#define NO_OTA_PORT // Disables background upload listeners to keep memory space optimized
+#include <ArduinoOTA.h> 
 
 // --- VERSION CONTROL SNAPSHOT ---
 const char* app_version = "v2.9.2 - Reactive Core Cloud Solution";
@@ -523,7 +526,7 @@ void handleWebServer() {
     }
   }
 
-  // 🌟 INTERCEPT POINT: Catches the incoming raw machine code streamed from the phone app bridge
+  // 🌟 FIX POINT: Re-engineered using the community-standard variable InternalStorage instance handlers
   if (reqHeader.indexOf("POST /api/update") != -1) {
     if (!isAuthenticated) {
       client.println("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
@@ -533,29 +536,37 @@ void handleWebServer() {
     updateDisplay("OTA FLASHING", "Writing Flash Bank...");
     tone(BUZZER_PIN, 1500, 100);
 
-    // Initialize Renesas Native Dual-Bank IAP bootloader engine
-    if (OTAUpdate.begin() != 0) {
-      client.println("HTTP/1.1 500 Internal Error\r\n\r\n");
+    // Parse the data packet size passed from the phone app bridge headers
+    int contentLength = 0;
+    int clPos = reqHeader.indexOf("Content-Length: ");
+    if (clPos != -1) {
+      int clEnd = reqHeader.indexOf("\r\n", clPos);
+      contentLength = reqHeader.substring(clPos + 16, clEnd).toInt();
+    }
+
+    // Open flash layer blocks via the external abstraction driver variables
+    if (!InternalStorage.open(contentLength)) {
+      client.println("HTTP/1.1 500 Storage Error\r\n\r\n");
       client.stop(); return;
     }
 
-    // Stream the raw incoming bytes directly out of the Wi-Fi network hardware buffer cached array
-    while (client.connected()) {
+    // Securely pull down byte blocks directly from the active socket cache layout
+    while (client.connected() || client.available()) {
       while (client.available()) {
         char bufferByte = client.read();
-        OTAUpdate.write(bufferByte);
+        InternalStorage.write(bufferByte);
       }
     }
     
-    // Close, run verification checksum matches, swap active boot assignments
-    OTAUpdate.end();
+    InternalStorage.close();
     
     client.println("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
     delay(100); client.stop();
 
     tone(BUZZER_PIN, 1800, 300); delay(100); tone(BUZZER_PIN, 2200, 500);
     delay(1000);
-    NVIC_SystemReset(); // Reboot into the new firmware flash partition channel
+    
+    InternalStorage.apply(); // Rewrites the operational vector layout map and resets the MCU automatically
     return;
   }
 
@@ -574,7 +585,6 @@ void handleWebServer() {
       client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
       client.print(",\"total\":"); client.print(totalCards);
 
-      // Append active current running version tag so the phone can dynamically pull it
       client.print(",\"version\":\""); client.print(app_version); client.print("\"");
 
       client.print(",\"users\":[");
