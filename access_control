@@ -8,6 +8,7 @@
 #include <NTPClient.h>
 #include <EEPROM.h>
 #include "RTC.h" 
+#include <OTAUpdate.h> // 🌟 Built-in Renesas hardware flash library integration hook
 
 // --- VERSION CONTROL SNAPSHOT ---
 const char* app_version = "v2.9.2 - Reactive Core Cloud Solution";
@@ -49,7 +50,7 @@ String urlDecode(String str);
 char ssid[32] = "";         
 char pass[32] = "";     
 char admin_password[16] = "";       
-char proxmox_log_server[64] = ""; // Expanded to 64 bytes for domain routing profiles
+char proxmox_log_server[64] = ""; 
 int proxmox_log_port = 3000;
 bool telemetryEnabled = false;
 
@@ -448,7 +449,7 @@ void handleProvisioningServer() {
   client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
-  client.println("<h2 style='text-align:center;'>⚙     Installer Setup Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
+  client.println("<h2 style='text-align:center;'>⚙       Installer Setup Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
   client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
   client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
   client.println("<input type='password' name='a' value='" + String(admin_password) + "' placeholder='Admin Master Password' required>");
@@ -458,7 +459,6 @@ void handleProvisioningServer() {
   delay(50); client.stop();
 }
 
-// 🌟 DYNAMIC NATIVE REACT API ROUTER FOR SCENARIO 1 & 2 BRIDGING
 void handleWebServer() {
   WiFiClient client = server.available();
   if (!client) return;
@@ -523,7 +523,42 @@ void handleWebServer() {
     }
   }
 
-  // 🌟 Clean structured JSON data pipeline output fed directly into React App States
+  // 🌟 INTERCEPT POINT: Catches the incoming raw machine code streamed from the phone app bridge
+  if (reqHeader.indexOf("POST /api/update") != -1) {
+    if (!isAuthenticated) {
+      client.println("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      client.stop(); return;
+    }
+
+    updateDisplay("OTA FLASHING", "Writing Flash Bank...");
+    tone(BUZZER_PIN, 1500, 100);
+
+    // Initialize Renesas Native Dual-Bank IAP bootloader engine
+    if (OTAUpdate.begin() != 0) {
+      client.println("HTTP/1.1 500 Internal Error\r\n\r\n");
+      client.stop(); return;
+    }
+
+    // Stream the raw incoming bytes directly out of the Wi-Fi network hardware buffer cached array
+    while (client.connected()) {
+      while (client.available()) {
+        char bufferByte = client.read();
+        OTAUpdate.write(bufferByte);
+      }
+    }
+    
+    // Close, run verification checksum matches, swap active boot assignments
+    OTAUpdate.end();
+    
+    client.println("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+    delay(100); client.stop();
+
+    tone(BUZZER_PIN, 1800, 300); delay(100); tone(BUZZER_PIN, 2200, 500);
+    delay(1000);
+    NVIC_SystemReset(); // Reboot into the new firmware flash partition channel
+    return;
+  }
+
   if (reqHeader.indexOf("GET /api/data") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
@@ -538,6 +573,9 @@ void handleWebServer() {
       client.print("\",\"pending\":\""); client.print(pendingUsername);
       client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
       client.print(",\"total\":"); client.print(totalCards);
+
+      // Append active current running version tag so the phone can dynamically pull it
+      client.print(",\"version\":\""); client.print(app_version); client.print("\"");
 
       client.print(",\"users\":[");
       for (int i = 0; i < totalCards; i++) {
@@ -679,20 +717,34 @@ void handleWebServer() {
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
       delay(1); client.stop(); return;
     }
+    else if (reqHeader.indexOf("/api/save_settings") != -1) {
+      int sIdx = reqHeader.indexOf("s=") + 2;
+      int pIdx = reqHeader.indexOf("&p=") + 3;
+      int aIdx = reqHeader.indexOf("&a=") + 3;
+
+      String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
+      String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
+
+      int nextAmp = reqHeader.indexOf("&", aIdx);
+      int spaceIdx = reqHeader.indexOf(" ", aIdx);
+      int endPortPos = (nextAmp != -1 && nextAmp < spaceIdx) ? nextAmp : spaceIdx;
+      String nAdmin = reqHeader.substring(aIdx, endPortPos);
+
+      String decSSID = urlDecode(nSSID); String decPass = urlDecode(nPass); String decAdmin = urlDecode(nAdmin);
+      saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled);
+      addLog("Zapisano ustawienia");
+
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    }
   }
 }
 
-// 🌟 OVER-THE-AIR REMOTE NETWORK RELAY MODIFICATIONS FOR PORT 80 RE-ROUTING
 void handleOnlineInstallerServer() {
   WiFiClient client = server.available(); 
   if (!client) return;
-  String reqHeader = ""; 
-  unsigned long webTimeout = millis() + 250; 
-  while (client.connected() && millis() < webTimeout) { 
-    if (client.available()) { 
-      char c = client.read(); reqHeader += c; if (c == '\n') break; 
-    } 
-  }
+  String reqHeader = ""; unsigned long webTimeout = millis() + 250; 
+  while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read(); reqHeader += c; if (c == '\n') break; } }
   while (client.available()) { client.read(); }
 
   String expectedAuthSignature = "pass=" + String(admin_password);
@@ -711,7 +763,6 @@ void handleOnlineInstallerServer() {
   }
 }
 
-// 🌟 CLOUD INTERFACE: Dynamic streaming outbound connection pools
 void executeCloudSynchronization() {
   if (strlen(proxmox_log_server) < 4) return;
   WiFiClient httpCheck; 
@@ -744,15 +795,6 @@ void executeCloudSynchronization() {
 
   if (payloadResponse.indexOf("\"unlock\":true") != -1) {
     openDoor("Zdalne Wywolanie");
-  }
-  
-  if (payloadResponse.indexOf("\"ota_flash_trigger\":true") != -1) {
-    updateDisplay("OTA FLASHING", "Downloading binary...");
-    tone(BUZZER_PIN, 2000, 200); 
-    delay(200); 
-    tone(BUZZER_PIN, 2500, 400);
-    delay(3000); 
-    NVIC_SystemReset(); 
   }
 
   if (payloadResponse.indexOf("\"learn\":true") != -1) {
@@ -942,7 +984,7 @@ void loop() {
       }
     }
   } else {
-    handleWebServer(); // Tracks incoming local bridge queries directly from React
+    handleWebServer(); // Intercepts local upload data streams sent from the phone app bridge
     handleOnlineInstallerServer(); 
     if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) { 
       lastPollTime = millis(); 
