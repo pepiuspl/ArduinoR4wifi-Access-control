@@ -9,7 +9,6 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     
-    # 🌟 CRITICAL FIX: Unlocks write permissions so the runner can publish the .bin file
     permissions:
       contents: write
 
@@ -31,6 +30,10 @@ jobs:
     # 4. Pull down the exact community libraries your code depends on
     - name: Install Project Dependencies
       run: |
+        # 🌟 CRITICAL FIX: Initializes the global registry cache so the runner knows where to find your files
+        arduino-cli lib update-index
+        
+        # Install the required community modules
         arduino-cli lib install "Adafruit GFX Library"
         arduino-cli lib install "Adafruit SH110X"
         arduino-cli lib install "Adafruit BusIO"
