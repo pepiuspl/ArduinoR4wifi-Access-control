@@ -10,10 +10,8 @@
 #include "RTC.h"
 #include <ArduinoOTA.h> 
 
-// 🌟 FIX POINT: Swapped built-in library for Andrassy's streaming framework 
-
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.9.3 - Cloud Solution";
+const char* app_version = "v2.9.4 - Cloud Solution";
 
 // --- USER DATABASE STRUCTURES ---
 struct User {
@@ -360,9 +358,15 @@ void updateDisplay(String status, String info) {
 
 void displayProvisioningInstructions(String errorContext) {
   if (errorContext != "") {
-    globalDisplayInfo = errorContext + "\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
+    globalDisplayInfo = errorContext + "
+Connect to:
+SSID: ZAMEK_SETUP
+IP: 192.168.4.1";
   } else {
-    globalDisplayInfo = "INITIAL CONFIG!\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
+    globalDisplayInfo = "INITIAL CONFIG!
+Connect to:
+SSID: ZAMEK_SETUP
+IP: 192.168.4.1";
   }
   renderSystemUI();
 }
@@ -426,7 +430,8 @@ void handleProvisioningServer() {
     if (client.available()) {
       char c = client.read();
       reqHeader += c;
-      if (c == '\n') break; 
+      if (c == '
+') break; 
     }
   }
   while (client.available()) { client.read(); }
@@ -460,8 +465,11 @@ void handleProvisioningServer() {
 
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
 
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>");
-    delay(500); client.stop();
+    client.println("HTTP/1.1 200 OK
+Content-Type: text/html
+
+<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>");
+    delay(50); client.stop();
 
     tone(BUZZER_PIN, 2000, 800);
     delay(1000);
@@ -469,7 +477,10 @@ void handleProvisioningServer() {
     return;
   }
 
-  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
+  client.println("HTTP/1.1 200 OK
+Content-Type: text/html
+Connection: close
+");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
   client.println("<h2 style='text-align:center;'>⚙       Installer Setup Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
@@ -495,7 +506,8 @@ void handleWebServer() {
         char c = client.read();
         reqHeader += c;
 
-        if (c == '\n')
+        if (c == '
+')
             break;
     }
   }
@@ -510,12 +522,20 @@ void handleWebServer() {
     globalDisplayInfo = "Klucz tymczasowy wyslany";
     tone(BUZZER_PIN, 1400, 400);
 
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
+    client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+Connection: close
+
+OK");
     delay(1); client.stop(); return;
   }
 
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
-    client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
+    client.println("HTTP/1.1 403 Forbidden
+Content-Type: text/plain
+Connection: close
+
+[ALERT] LOCKOUT ACTIVE.");
     delay(1); client.stop(); return;
   }
 
@@ -550,7 +570,6 @@ void handleWebServer() {
     }
   }
 
-  // 🌟 FIX POINT: Re-engineered using the community-standard variable InternalStorage instance handlers
   if (reqHeader.indexOf("/api/update") != -1)
   {
   addLog("OTA REQUEST DETECTED");
@@ -577,7 +596,9 @@ while (millis() < headerDeadline)
         char c = client.read();
         fullHeader += c;
 
-        if (fullHeader.endsWith("\r\n\r\n"))
+        if (fullHeader.endsWith("
+
+"))
         {
             goto HEADER_COMPLETE;
         }
@@ -596,7 +617,8 @@ int clPos = fullHeader.indexOf("Content-Length:");
 
 if (clPos != -1)
 {
-    int clEnd = fullHeader.indexOf("\r\n", clPos);
+    int clEnd = fullHeader.indexOf("
+", clPos);
 
     String lengthStr =
         fullHeader.substring(clPos + 15, clEnd);
@@ -686,7 +708,7 @@ client.println("HTTP/1.1 200 OK");
 client.println("Content-Type: application/json");
 client.println("Connection: close");
 client.println();
-client.println("{\"success\":true}");
+client.println("{"success":true}");
 
 delay(100);
 
@@ -715,38 +737,38 @@ return;
     client.println();
 
     if (!isAuthenticated) {
-      client.println("{\"auth\":false}");
+      client.println("{"auth":false}");
     } else {
-      client.print("{\"auth\":true,\"mode\":\"");
+      client.print("{"auth":true,"mode":"");
       client.print(learningMode ? "Uczenie" : "Czuwanie");
-      client.print("\",\"pending\":\""); client.print(pendingUsername);
-      client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
-      client.print(",\"total\":"); client.print(totalCards);
+      client.print("","pending":""); client.print(pendingUsername);
+      client.print("","lock":"); client.print(doorOpen ? "true" : "false");
+      client.print(","total":"); client.print(totalCards);
 
-      client.print(",\"version\":\""); client.print(app_version); client.print("\"");
+      client.print(","version":""); client.print(app_version); client.print(""");
 
-      client.print(",\"users\":[");
+      client.print(","users":[");
       for (int i = 0; i < totalCards; i++) {
-        client.print("{\"idx\":"); client.print(i);
-        client.print(",\"name\":\""); client.print(users[i].name);
-        client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false"); 
-        client.print(",\"uid\":\"");
+        client.print("{"idx":"); client.print(i);
+        client.print(","name":""); client.print(users[i].name);
+        client.print("","active":"); client.print(isCardActive[i] ? "true" : "false"); 
+        client.print(","uid":"");
         for(byte j=0; j<4; j++) {
           if(users[i].uid[j]<0x10) client.print("0");
           client.print(users[i].uid[j], HEX);
           if(j<3) client.print(" ");
         }
-        client.print("\"}");
+        client.print(""}");
         if (i < totalCards - 1) client.print(",");
       }
-      client.print("],\"logs\":[");
+      client.print("],"logs":[");
       for (int i = logCount - 1; i >= 0; i--) {
-        client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\"");
+        client.print(""[" + lastActions[i].time + "] " + lastActions[i].msg + """);
         if (i > 0) client.print(",");
       }
-      client.print("],\"ssid\":\""); client.print(ssid);
-      client.print("\",\"admin_pass\":\""); client.print(admin_password);
-      client.print("\"}");
+      client.print("],"ssid":""); client.print(ssid);
+      client.print("","admin_pass":""); client.print(admin_password);
+      client.print(""}");
     }
     delay(1); client.stop(); return;
   }
@@ -754,7 +776,10 @@ return;
   if (isAuthenticated) {
     if (reqHeader.indexOf("/api/unlock") != -1) {
       openDoor("Panel API");
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+
+OK");
       delay(1); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
@@ -781,7 +806,10 @@ return;
         addLog("Stop Ucz: Panel API");
         tone(BUZZER_PIN, 800, 300);
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+
+OK");
       delay(1); client.stop(); return;
     } 
     else if (reqHeader.indexOf("/api/delete_user") != -1) {
@@ -795,7 +823,10 @@ return;
           tone(BUZZER_PIN, 600, 400);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+
+OK");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/rename_user") != -1) {
@@ -813,7 +844,10 @@ return;
           tone(BUZZER_PIN, 1200, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+
+OK");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
@@ -827,7 +861,10 @@ return;
           tone(BUZZER_PIN, 1100, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+
+OK");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/clear_logs") != -1) {
@@ -862,7 +899,10 @@ return;
         }
         tone(BUZZER_PIN, 900, 150);
       }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+
+OK");
       delay(1); client.stop(); return;
     }
     else if (reqHeader.indexOf("/api/save_settings") != -1) {
@@ -882,7 +922,10 @@ return;
       saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled);
       addLog("Zapisano ustawienia");
 
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      client.println("HTTP/1.1 200 OK
+Content-Type: text/plain
+
+OK");
       delay(1); client.stop(); return;
     }
   }
@@ -892,7 +935,8 @@ void handleOnlineInstallerServer() {
   WiFiClient client = server.available(); 
   if (!client) return;
   String reqHeader = ""; unsigned long webTimeout = millis() + 250; 
-  while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read(); reqHeader += c; if (c == '\n') break; } }
+  while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read(); reqHeader += c; if (c == '
+') break; } }
   while (client.available()) { client.read(); }
   Serial.println("REQUEST:");
   Serial.println(reqHeader);
@@ -901,7 +945,10 @@ addLog("REQ: " + reqHeader);
 
   String expectedAuthSignature = "pass=" + String(admin_password);
   if (reqHeader.indexOf("GET /installer") != -1 && reqHeader.indexOf(expectedAuthSignature) != -1) {
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
+    client.println("HTTP/1.1 200 OK
+Content-Type: text/html
+Connection: close
+");
     client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
     client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
     client.println("<h2 style='text-align:center;'>⚙       Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
@@ -932,12 +979,12 @@ void executeCloudSynchronization() {
   }
   lastSuccessfulPollTime = millis(); 
 
-  // 🌟 INJECTION POINT: Appends the lock's true version to the URL query string
   String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version));
 
   httpCheck.println("GET " + pollPath + " HTTP/1.1");
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server);
-  httpCheck.println("Connection: close\r\n");
+  httpCheck.println("Connection: close
+");
 
   unsigned long deadline = millis() + 300; 
   String payloadResponse = "";
@@ -948,14 +995,14 @@ void executeCloudSynchronization() {
   }
   httpCheck.stop();
 
-  if (payloadResponse.indexOf("\"unlock\":true") != -1) {
+  if (payloadResponse.indexOf(""unlock":true") != -1) {
     openDoor("Zdalne Wywolanie");
   }
 
-  if (payloadResponse.indexOf("\"learn\":true") != -1) {
+  if (payloadResponse.indexOf(""learn":true") != -1) {
     learningMode = true;
-    int userStart = payloadResponse.indexOf("\"username\":\"") + 12; 
-    int userEnd = payloadResponse.indexOf("\"", userStart);
+    int userStart = payloadResponse.indexOf(""username":"") + 12; 
+    int userEnd = payloadResponse.indexOf(""", userStart);
     if (userStart > 11 && userEnd > userStart) {
       pendingUsername = payloadResponse.substring(userStart, userEnd);
     }
@@ -971,13 +1018,14 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   if (!httpPost.connect(proxmox_log_server, proxmox_log_port)) return; 
 
   String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan";
-  String postData = runRegister ? "{\"uid\":\"" + uidStr + "\",\"name\":\"" + pendingUsername + "\"}" : "{\"uid\":\"" + uidStr + "\"}";
+  String postData = runRegister ? "{"uid":"" + uidStr + "","name":"" + pendingUsername + ""}" : "{"uid":"" + uidStr + ""}";
 
   httpPost.println("POST " + endpoint + " HTTP/1.1"); 
   httpPost.print("Host: "); httpPost.println(proxmox_log_server);
   httpPost.println("Content-Type: application/json"); 
   httpPost.print("Content-Length: "); httpPost.println(postData.length());
-  httpPost.println("Connection: close\r\n"); 
+  httpPost.println("Connection: close
+"); 
   httpPost.print(postData);
 
   unsigned long deadline = millis() + 400; 
@@ -1258,6 +1306,17 @@ void loop() {
       failedLoginAttempts = 0; 
       lockoutEndTime = 0; 
       lastRfidWatchdogTime = millis(); 
+
+      // 🌟 ASYNCHRONOUS PACKET LOGGING DELIVERED TO PROXMOX CORE BACKEND 🌟
+      WiFiClient buttonLogClient;
+      buttonLogClient.setTimeout(150);
+      if (buttonLogClient.connect(proxmox_log_server, proxmox_log_port)) {
+        buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1");
+        buttonLogClient.print("Host: "); buttonLogClient.println(proxmox_log_server);
+        buttonLogClient.println("Connection: close\r\n");
+        buttonLogClient.stop();
+      }
+
       openDoor("PRZYCISK"); 
     }
   }
