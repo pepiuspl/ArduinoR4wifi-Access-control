@@ -922,7 +922,7 @@ void setup() { //
     lastSuccessfulPollTime = millis(); // 
     server.begin(); // 
     updateDisplay("Gotowy", WiFi.localIP().toString()); // 
-    addLog("System online"); // 
+    addLog("REVOLUTION v2.9.4 Pushed on 2026-06-10 at 23:40"); // 
     tone(BUZZER_PIN, 800, 100);  delay(120); // 
     tone(BUZZER_PIN, 1000, 100); delay(120); // 
     tone(BUZZER_PIN, 1300, 120); // 
