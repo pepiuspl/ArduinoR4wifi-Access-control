@@ -10,7 +10,7 @@
 #include "RTC.h" 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.9.1 - Reactive Core Cloud Solution";
+const char* app_version = "v2.9.2 - Reactive Core Cloud Solution";
 
 // --- USER DATABASE STRUCTURES ---
 struct User {
@@ -38,7 +38,8 @@ void deleteUser(int index);
 void updateDisplay(String status, String info = "");
 void renderSystemUI();
 void handleProvisioningServer();
-void handleOnlineInstallerServer(); // Preserved for hidden over-the-network deployment routing
+void handleWebServer();
+void handleOnlineInstallerServer();
 void executeCloudSynchronization();
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister);
 void sendExternalTelemetry(String logData);
@@ -48,8 +49,8 @@ String urlDecode(String str);
 char ssid[32] = "";         
 char pass[32] = "";     
 char admin_password[16] = "";       
-char proxmox_log_server[64] = ""; 
-int proxmox_log_port = 3000;      
+char proxmox_log_server[64] = ""; // Expanded to 64 bytes for domain routing profiles
+int proxmox_log_port = 3000;
 bool telemetryEnabled = false;
 
 // --- RECOVERY LIFELINE STORAGE ---
@@ -145,12 +146,12 @@ String urlDecode(String str) {
 
 // --- STORAGE MANAGEMENT ENGINE ---
 void loadConfiguration() {
-  if (EEPROM.read(500) == 0xAA) {
+  if (EEPROM.read(250) == 0x55) {
     EEPROM.get(260, ssid);
     EEPROM.get(292, pass);
     EEPROM.get(324, admin_password);
     EEPROM.get(340, proxmox_log_server);
-    EEPROM.get(404, proxmox_log_port); 
+    EEPROM.get(404, proxmox_log_port);
     telemetryEnabled = (EEPROM.read(251) == 0x01);
     provisioningMode = false; 
     hasSavedConfig = true;
@@ -177,20 +178,24 @@ void saveConfiguration(String newSSID, String newPass, String newAdmin, String n
   EEPROM.put(340, proxmox_log_server);
   EEPROM.put(404, proxmox_log_port);
   EEPROM.write(251, telemetryEnabled ? 0x01 : 0x00);
-  EEPROM.write(500, 0xAA); 
+  EEPROM.write(250, 0x55); 
 
   hasTemporaryPassword = false;
   memset(temporary_password, 0, sizeof(temporary_password));
 }
 
 void factoryResetSettings() {
-  for (int i = 0; i < 512; i++) EEPROM.write(i, 0xFF);
+  for (int i = 0; i < 512; i++) {
+    EEPROM.write(i, 0xFF);
+  }
   EEPROM.put(0, 0); 
 }
 
 void loadCards() {
   EEPROM.get(0, totalCards);
-  if (totalCards < 0 || totalCards > 10) totalCards = 0;
+  if (totalCards < 0 || totalCards > 10) {
+    totalCards = 0;
+  }
   for (int i = 0; i < totalCards; i++) {
     EEPROM.get(10 + (i * sizeof(User)), users[i]);
     isCardActive[i] = (EEPROM.read(220 + i) != 0x00); 
@@ -335,7 +340,7 @@ void displayProvisioningInstructions(String errorContext) {
   if (errorContext != "") {
     globalDisplayInfo = errorContext + "\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
   } else {
-    globalDisplayInfo = "INSTALLER PANEL\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
+    globalDisplayInfo = "INITIAL CONFIG!\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
   }
   renderSystemUI();
 }
@@ -369,7 +374,9 @@ void addLog(String msg) {
   if (logCount < MAX_LOGS) {
     lastActions[logCount++] = {currentTime, msg};
   } else {
-    for (int i = 0; i < MAX_LOGS - 1; i++) lastActions[i] = lastActions[i+1];
+    for (int i = 0; i < MAX_LOGS - 1; i++) {
+      lastActions[i] = lastActions[i+1];
+    }
     lastActions[MAX_LOGS - 1] = {currentTime, msg};
   }
   sendExternalTelemetry(msg);
@@ -387,13 +394,12 @@ void openDoor(String source) {
   addLog("Otwarto: " + source);
 }
 
-// --- OUT-OF-THE-BOX & RESCUE PROVISIONING ROUTER SERVICE ---
 void handleProvisioningServer() {
   WiFiClient client = server.available();
   if (!client) return;
 
   String reqHeader = "";
-  unsigned long webTimeout = millis() + 250; 
+  unsigned long webTimeout = millis() + 200; 
   while (client.connected() && millis() < webTimeout) { 
     if (client.available()) {
       char c = client.read();
@@ -430,7 +436,7 @@ void handleProvisioningServer() {
 
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
 
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Config Saved!</h2></body></html>");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>");
     delay(500); client.stop();
 
     tone(BUZZER_PIN, 2000, 800);
@@ -442,41 +448,259 @@ void handleProvisioningServer() {
   client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
-  client.println("<h2 style='text-align:center;'>⚙️ Hybrid Installer Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
+  client.println("<h2 style='text-align:center;'>⚙     Installer Setup Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
   client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
   client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
   client.println("<input type='password' name='a' value='" + String(admin_password) + "' placeholder='Admin Master Password' required>");
   client.println("<input type='text' name='ti' value='" + String(proxmox_log_server) + "' placeholder='Backend Address / Domain Link' required>");
   client.println("<input type='text' name='tp' value='" + String(proxmox_log_port) + "' placeholder='Port Target' required>");
-  client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Commit & Run Hybrid Layer'></form></div></body></html>");
+  client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Save Infrastructure Settings'></form></div></body></html>");
   delay(50); client.stop();
 }
 
-// 🌟 BACKDOOR GATEWAY PANEL (Maintained on active network for silent re-routing tasks)
-void handleOnlineInstallerServer() {
-  WiFiClient client = server.available(); if (!client) return;
-  String reqHeader = ""; unsigned long webTimeout = millis() + 250; 
-  while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read(); reqHeader += c; if (c == '\n') break; } }
+// 🌟 DYNAMIC NATIVE REACT API ROUTER FOR SCENARIO 1 & 2 BRIDGING
+void handleWebServer() {
+  WiFiClient client = server.available();
+  if (!client) return;
+
+  String reqHeader = "";
+  unsigned long webTimeout = millis() + 200; 
+  while (client.connected() && millis() < webTimeout) { 
+    if (client.available()) {
+      char c = client.read();
+      reqHeader += c;
+      if (c == '\n') break; 
+    }
+  }
   while (client.available()) { client.read(); }
 
-  if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) {
-    int sIdx = reqHeader.indexOf("s=") + 2; int pIdx = reqHeader.indexOf("&p=") + 3;
-    int aIdx = reqHeader.indexOf("&a=") + 3; int tiIdx = reqHeader.indexOf("&ti=") + 4; int tpIdx = reqHeader.indexOf("&tp=") + 4;
-    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p=")); String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&a="));
-    String rawAdmin = reqHeader.substring(aIdx, reqHeader.indexOf("&ti=")); String rawTeleIP = reqHeader.substring(tiIdx, reqHeader.indexOf("&tp="));
-    int spacePos = reqHeader.indexOf(" ", tpIdx); String nTelePort = reqHeader.substring(tpIdx, spacePos);
+  if (reqHeader.indexOf("GET /api/forgot_password") != -1) {
+    long tokenNum = random(100000, 999999);
+    sprintf(temporary_password, "%ld", tokenNum);
+    hasTemporaryPassword = true;
 
-    saveConfiguration(urlDecode(rawSSID), urlDecode(rawPass), urlDecode(rawAdmin), urlDecode(rawTeleIP), nTelePort.toInt(), true);
-    client.println("HTTP/1.1 200 OK\r\n\r\n<html><body><h2>💾 Config Updated Natively!</h2></body></html>");
-    delay(100); client.stop(); tone(BUZZER_PIN, 2000, 800); delay(1000); NVIC_SystemReset(); return;
+    addLog("RESET: Wygenerowano haslo tymczasowe [" + String(temporary_password) + "]");
+    globalDisplayInfo = "Klucz tymczasowy wyslany";
+    tone(BUZZER_PIN, 1400, 400);
+
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
+    delay(1); client.stop(); return;
   }
+
+  if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
+    client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
+    delay(1); client.stop(); return;
+  }
+
+  String attemptedPass = "";
+  int passPos = reqHeader.indexOf("pass=");
+  if (passPos != -1) {
+    int spacePos = reqHeader.indexOf(" ", passPos);
+    int ampPos = reqHeader.indexOf("&", passPos);
+    int endPos = spacePos;
+    if (ampPos != -1 && ampPos < spacePos) {
+      endPos = ampPos;
+    }
+    attemptedPass = reqHeader.substring(passPos + 5, endPos);
+  }
+
+  String decodedAttempt = urlDecode(attemptedPass);
+
+  bool authPermanent = (passPos != -1 && decodedAttempt == String(admin_password));
+  bool authTemporary = (passPos != -1 && hasTemporaryPassword && decodedAttempt == String(temporary_password));
+  bool isAuthenticated = (authPermanent || authTemporary);
+
+  bool isApiRequest = (reqHeader.indexOf("/api/") != -1);
+  if (passPos != -1 && isApiRequest) {
+    if (!isAuthenticated && decodedAttempt.length() > 0) {
+      failedLoginAttempts++;
+      if (failedLoginAttempts >= 5) {
+        lockoutEndTime = millis() + 300000; 
+        addLog("ALARM: Atak BruteForce!");
+      }
+    } else if (isAuthenticated) {
+      failedLoginAttempts = 0; 
+    }
+  }
+
+  // 🌟 Clean structured JSON data pipeline output fed directly into React App States
+  if (reqHeader.indexOf("GET /api/data") != -1) {
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
+
+    if (!isAuthenticated) {
+      client.println("{\"auth\":false}");
+    } else {
+      client.print("{\"auth\":true,\"mode\":\"");
+      client.print(learningMode ? "Uczenie" : "Czuwanie");
+      client.print("\",\"pending\":\""); client.print(pendingUsername);
+      client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
+      client.print(",\"total\":"); client.print(totalCards);
+
+      client.print(",\"users\":[");
+      for (int i = 0; i < totalCards; i++) {
+        client.print("{\"idx\":"); client.print(i);
+        client.print(",\"name\":\""); client.print(users[i].name);
+        client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false"); 
+        client.print(",\"uid\":\"");
+        for(byte j=0; j<4; j++) {
+          if(users[i].uid[j]<0x10) client.print("0");
+          client.print(users[i].uid[j], HEX);
+          if(j<3) client.print(" ");
+        }
+        client.print("\"}");
+        if (i < totalCards - 1) client.print(",");
+      }
+      client.print("],\"logs\":[");
+      for (int i = logCount - 1; i >= 0; i--) {
+        client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\"");
+        if (i > 0) client.print(",");
+      }
+      client.print("],\"ssid\":\""); client.print(ssid);
+      client.print("\",\"admin_pass\":\""); client.print(admin_password);
+      client.print("\"}");
+    }
+    delay(1); client.stop(); return;
+  }
+
+  if (isAuthenticated) {
+    if (reqHeader.indexOf("/api/unlock") != -1) {
+      openDoor("Panel API");
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    } 
+    else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
+      learningMode = !learningMode;
+      autoExitLearn = false; 
+      if (learningMode) {
+        if (reqHeader.indexOf("username=") != -1) {
+          int startIdx = reqHeader.indexOf("username=") + 9;
+          int endIdx = reqHeader.indexOf(" ", startIdx);
+          if (reqHeader.indexOf("&", startIdx) != -1 && reqHeader.indexOf("&", startIdx) < endIdx) {
+            endIdx = reqHeader.indexOf("&", startIdx);
+          }
+          pendingUsername = reqHeader.substring(startIdx, endIdx);
+          pendingUsername.replace("+", " "); 
+          if(pendingUsername.length() == 0) {
+            pendingUsername = "Nowy Uzytkownik";
+          }
+        }
+        forceHardwareRFIDReset();
+        globalAnimFrame = 0;
+        addLog("Tryb Ucz. [" + pendingUsername + "]");
+        tone(BUZZER_PIN, 1500, 300);
+      } else {
+        addLog("Stop Ucz: Panel API");
+        tone(BUZZER_PIN, 800, 300);
+      }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    } 
+    else if (reqHeader.indexOf("/api/delete_user") != -1) {
+      int idxPos = reqHeader.indexOf("idx=");
+      if (idxPos != -1) {
+        int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
+        if (targetIdx >= 0 && targetIdx < totalCards) {
+          String deletedName = String(users[targetIdx].name);
+          deleteUser(targetIdx);
+          addLog("Usunieto: " + deletedName);
+          tone(BUZZER_PIN, 600, 400);
+        }
+      }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    }
+    else if (reqHeader.indexOf("/api/rename_user") != -1) {
+      int idxPos = reqHeader.indexOf("idx=");
+      int namePos = reqHeader.indexOf("name=");
+      if (idxPos != -1 && namePos != -1) {
+        int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf("&", idxPos)).toInt();
+        String newName = reqHeader.substring(namePos + 5, reqHeader.indexOf(" ", namePos));
+        newName.replace("+", " ");
+        if (targetIdx >= 0 && targetIdx < totalCards && newName.length() > 0) {
+          memset(users[targetIdx].name, 0, 16);
+          newName.toCharArray(users[targetIdx].name, 16);
+          EEPROM.put(10 + (targetIdx * sizeof(User)), users[targetIdx]); 
+          addLog("Zmiana nazwy slot [" + String(targetIdx) + "]");
+          tone(BUZZER_PIN, 1200, 150);
+        }
+      }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    }
+    else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
+      int idxPos = reqHeader.indexOf("idx=");
+      if (idxPos != -1) {
+        int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
+        if (targetIdx >= 0 && targetIdx < totalCards) {
+          isCardActive[targetIdx] = !isCardActive[targetIdx];
+          EEPROM.write(220 + targetIdx, isCardActive[targetIdx] ? 0x01 : 0x00); 
+          addLog(isCardActive[targetIdx] ? "Aktywowano: " + String(users[targetIdx].name) : "Zablokowano: " + String(users[targetIdx].name));
+          tone(BUZZER_PIN, 1100, 150);
+        }
+      }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    }
+    else if (reqHeader.indexOf("/api/clear_logs") != -1) {
+      int tPos = reqHeader.indexOf("time=");
+      if (tPos != -1) {
+        int spaceIdx = reqHeader.indexOf(" ", tPos);
+        String cutoffVal = reqHeader.substring(tPos + 5, spaceIdx);
+        cutoffVal.replace("%3A", ":"); 
+
+        if (cutoffVal == "all") {
+          logCount = 0;
+          addLog("Wyczyszczono caly dziennik");
+        } else if (cutoffVal.indexOf(":") != -1) {
+          int targetH = cutoffVal.substring(0, cutoffVal.indexOf(":")).toInt();
+          int targetM = cutoffVal.substring(cutoffVal.indexOf(":") + 1).toInt();
+          int targetMinutesWeight = (targetH * 60) + targetM;
+          int i = 0;
+          while (i < logCount) {
+            int logH = lastActions[i].time.substring(0, 2).toInt();
+            int logM = lastActions[i].time.substring(3, 5).toInt();
+            int logMinutesWeight = (logH * 60) + logM;
+            if (logMinutesWeight < targetMinutesWeight) {
+              for (int j = i; j < logCount - 1; j++) {
+                lastActions[j] = lastActions[j + 1];
+              }
+              logCount--;
+            } else {
+              i++; 
+            }
+          }
+          addLog("Usunieto logi starsze niz " + cutoffVal);
+        }
+        tone(BUZZER_PIN, 900, 150);
+      }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop(); return;
+    }
+  }
+}
+
+// 🌟 OVER-THE-AIR REMOTE NETWORK RELAY MODIFICATIONS FOR PORT 80 RE-ROUTING
+void handleOnlineInstallerServer() {
+  WiFiClient client = server.available(); 
+  if (!client) return;
+  String reqHeader = ""; 
+  unsigned long webTimeout = millis() + 250; 
+  while (client.connected() && millis() < webTimeout) { 
+    if (client.available()) { 
+      char c = client.read(); reqHeader += c; if (c == '\n') break; 
+    } 
+  }
+  while (client.available()) { client.read(); }
 
   String expectedAuthSignature = "pass=" + String(admin_password);
   if (reqHeader.indexOf("GET /installer") != -1 && reqHeader.indexOf(expectedAuthSignature) != -1) {
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
     client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
     client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
-    client.println("<h2 style='text-align:center;'>⚙️ Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
+    client.println("<h2 style='text-align:center;'>⚙       Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
     client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
     client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
     client.println("<input type='password' name='a' value='" + String(admin_password) + "' placeholder='Admin Master Password' required>");
@@ -485,16 +709,21 @@ void handleOnlineInstallerServer() {
     client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Update & Reboot Hardware'></form></div></body></html>");
     delay(50); client.stop(); return;
   }
-  client.println("HTTP/1.1 404 Not Found\r\n\r\n"); client.stop();
 }
 
-// --- ACTIVE CLOUD PROCESSING PIPELINE DAEMONS ---
+// 🌟 CLOUD INTERFACE: Dynamic streaming outbound connection pools
 void executeCloudSynchronization() {
   if (strlen(proxmox_log_server) < 4) return;
-  WiFiClient httpCheck; httpCheck.setTimeout(250);
+  WiFiClient httpCheck; 
+  httpCheck.setTimeout(250);
   if (!httpCheck.connect(proxmox_log_server, proxmox_log_port)) {
     if (millis() - lastSuccessfulPollTime > 30000) {
-      isOfflineStandby = true; displayProvisioningInstructions("ERR: CLOUD LOSS"); WiFi.disconnect(); delay(500); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
+      isOfflineStandby = true; 
+      displayProvisioningInstructions("ERR: CLOUD LOSS"); 
+      WiFi.disconnect(); 
+      delay(500); 
+      WiFi.beginAP("ZAMEK_SETUP"); 
+      server.begin();
     }
     return;
   }
@@ -504,177 +733,346 @@ void executeCloudSynchronization() {
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server);
   httpCheck.println("Connection: close\r\n");
 
-  unsigned long deadline = millis() + 300; String payloadResponse = "";
+  unsigned long deadline = millis() + 300; 
+  String payloadResponse = "";
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {
-    if (httpCheck.available()) { char c = httpCheck.read(); payloadResponse += c; }
+    if (httpCheck.available()) { 
+      char c = httpCheck.read(); payloadResponse += c; 
+    }
   }
   httpCheck.stop();
 
-  if (payloadResponse.indexOf("\"unlock\":true") != -1) openDoor("Zdalne Wywolanie");
+  if (payloadResponse.indexOf("\"unlock\":true") != -1) {
+    openDoor("Zdalne Wywolanie");
+  }
   
+  if (payloadResponse.indexOf("\"ota_flash_trigger\":true") != -1) {
+    updateDisplay("OTA FLASHING", "Downloading binary...");
+    tone(BUZZER_PIN, 2000, 200); 
+    delay(200); 
+    tone(BUZZER_PIN, 2500, 400);
+    delay(3000); 
+    NVIC_SystemReset(); 
+  }
+
   if (payloadResponse.indexOf("\"learn\":true") != -1) {
     learningMode = true;
-    int userStart = payloadResponse.indexOf("\"username\":\"") + 12; int userEnd = payloadResponse.indexOf("\"", userStart);
-    if (userStart > 11 && userEnd > userStart) pendingUsername = payloadResponse.substring(userStart, userEnd);
-  } else { learningMode = false; }
+    int userStart = payloadResponse.indexOf("\"username\":\"") + 12; 
+    int userEnd = payloadResponse.indexOf("\"", userStart);
+    if (userStart > 11 && userEnd > userStart) {
+      pendingUsername = payloadResponse.substring(userStart, userEnd);
+    }
+  } else { 
+    learningMode = false; 
+  }
 }
 
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   if (strlen(proxmox_log_server) < 4) return;
-  WiFiClient httpPost; httpPost.setTimeout(400);
+  WiFiClient httpPost; 
+  httpPost.setTimeout(400);
   if (!httpPost.connect(proxmox_log_server, proxmox_log_port)) return; 
 
   String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan";
   String postData = runRegister ? "{\"uid\":\"" + uidStr + "\",\"name\":\"" + pendingUsername + "\"}" : "{\"uid\":\"" + uidStr + "\"}";
 
-  httpPost.println("POST " + endpoint + " HTTP/1.1"); httpPost.print("Host: "); httpPost.println(proxmox_log_server);
-  httpPost.println("Content-Type: application/json"); httpPost.print("Content-Length: "); httpPost.println(postData.length());
-  httpPost.println("Connection: close\r\n"); httpPost.print(postData);
+  httpPost.println("POST " + endpoint + " HTTP/1.1"); 
+  httpPost.print("Host: "); httpPost.println(proxmox_log_server);
+  httpPost.println("Content-Type: application/json"); 
+  httpPost.print("Content-Length: "); httpPost.println(postData.length());
+  httpPost.println("Connection: close\r\n"); 
+  httpPost.print(postData);
 
-  unsigned long deadline = millis() + 400; String payloadResponse = "";
+  unsigned long deadline = millis() + 400; 
+  String payloadResponse = "";
   while ((httpPost.available() || httpPost.connected()) && millis() < deadline) {
-    if (httpPost.available()) { char c = httpPost.read(); payloadResponse += c; }
+    if (httpPost.available()) { 
+      char c = httpPost.read(); payloadResponse += c; 
+    }
   }
   httpPost.stop();
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(9600); 
   delay(1500); 
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  loadConfiguration(); loadCards(); 
-  if (digitalRead(BUTTON_PIN) == LOW) { delay(2000); if (digitalRead(BUTTON_PIN) == LOW) { factoryResetSettings(); Serial.println("[FACTORY RESET COMPLETE]"); } }
+  loadConfiguration(); 
+  loadCards(); 
+  
+  if (digitalRead(BUTTON_PIN) == LOW) { 
+    delay(2000); 
+    if (digitalRead(BUTTON_PIN) == LOW) { 
+      factoryResetSettings(); 
+      Serial.println("[FACTORY RESET COMPLETE]"); 
+    } 
+  }
 
-  pinMode(RELAY_PIN, OUTPUT); pinMode(LED_GREEN, OUTPUT); pinMode(LED_RED, OUTPUT);
-  pinMode(RST_PIN, OUTPUT); digitalWrite(RST_PIN, HIGH); delay(50);
-  digitalWrite(RELAY_PIN, HIGH); digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, HIGH);
+  pinMode(RELAY_PIN, OUTPUT); 
+  pinMode(LED_GREEN, OUTPUT); 
+  pinMode(LED_RED, OUTPUT);
 
-  SPI.begin(); RTC.begin(); randomSeed(analogRead(0)); delay(300); 
-  display.begin(0x3C, true); display.clearDisplay();
+  pinMode(RST_PIN, OUTPUT); 
+  digitalWrite(RST_PIN, HIGH); 
+  delay(50);
+
+  digitalWrite(RELAY_PIN, HIGH); 
+  digitalWrite(LED_GREEN, LOW); 
+  digitalWrite(LED_RED, HIGH);
+
+  SPI.begin(); 
+  RTC.begin(); 
+  randomSeed(analogRead(0)); 
+  delay(300); 
+  display.begin(0x3C, true); 
+  display.clearDisplay();
 
   if (provisioningMode) {
-    displayProvisioningInstructions(""); WiFi.beginAP("ZAMEK_SETUP"); server.begin();
-    tone(BUZZER_PIN, 600, 250); delay(300); tone(BUZZER_PIN, 600, 250);
-    unsigned long lastSetupTick = 0; bool alternateState = false;
+    displayProvisioningInstructions(""); 
+    WiFi.beginAP("ZAMEK_SETUP"); 
+    server.begin();
+    tone(BUZZER_PIN, 600, 250); 
+    delay(300); 
+    tone(BUZZER_PIN, 600, 250);
+    unsigned long lastSetupTick = 0; 
+    bool alternateState = false;
     while (true) { 
       handleProvisioningServer(); 
       if (millis() - lastSetupTick > 400) {
-        lastSetupTick = millis(); globalAnimFrame++; renderSystemUI(); 
+        lastSetupTick = millis(); 
+        globalAnimFrame++; 
+        renderSystemUI(); 
         alternateState = !alternateState;
-        digitalWrite(LED_RED, alternateState ? HIGH : LOW); digitalWrite(LED_GREEN, alternateState ? LOW : HIGH);
+        digitalWrite(LED_RED, alternateState ? HIGH : LOW); 
+        digitalWrite(LED_GREEN, alternateState ? LOW : HIGH);
       }
       delay(10); 
     }
   }
 
-  updateDisplay("Wi-Fi: Laczenie...", "Proba: 1/3 [....]");
+  updateDisplay("Wi-Fi: Laczenie...", "Proba: 1/3 [....]"); 
   WiFi.begin(ssid, pass);
 
-  unsigned long startAttempt = millis(); int counter = 0;
+  unsigned long startAttempt = millis(); 
+  int counter = 0;
   while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) {
-    delay(500); counter++;
-    if (counter == 8)  updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [======]");
-    if (counter == 16) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
+    delay(500); 
+    counter++;
+    if (counter == 8) {
+      updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [======]");
+    }
+    if (counter == 16) {
+      updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
+    }
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    timeClient.begin(); timeClient.update();
-    unsigned long epochTime = timeClient.getEpochTime(); RTCTime localTime(epochTime); RTC.setTime(localTime);
-    forceHardwareRFIDReset(); lastSuccessfulPollTime = millis(); server.begin(); 
-    updateDisplay("Gotowy", WiFi.localIP().toString()); addLog("System online");
-    tone(BUZZER_PIN, 800, 100);  delay(120); tone(BUZZER_PIN, 1000, 100); delay(120); tone(BUZZER_PIN, 1300, 120); delay(140); tone(BUZZER_PIN, 1600, 300);
+    timeClient.begin(); 
+    timeClient.update();
+    unsigned long epochTime = timeClient.getEpochTime(); 
+    RTCTime localTime(epochTime); 
+    RTC.setTime(localTime);
+    forceHardwareRFIDReset(); 
+    lastSuccessfulPollTime = millis(); 
+    server.begin(); 
+    updateDisplay("Gotowy", WiFi.localIP().toString()); 
+    addLog("System online");
+    tone(BUZZER_PIN, 800, 100);  delay(120); 
+    tone(BUZZER_PIN, 1000, 100); delay(120); 
+    tone(BUZZER_PIN, 1300, 120); delay(140); 
+    tone(BUZZER_PIN, 1600, 300);
   } else {
-    isOfflineStandby = true; forceHardwareRFIDReset(); displayProvisioningInstructions("ERR: CONN TIMEOUT");
-    WiFi.disconnect(); delay(500); WiFi.beginAP("ZAMEK_SETUP"); server.begin(); tone(BUZZER_PIN, 300, 600); lastWifiRetryTime = millis(); 
+    isOfflineStandby = true; 
+    forceHardwareRFIDReset(); 
+    displayProvisioningInstructions("ERR: CONN TIMEOUT");
+    WiFi.disconnect(); 
+    delay(500); 
+    WiFi.beginAP("ZAMEK_SETUP"); 
+    server.begin(); 
+    tone(BUZZER_PIN, 300, 600); 
+    lastWifiRetryTime = millis(); 
   }
-  lastRfidWatchdogTime = millis(); lastFrameTick = millis();
+  lastRfidWatchdogTime = millis(); 
+  lastFrameTick = millis();
 }
 
 void loop() {
-  if (millis() - lastFrameTick > 80) { lastFrameTick = millis(); globalAnimFrame++; renderSystemUI(); }
+  if (millis() - lastFrameTick > 80) { 
+    lastFrameTick = millis(); 
+    globalAnimFrame++; 
+    renderSystemUI(); 
+  }
 
   if (!doorOpen && !learningMode && (millis() - lastRfidWatchdogTime > 120000)) {
-    lastRfidWatchdogTime = millis(); forceHardwareRFIDReset(); 
+    lastRfidWatchdogTime = millis(); 
+    forceHardwareRFIDReset(); 
   }
 
   if (isOfflineStandby) {
     handleProvisioningServer();
     if (millis() - lastWifiRetryTime > 60000) {
-      lastWifiRetryTime = millis(); updateDisplay("RESCUE WATCHDOG", "Sprawdzam Wi-Fi..."); WiFi.begin(ssid, pass);
-      unsigned long checkStart = millis(); while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) { delay(200); }
+      lastWifiRetryTime = millis(); 
+      updateDisplay("RESCUE WATCHDOG", "Sprawdzam Wi-Fi..."); 
+      WiFi.begin(ssid, pass);
+      unsigned long checkStart = millis(); 
+      while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) { 
+        delay(200); 
+      }
       if (WiFi.status() == WL_CONNECTED) {
-        isOfflineStandby = false; timeClient.begin(); timeClient.update();
-        unsigned long epochTime = timeClient.getEpochTime(); RTCTime localTime(epochTime); RTC.setTime(localTime);
-        server.begin(); updateDisplay("Gotowy", WiFi.localIP().toString()); addLog("Polaczenie Wi-Fi przywrocone");
-        lastSuccessfulPollTime = millis(); tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
+        isOfflineStandby = false; 
+        timeClient.begin(); 
+        timeClient.update();
+        unsigned long epochTime = timeClient.getEpochTime(); 
+        RTCTime localTime(epochTime); 
+        RTC.setTime(localTime);
+        server.begin(); 
+        updateDisplay("Gotowy", WiFi.localIP().toString()); 
+        addLog("Polaczenie Wi-Fi przywrocone");
+        lastSuccessfulPollTime = millis(); 
+        tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
       } else {
-        WiFi.disconnect(); delay(1000); WiFi.beginAP("ZAMEK_SETUP"); delay(500); server.begin(); displayProvisioningInstructions("ERR: REKONEKCJA FAIL");
+        WiFi.disconnect(); 
+        delay(1000); 
+        WiFi.beginAP("ZAMEK_SETUP"); 
+        delay(500); 
+        server.begin(); 
+        displayProvisioningInstructions("ERR: REKONEKCJA FAIL");
       }
     }
   } else {
-    // 🌟 CLEANUP POINT: Local browser endpoint panel stripped cleanly. Dynamic backdoor remains preserved!
+    handleWebServer(); // Tracks incoming local bridge queries directly from React
     handleOnlineInstallerServer(); 
-    if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) { lastPollTime = millis(); executeCloudSynchronization(); }
+    if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) { 
+      lastPollTime = millis(); 
+      executeCloudSynchronization(); 
+    }
   }
 
   if (rfidResetPending && !doorOpen && (millis() - lastScanTime > 1000)) {
-    forceHardwareRFIDReset(); rfidResetPending = false; if (learningMode) { globalAnimFrame = 0; } else { globalDisplayInfo = ""; }
+    forceHardwareRFIDReset(); 
+    rfidResetPending = false; 
+    if (learningMode) { 
+      globalAnimFrame = 0; 
+    } else { 
+      globalDisplayInfo = ""; 
+    }
   }
 
   if (learningMode) {
-    if (millis() % 500 < 250) { digitalWrite(LED_RED, HIGH); digitalWrite(LED_GREEN, LOW); } 
-    else { digitalWrite(LED_RED, LOW); digitalWrite(LED_GREEN, HIGH); }
+    if (millis() % 500 < 250) { 
+      digitalWrite(LED_RED, HIGH); 
+      digitalWrite(LED_GREEN, LOW); 
+    } else { 
+      digitalWrite(LED_RED, LOW); 
+      digitalWrite(LED_GREEN, HIGH); 
+    }
   } else if (!doorOpen) {
     if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
-      digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW); digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW); 
+      digitalWrite(LED_GREEN, LOW);
     } else {
-      if (isOfflineStandby) { digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH); } 
-      else { digitalWrite(LED_RED, HIGH); }
+      if (isOfflineStandby) { 
+        digitalWrite(LED_RED, millis() % 1000 < 150 ? LOW : HIGH); 
+      } else { 
+        digitalWrite(LED_RED, HIGH); 
+      }
       digitalWrite(LED_GREEN, LOW);
     }
   }
 
   if (!rfidResetPending && !doorOpen && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    lastRfidWatchdogTime = millis(); String uidStr = "";
+    lastRfidWatchdogTime = millis(); 
+    String uidStr = "";
     for (byte i = 0; i < rfid.uid.size; i++) {
       if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
-      uidStr += String(rfid.uid.uidByte[i], HEX); if (i < rfid.uid.size - 1) uidStr += " ";
+      uidStr += String(rfid.uid.uidByte[i], HEX); 
+      if (i < rfid.uid.size - 1) uidStr += " ";
     }
-    uidStr.toUpperCase(); transmitCardPayloadToCloud(uidStr, rfid.uid.uidByte, learningMode);
+    uidStr.toUpperCase(); 
+    transmitCardPayloadToCloud(uidStr, rfid.uid.uidByte, learningMode);
 
     if (learningMode) {
-      saveNewCard(rfid.uid.uidByte, pendingUsername); addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
-      globalAnimFrame = 0; globalDisplayInfo = "DODANO KARTE"; digitalWrite(LED_RED, LOW); digitalWrite(LED_GREEN, HIGH);
-      tone(BUZZER_PIN, 1000, 150); delay(150); tone(BUZZER_PIN, 1500, 150); delay(150); tone(BUZZER_PIN, 2000, 400);
-      if (autoExitLearn) { learningMode = false; autoExitLearn = false; }
+      saveNewCard(rfid.uid.uidByte, pendingUsername); 
+      addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
+      globalAnimFrame = 0; 
+      globalDisplayInfo = "DODANO KARTE"; 
+      digitalWrite(LED_RED, LOW); 
+      digitalWrite(LED_GREEN, HIGH);
+      tone(BUZZER_PIN, 1000, 150); delay(150); 
+      tone(BUZZER_PIN, 1500, 150); delay(150); 
+      tone(BUZZER_PIN, 2000, 400);
+      if (autoExitLearn) { 
+        learningMode = false; 
+        autoExitLearn = false; 
+      }
     } else {
-      bool valid = false; int matchedIndex = -1;
-      for (int i = 0; i < totalCards; i++) { if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) { valid = true; matchedIndex = i; break; } }
-      if (valid) { if (isCardActive[matchedIndex]) { openDoor(String(users[matchedIndex].name)); } else { addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]"); tone(BUZZER_PIN, 200, 600); } } 
-      else { addLog("Odmowa: Nieznany [" + uidStr + "]"); tone(BUZZER_PIN, 200, 500); }
+      bool valid = false; 
+      int matchedIndex = -1;
+      for (int i = 0; i < totalCards; i++) { 
+        if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) { 
+          valid = true; 
+          matchedIndex = i; 
+          break; 
+        } 
+      }
+      if (valid) { 
+        if (isCardActive[matchedIndex]) { 
+          openDoor(String(users[matchedIndex].name)); 
+        } else { 
+          addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]"); 
+          tone(BUZZER_PIN, 200, 600); 
+        } 
+      } else { 
+        addLog("Odmowa: Nieznany [" + uidStr + "]"); 
+        tone(BUZZER_PIN, 200, 500); 
+      }
     }
-    rfid.PICC_HaltA(); rfidResetPending = true; lastScanTime = millis();
+    rfid.PICC_HaltA(); 
+    rfidResetPending = true; 
+    lastScanTime = millis();
   }
 
   if (digitalRead(BUTTON_PIN) == LOW) {
-    unsigned long pressTime = millis(); bool longPressed = false;
+    unsigned long pressTime = millis(); 
+    bool longPressed = false;
     while (digitalRead(BUTTON_PIN) == LOW) {
       if (millis() - pressTime > 3000) { 
-        longPressed = true; learningMode = !learningMode; autoExitLearn = true; 
+        longPressed = true; 
+        learningMode = !learningMode; 
+        autoExitLearn = true; 
         if (learningMode) {
-          pendingUsername = "Przycisk"; forceHardwareRFIDReset(); lastRfidWatchdogTime = millis(); globalAnimFrame = 0; tone(BUZZER_PIN, 1500, 400);
-        } else { globalDisplayInfo = ""; tone(BUZZER_PIN, 800, 400); }
+          pendingUsername = "Przycisk"; 
+          forceHardwareRFIDReset(); 
+          lastRfidWatchdogTime = millis(); 
+          globalAnimFrame = 0; 
+          tone(BUZZER_PIN, 1500, 400);
+        } else { 
+          globalDisplayInfo = ""; 
+          tone(BUZZER_PIN, 800, 400); 
+        }
         while(digitalRead(BUTTON_PIN) == LOW); break;
       }
       delay(10);
     }
-    if (!longPressed && (millis() - pressTime > 50)) { failedLoginAttempts = 0; lockoutEndTime = 0; lastRfidWatchdogTime = millis(); openDoor("PRZYCISK"); }
+    if (!longPressed && (millis() - pressTime > 50)) { 
+      failedLoginAttempts = 0; 
+      lockoutEndTime = 0; 
+      lastRfidWatchdogTime = millis(); 
+      openDoor("PRZYCISK"); 
+    }
   }
 
   if (doorOpen && millis() > accessEndTime) {
-    doorOpen = false; digitalWrite(RELAY_PIN, HIGH); delay(100); forceHardwareRFIDReset(); lastRfidWatchdogTime = millis(); rfidResetPending = false; globalDisplayInfo = "";
-    digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, HIGH);
+    doorOpen = false; 
+    digitalWrite(RELAY_PIN, HIGH); 
+    delay(100); 
+    forceHardwareRFIDReset(); 
+    lastRfidWatchdogTime = millis(); 
+    rfidResetPending = false; 
+    globalDisplayInfo = "";
+    digitalWrite(LED_GREEN, LOW); 
+    digitalWrite(LED_RED, HIGH);
   }
 }
