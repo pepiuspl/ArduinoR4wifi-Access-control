@@ -11,7 +11,7 @@
 #include <ArduinoOTA.h> 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.9.4 - Cloud Solution";
+const char* app_version = "v2.9.4";
 
 // --- USER DATABASE STRUCTURES ---
 struct User {
@@ -179,7 +179,7 @@ void loadConfiguration() {
     provisioningMode = true; 
     hasSavedConfig = false;
     strcpy(admin_password, "admin");
-    strcpy(proxmox_log_server, "192.168.1.100");
+    strcpy(proxmox_log_server, "192.168.0.200");
     proxmox_log_port = 3000;
   }
 }
@@ -358,15 +358,9 @@ void updateDisplay(String status, String info) {
 
 void displayProvisioningInstructions(String errorContext) {
   if (errorContext != "") {
-    globalDisplayInfo = errorContext + "
-Connect to:
-SSID: ZAMEK_SETUP
-IP: 192.168.4.1";
+    globalDisplayInfo = errorContext + "\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
   } else {
-    globalDisplayInfo = "INITIAL CONFIG!
-Connect to:
-SSID: ZAMEK_SETUP
-IP: 192.168.4.1";
+    globalDisplayInfo = "INITIAL CONFIG!\nConnect to:\nSSID: ZAMEK_SETUP\nIP: 192.168.4.1";
   }
   renderSystemUI();
 }
@@ -382,8 +376,7 @@ void sendExternalTelemetry(String logData) {
     telemetryClient.print("Host: "); telemetryClient.println(proxmox_log_server);
     telemetryClient.println("Content-Type: text/plain; charset=utf-8");
     telemetryClient.print("Content-Length: "); telemetryClient.println(logData.length());
-    telemetryClient.println("Connection: close");
-    telemetryClient.println();
+    telemetryClient.println("Connection: close\r\n");
     telemetryClient.print(logData);
     telemetryClient.flush();
     telemetryClient.stop();
@@ -430,8 +423,7 @@ void handleProvisioningServer() {
     if (client.available()) {
       char c = client.read();
       reqHeader += c;
-      if (c == '
-') break; 
+      if (c == '\n') break; 
     }
   }
   while (client.available()) { client.read(); }
@@ -465,9 +457,7 @@ void handleProvisioningServer() {
 
     saveConfiguration(decodedSSID, decodedPass, decodedAdmin, decodedTeleIP, nTelePort.toInt(), runTele);
 
-    client.println("HTTP/1.1 200 OK
-Content-Type: text/html
-
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r
 <html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>");
     delay(50); client.stop();
 
@@ -477,10 +467,7 @@ Content-Type: text/html
     return;
   }
 
-  client.println("HTTP/1.1 200 OK
-Content-Type: text/html
-Connection: close
-");
+  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
   client.println("<h2 style='text-align:center;'>⚙       Installer Setup Panel</h2><div class='box'><form method='GET' action='/save_setup'>");
@@ -506,8 +493,7 @@ void handleWebServer() {
         char c = client.read();
         reqHeader += c;
 
-        if (c == '
-')
+        if (c == '\n')
             break;
     }
   }
@@ -522,19 +508,13 @@ void handleWebServer() {
     globalDisplayInfo = "Klucz tymczasowy wyslany";
     tone(BUZZER_PIN, 1400, 400);
 
-    client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-Connection: close
-
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r
 OK");
     delay(1); client.stop(); return;
   }
 
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
-    client.println("HTTP/1.1 403 Forbidden
-Content-Type: text/plain
-Connection: close
-
+    client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r
 [ALERT] LOCKOUT ACTIVE.");
     delay(1); client.stop(); return;
   }
@@ -572,163 +552,131 @@ Connection: close
 
   if (reqHeader.indexOf("/api/update") != -1)
   {
-  addLog("OTA REQUEST DETECTED");
-if (!isAuthenticated)
-{
-client.println("HTTP/1.1 401 Unauthorized");
-client.println("Connection: close");
-client.println();
-client.stop();
-return;
-}
-
-updateDisplay("OTA UPDATE", "Receiving firmware...");
-tone(BUZZER_PIN, 1500, 100);
-
-String fullHeader = reqHeader;
-
-unsigned long headerDeadline = millis() + 5000;
-
-while (millis() < headerDeadline)
-{
-    while (client.available())
+    addLog("OTA REQUEST DETECTED");
+    if (!isAuthenticated)
     {
-        char c = client.read();
-        fullHeader += c;
+      client.println("HTTP/1.1 401 Unauthorized");
+      client.println("Connection: close");
+      client.println();
+      client.stop();
+      return;
+    }
 
-        if (fullHeader.endsWith("
+    updateDisplay("OTA UPDATE", "Receiving firmware...");
+    tone(BUZZER_PIN, 1500, 100);
 
-"))
+    String fullHeader = reqHeader;
+    unsigned long headerDeadline = millis() + 5000;
+
+    while (millis() < headerDeadline)
+    {
+        while (client.available())
         {
-            goto HEADER_COMPLETE;
+            char c = client.read();
+            fullHeader += c;
+
+            if (fullHeader.endsWith("\r\n\r\n"))
+            {
+                goto HEADER_COMPLETE;
+            }
         }
     }
-}
 
 HEADER_COMPLETE:
 
-addLog("HEADER START");
-addLog(fullHeader);
-addLog("HEADER END");
+    addLog("HEADER START");
+    addLog(fullHeader);
+    addLog("HEADER END");
 
-int contentLength = 0;
+    int contentLength = 0;
+    int clPos = fullHeader.indexOf("Content-Length:");
 
-int clPos = fullHeader.indexOf("Content-Length:");
-
-if (clPos != -1)
-{
-    int clEnd = fullHeader.indexOf("
-", clPos);
-
-    String lengthStr =
-        fullHeader.substring(clPos + 15, clEnd);
-
-    lengthStr.trim();
-
-    contentLength = lengthStr.toInt();
-}
-
-if (contentLength <= 0)
-{
-    client.println("HTTP/1.1 400 Bad Request");
-    client.println("Connection: close");
-    client.println();
-    client.stop();
-
-    addLog("OTA FAILED: Invalid Content-Length");
-    return;
-}
-
-addLog("OTA START");
-addLog("OTA SIZE: " + String(contentLength));
-
-if (!InternalStorage.open(contentLength))
-{
-    client.println("HTTP/1.1 500 Internal Server Error");
-    client.println("Connection: close");
-    client.println();
-    client.stop();
-
-    addLog("OTA FAILED: InternalStorage.open()");
-    return;
-}
-
-uint32_t receivedBytes = 0;
-
-unsigned long receiveDeadline = millis() + 120000;
-
-while (receivedBytes < contentLength &&
-       millis() < receiveDeadline)
-{
-    while (client.available())
+    if (clPos != -1)
     {
-        uint8_t b = client.read();
-
-        InternalStorage.write(b);
-
-        receivedBytes++;
-
-        receiveDeadline = millis() + 120000;
-
-        if (receivedBytes >= contentLength)
-        {
-            break;
-        }
+        int clEnd = fullHeader.indexOf("\r\n", clPos);
+        String lengthStr = fullHeader.substring(clPos + 15, clEnd);
+        lengthStr.trim();
+        contentLength = lengthStr.toInt();
     }
 
-    delay(1);
-}
+    if (contentLength <= 0)
+    {
+        client.println("HTTP/1.1 400 Bad Request");
+        client.println("Connection: close");
+        client.println();
+        client.stop();
 
-addLog(
-    "OTA RECEIVED: " +
-    String(receivedBytes) +
-    "/" +
-    String(contentLength)
-);
+        addLog("OTA FAILED: Invalid Content-Length");
+        return;
+    }
 
-InternalStorage.close();
+    addLog("OTA START");
+    addLog("OTA SIZE: " + String(contentLength));
 
-if (receivedBytes != contentLength)
-  {
-    client.println("HTTP/1.1 408 Request Timeout");
+    if (!InternalStorage.open(contentLength))
+    {
+        client.println("HTTP/1.1 500 Internal Server Error");
+        client.println("Connection: close");
+        client.println();
+        client.stop();
+
+        addLog("OTA FAILED: InternalStorage.open()");
+        return;
+    }
+
+    uint32_t receivedBytes = 0;
+    unsigned long receiveDeadline = millis() + 120000;
+
+    while (receivedBytes < contentLength && millis() < receiveDeadline)
+    {
+        while (client.available())
+        {
+            uint8_t b = client.read();
+            InternalStorage.write(b);
+            receivedBytes++;
+            receiveDeadline = millis() + 120000;
+
+            if (receivedBytes >= contentLength)
+            {
+                break;
+            }
+        }
+        delay(1);
+    }
+
+    addLog("OTA RECEIVED: " + String(receivedBytes) + "/" + String(contentLength));
+    InternalStorage.close();
+
+    if (receivedBytes != contentLength)
+    {
+        client.println("HTTP/1.1 408 Request Timeout");
+        client.println("Connection: close");
+        client.println();
+        client.stop();
+
+        addLog("OTA FAILED: Received " + String(receivedBytes) + "/" + String(contentLength));
+        return;
+    }
+
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
     client.println("Connection: close");
     client.println();
+    client.println("{\"success\":true}");
+
+    delay(100);
     client.stop();
 
-    addLog(
-        "OTA FAILED: Received " +
-        String(receivedBytes) +
-        "/" +
-        String(contentLength));
+    addLog("OTA COMPLETE");
+    tone(BUZZER_PIN, 1800, 300);
+    delay(100);
+    tone(BUZZER_PIN, 2200, 500);
+    delay(1000);
 
+    addLog("OTA APPLY");
+    InternalStorage.apply();
     return;
   }
-
-client.println("HTTP/1.1 200 OK");
-client.println("Content-Type: application/json");
-client.println("Connection: close");
-client.println();
-client.println("{"success":true}");
-
-delay(100);
-
-client.stop();
-
-addLog("OTA COMPLETE");
-
-tone(BUZZER_PIN, 1800, 300);
-delay(100);
-tone(BUZZER_PIN, 2200, 500);
-
-delay(1000);
-
-addLog("OTA APPLY");
-
-InternalStorage.apply();
-
-return;
-
-}
 
   if (reqHeader.indexOf("GET /api/data") != -1) {
     client.println("HTTP/1.1 200 OK");
@@ -737,38 +685,37 @@ return;
     client.println();
 
     if (!isAuthenticated) {
-      client.println("{"auth":false}");
+      client.println("{\"auth\":false}");
     } else {
-      client.print("{"auth":true,"mode":"");
+      client.print("{\"auth\":true,\"mode\":\"");
       client.print(learningMode ? "Uczenie" : "Czuwanie");
-      client.print("","pending":""); client.print(pendingUsername);
-      client.print("","lock":"); client.print(doorOpen ? "true" : "false");
-      client.print(","total":"); client.print(totalCards);
+      client.print("\",\"pending\":\""); client.print(pendingUsername);
+      client.print("\",\"lock\":"); client.print(doorOpen ? "true" : "false");
+      client.print(",\"total\":"); client.print(totalCards);
+      client.print(",\"version\":\""); client.print(app_version); client.print("\"");
 
-      client.print(","version":""); client.print(app_version); client.print(""");
-
-      client.print(","users":[");
+      client.print(",\"users\":[");
       for (int i = 0; i < totalCards; i++) {
-        client.print("{"idx":"); client.print(i);
-        client.print(","name":""); client.print(users[i].name);
-        client.print("","active":"); client.print(isCardActive[i] ? "true" : "false"); 
-        client.print(","uid":"");
+        client.print("{\"idx\":"); client.print(i);
+        client.print(",\"name\":\""); client.print(users[i].name);
+        client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false"); 
+        client.print(",\"uid\":\"");
         for(byte j=0; j<4; j++) {
           if(users[i].uid[j]<0x10) client.print("0");
           client.print(users[i].uid[j], HEX);
           if(j<3) client.print(" ");
         }
-        client.print(""}");
+        client.print("\"}");
         if (i < totalCards - 1) client.print(",");
       }
-      client.print("],"logs":[");
+      client.print("],\"logs\":[");
       for (int i = logCount - 1; i >= 0; i--) {
-        client.print(""[" + lastActions[i].time + "] " + lastActions[i].msg + """);
+        client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\"");
         if (i > 0) client.print(",");
       }
-      client.print("],"ssid":""); client.print(ssid);
-      client.print("","admin_pass":""); client.print(admin_password);
-      client.print(""}");
+      client.print("],\"ssid\":\""); client.print(ssid);
+      client.print("\",\"admin_pass\":\""); client.print(admin_password);
+      client.print("\"}");
     }
     delay(1); client.stop(); return;
   }
@@ -776,9 +723,7 @@ return;
   if (isAuthenticated) {
     if (reqHeader.indexOf("/api/unlock") != -1) {
       openDoor("Panel API");
-      client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r
 OK");
       delay(1); client.stop(); return;
     } 
@@ -806,9 +751,7 @@ OK");
         addLog("Stop Ucz: Panel API");
         tone(BUZZER_PIN, 800, 300);
       }
-      client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r
 OK");
       delay(1); client.stop(); return;
     } 
@@ -823,9 +766,7 @@ OK");
           tone(BUZZER_PIN, 600, 400);
         }
       }
-      client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r
 OK");
       delay(1); client.stop(); return;
     }
@@ -844,9 +785,7 @@ OK");
           tone(BUZZER_PIN, 1200, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r
 OK");
       delay(1); client.stop(); return;
     }
@@ -861,9 +800,7 @@ OK");
           tone(BUZZER_PIN, 1100, 150);
         }
       }
-      client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r
 OK");
       delay(1); client.stop(); return;
     }
@@ -899,9 +836,7 @@ OK");
         }
         tone(BUZZER_PIN, 900, 150);
       }
-      client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r
 OK");
       delay(1); client.stop(); return;
     }
@@ -922,9 +857,7 @@ OK");
       saveConfiguration(decSSID, decPass, decAdmin, proxmox_log_server, proxmox_log_port, telemetryEnabled);
       addLog("Zapisano ustawienia");
 
-      client.println("HTTP/1.1 200 OK
-Content-Type: text/plain
-
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r
 OK");
       delay(1); client.stop(); return;
     }
@@ -935,20 +868,16 @@ void handleOnlineInstallerServer() {
   WiFiClient client = server.available(); 
   if (!client) return;
   String reqHeader = ""; unsigned long webTimeout = millis() + 250; 
-  while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read(); reqHeader += c; if (c == '
-') break; } }
+  while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read(); reqHeader += c; if (c == '\n') break; } }
   while (client.available()) { client.read(); }
   Serial.println("REQUEST:");
   Serial.println(reqHeader);
 
-addLog("REQ: " + reqHeader);
+  addLog("REQ: " + reqHeader);
 
   String expectedAuthSignature = "pass=" + String(admin_password);
   if (reqHeader.indexOf("GET /installer") != -1 && reqHeader.indexOf(expectedAuthSignature) != -1) {
-    client.println("HTTP/1.1 200 OK
-Content-Type: text/html
-Connection: close
-");
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
     client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
     client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
     client.println("<h2 style='text-align:center;'>⚙       Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
@@ -983,8 +912,7 @@ void executeCloudSynchronization() {
 
   httpCheck.println("GET " + pollPath + " HTTP/1.1");
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server);
-  httpCheck.println("Connection: close
-");
+  httpCheck.println("Connection: close\r\n");
 
   unsigned long deadline = millis() + 300; 
   String payloadResponse = "";
@@ -995,14 +923,14 @@ void executeCloudSynchronization() {
   }
   httpCheck.stop();
 
-  if (payloadResponse.indexOf(""unlock":true") != -1) {
+  if (payloadResponse.indexOf("\"unlock\":true") != -1) {
     openDoor("Zdalne Wywolanie");
   }
 
-  if (payloadResponse.indexOf(""learn":true") != -1) {
+  if (payloadResponse.indexOf("\"learn\":true") != -1) {
     learningMode = true;
-    int userStart = payloadResponse.indexOf(""username":"") + 12; 
-    int userEnd = payloadResponse.indexOf(""", userStart);
+    int userStart = payloadResponse.indexOf("\"username\":\"") + 12; 
+    int userEnd = payloadResponse.indexOf("\"", userStart);
     if (userStart > 11 && userEnd > userStart) {
       pendingUsername = payloadResponse.substring(userStart, userEnd);
     }
@@ -1018,14 +946,13 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   if (!httpPost.connect(proxmox_log_server, proxmox_log_port)) return; 
 
   String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan";
-  String postData = runRegister ? "{"uid":"" + uidStr + "","name":"" + pendingUsername + ""}" : "{"uid":"" + uidStr + ""}";
+  String postData = runRegister ? "{\"uid\":\"" + uidStr + "\",\"name\":\"" + pendingUsername + "\"}" : "{\"uid\":\"" + uidStr + "\"}";
 
   httpPost.println("POST " + endpoint + " HTTP/1.1"); 
   httpPost.print("Host: "); httpPost.println(proxmox_log_server);
   httpPost.println("Content-Type: application/json"); 
   httpPost.print("Content-Length: "); httpPost.println(postData.length());
-  httpPost.println("Connection: close
-"); 
+  httpPost.println("Connection: close\r\n"); 
   httpPost.print(postData);
 
   unsigned long deadline = millis() + 400; 
