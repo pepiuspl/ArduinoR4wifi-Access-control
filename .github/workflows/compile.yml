@@ -8,6 +8,10 @@ on:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    
+    # 🌟 CRITICAL FIX: Unlocks write permissions so the runner can publish the .bin file
+    permissions:
+      contents: write
 
     steps:
     # 1. Pull down your C++ source code files from the private repo
@@ -37,7 +41,6 @@ jobs:
     # 5. Hyper-Robust Workspace Assembly & Compilation
     - name: Compile Firmware to Binary
       run: |
-        # Search recursively to locate the true path of the .ino file
         INO_FILE=$(find . -name "*.ino" | head -n 1)
         if [ -z "$INO_FILE" ]; then
           echo "❌ ERROR: No .ino file found anywhere in this repository layout!"
@@ -49,19 +52,12 @@ jobs:
         echo "🎯 Target sketch file found: $INO_FILE"
         echo "⚙️ Creating clean workspace folder named: $SKETCH_NAME"
         
-        # Force a clean workspace matching the filename rules
         mkdir -p "$SKETCH_NAME"
-        
-        # Copy the main code file into it matching the folder name perfectly
         cp "$INO_FILE" "$SKETCH_NAME/$SKETCH_NAME.ino"
-        
-        # Safely pull any supporting header files or config blocks from its source directory
         cp "$SKETCH_DIR"/*.h "$SKETCH_NAME"/ 2>/dev/null || true
         cp "$SKETCH_DIR"/*.cpp "$SKETCH_NAME"/ 2>/dev/null || true
         
-        # Compile out of this perfectly normalized temporary path
         mkdir -p build
-        # 🌟 FIXED: Changed board flag string assignment to unor4wifi
         arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi --output-dir ./build "./$SKETCH_NAME"
 
     # 6. Rename the output file dynamically to match your server's naming convention
