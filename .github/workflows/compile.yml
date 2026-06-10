@@ -63,6 +63,11 @@ jobs:
         mkdir -p build
         arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi --output-dir ./build "./$SKETCH_NAME"
 
+    - name: Debug Build Output
+      run: |
+        echo "==== BUILD FILES ===="
+        find ./build -type f
+
     # 6. Rename the output file dynamically to match your server's naming convention
     - name: Package Update Asset
       run: |
