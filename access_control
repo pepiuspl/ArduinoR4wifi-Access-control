@@ -14,7 +14,7 @@
 #include <ArduinoOTA.h> 
 
 // --- VERSION CONTROL SNAPSHOT ---
-const char* app_version = "v2.9.2 - Reactive Core Cloud Solution";
+const char* app_version = "v2.9.3 - Cloud Solution";
 
 // --- USER DATABASE STRUCTURES ---
 struct User {
