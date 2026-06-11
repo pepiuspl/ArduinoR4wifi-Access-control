@@ -1,4 +1,4 @@
-name: Node.js Automated Production Deployment (Pure Native)
+name: Node.js Automated Production Deployment (Ultra Debug Mode)
 
 on:
   push:
@@ -13,26 +13,95 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository code
+      - name: "01. [Lokalny] Pobieranie kodu z repozytorium GitHub"
         uses: actions/checkout@v4
 
-      - name: Setup SSH Key on Runner
+      - name: "02. [Lokalny] Sprawdzenie obecności pliku źródłowego"
+        run: |
+          echo "🔍 Szukam pliku Server_app/server.js..."
+          if [ -f "Server_app/server.js" ]; then
+            echo "✅ Plik istnieje. Rozmiar:"
+            ls -lh Server_app/server.js
+          else
+            echo "❌ BŁĄD: Nie znaleziono pliku Server_app/server.js w repozytorium!"
+            exit 1
+          fi
+
+      - name: "03. [Lokalny] Tworzenie katalogu .ssh"
+        run: |
+          mkdir -p ~/.ssh
+          echo "✅ Katalog ~/.ssh został utworzony."
+
+      - name: "04. [Lokalny] Wstrzykiwanie klucza prywatnego SSH"
         env:
           PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
         run: |
-          mkdir -p ~/.ssh
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "❌ BŁĄD: Sekret SERVER_SSH_KEY jest pusty!"
+            exit 1
+          fi
           echo "$PRIVATE_KEY" > ~/.ssh/id_ed25519
+          echo "✅ Klucz prywatny został zapisany."
+
+      - name: "05. [Lokalny] Nadawanie uprawnień do klucza SSH"
+        run: |
           chmod 600 ~/.ssh/id_ed25519
-          echo "✅ Klucz SSH wstrzyknięty do maszyny GitHuba."
+          echo "✅ Zabezpieczono uprawnienia klucza (chmod 600)."
 
-      - name: Transfer server.js via Raw SSH Pipe
+      - name: "06. [Sieć] Test widoczności portu (Netcat)"
         run: |
-          echo "🚀 Przesyłam plik server.js..."
-          ssh -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "cat > /opt/smartlock-server/server.js" < Server_app/server.js
-          echo "✅ Plik pomyślnie zapisany na Proxmoxie!"
+          echo "🔍 Próba pukania na port 22044 hosta..."
+          nc -zv -w 10 ${{ secrets.SERVER_HOST }} 22044
+          echo "✅ Port 22044 reaguje na pakiety sieciowe."
 
-      - name: Execute Systemd Daemon Restart via Native SSH
+      - name: "07. [SSH] Test czystego logowania i autoryzacji klucza"
         run: |
-          echo "🔄 Wysyłam natywne polecenie restartu usługi przez SSH..."
-          ssh -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "systemctl restart smartlock"
-          echo "🎉 Sukces! Nowy kod produkcyjny przejął kontrolę bez pośredników."
+          echo "🔍 Próba wykonania pustego polecenia przez SSH..."
+          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✅ Serwer pomyślnie autoryzował klucz SSH i wpuścił użytkownika!'"
+
+      - name: "08. [Proxmox] Weryfikacja istnienia katalogu docelowego"
+        run: |
+          echo "🔍 Sprawdzam czy katalog /opt/smartlock-server istnieje na serwerze..."
+          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "mkdir -p /opt/smartlock-server && echo '✅ Katalog /opt/smartlock-server jest gotowy.'"
+
+      - name: "09. [Proxmox] Test uprawnień do zapisu w katalogu"
+        run: |
+          echo "🔍 Próba utworzenia pliku testowego na serwerze..."
+          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "touch /opt/smartlock-server/.write_test && rm /opt/smartlock-server/.write_test && echo '✅ Masz pełne uprawnienia do zapisu w tym folderze.'"
+
+      - name: "10. [Lokalny] Test pakowania archiwum TAR"
+        run: |
+          echo "🔍 Sprawdzam czy lokalny tar poprawnie kompresuje plik..."
+          tar -czf /tmp/test.tar.gz -C Server_app server.js
+          echo "✅ Test pakowania udany. Rozmiar paczki testowej:"
+          ls -lh /tmp/test.tar.gz
+
+      - name: "11. [Transfer] Przesyłanie i rozpakowywanie pliku (Tar Stream)"
+        run: |
+          echo "📦 Rozpoczynam właściwy przesył strumieniowy pliku server.js..."
+          tar -czf - -C Server_app server.js | ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "tar -xzf - -C /opt/smartlock-server"
+          echo "✅ Strumień zamknięty. Plik przetransferowany."
+
+      - name: "12. [Proxmox] Weryfikacja integralności przesłanego pliku"
+        run: |
+          echo "🔍 Sprawdzam czy server.js fizycznie dotarł i czy zawiera nasz nowy endpoint..."
+          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "grep -n '/api/firmware/version' /opt/smartlock-server/server.js"
+          echo "✅ SUKCES: Nowy kod fizycznie znajduje się na Proxmoxie!"
+
+      - name: "13. [Proxmox] Sprawdzenie obecności usługi Systemd"
+        run: |
+          echo "🔍 Sprawdzam czy usługa 'smartlock' jest zarejestrowana w systemie..."
+          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "systemctl status smartlock --no-pager | head -n 5"
+
+      - name: "14. [Proxmox] Wykonanie restartu usługi smartlock"
+        run: |
+          echo "🔄 Wydaję polecenie: systemctl restart smartlock..."
+          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "systemctl restart smartlock"
+          echo "✅ Polecenie restartu zostało przetworzone przez systemd."
+
+      - name: "15. [Proxmox] Weryfikacja końcowa statusu po restarcie"
+        run: |
+          echo "🔍 Sprawdzam czy usługa wstała poprawnie i działa (Active: active)..."
+          sleep 2
+          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "systemctl is-active smartlock"
+          echo "🎉 GRATULACJE! Pełny proces wdrożenia zakończony stuprocentowym sukcesem!"
