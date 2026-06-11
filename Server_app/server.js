@@ -353,7 +353,7 @@ CTRLABLE Core Engineering Team`,
         writeToLocalLogFile('Settings Update', `Relaying fresh Wi-Fi configuration profiles down to lock node: ${targetIp}`);
 
         const syncSuccess = await syncMutationToHardware(targetIp, `/api/save_settings?s=${encodeURIComponent(wifiSSID)}&p=${encodeURIComponent(wifiPass)}&pass=${HARDWARE_OTA_PASS}`);
-        return sendJSON(res, 200, { status: "ok", hardwareSynced: success });
+        return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
 
       if (pathname === '/api/unlock' && req.method === 'GET') {
