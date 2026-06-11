@@ -57,7 +57,7 @@ jobs:
       - name: "07. [SSH] Test czystego logowania i autoryzacji klucza"
         run: |
           echo "🔍 Próba wykonania pustego polecenia przez SSH..."
-          ssh -T -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "echo '✅ Serwer pomyślnie autoryzował klucz SSH i wpuścił użytkownika!'"
+          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'echo ✅ Wpuszczono!'"
 
       - name: "08. [Proxmox] Weryfikacja istnienia katalogu docelowego"
         run: |
