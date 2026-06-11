@@ -5,8 +5,8 @@ on:
     branches:
       - main  # Zmień na master, jeśli tak nazywa się Twoja główna gałąź
     paths:
-      - 'Server_app/server.js' # 🌟 TRIGGER: Odpali się TYLKO, gdy zmieni się ten konkretny plik!
-  workflow_dispatch: # 🌟 RĘCZNY URUCHAMIACZ: Dodaje przycisk "Run workflow" na GitHubie!
+      - 'Server_app/server.js'
+  workflow_dispatch: # Przycisk ręcznego uruchamiania na GitHubie
 
 jobs:
   deploy:
@@ -16,16 +16,16 @@ jobs:
       - name: Checkout repository code
         uses: actions/checkout@v4
 
-      - name: Copy ONLY server.js to Proxmox via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: 22044
-          source: "Server_app/server.js" # 🔒 PEŁNA IZOLACJA: Kopiuje wyłącznie ten jeden plik! app.js zostaje bezpieczny na GitHubie
-          target: "/opt/smartlock-server"
-          strip_components: 1  # Usuwa katalog "Server_app/" z docelowej ścieżki
+      - name: Setup SSH Key on Runner
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Copy server.js via Verbose Native SCP
+        run: |
+          echo "📦 Rozpoczynam bezpośredni transfer pliku..."
+          scp -v -P 22044 -o StrictHostKeyChecking=no Server_app/server.js ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/smartlock-server/server.js
 
       - name: Execute Systemd Daemon Restart over SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -35,6 +35,6 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22044
           script: |
-            echo "🔄 Plik dostarczony na Proxmox. Restartowanie daemona smartlock..."
+            echo "🔄 Plik zaktualizowany. Restartowanie daemona smartlock..."
             systemctl restart smartlock
             echo "✅ Gotowe! Nowy kod produkcyjny został załadowany."
