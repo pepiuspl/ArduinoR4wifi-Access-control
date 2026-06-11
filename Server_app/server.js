@@ -41,7 +41,8 @@ if (!fs.existsSync(logDirectory)) {
 
 function writeToLocalLogFile(module, message) {
   const timestamp = new Date().toISOString();
-  const rawLogLine = `[${timestamp}] [${module}] ${message}\n`;
+  const rawLogLine = `[${timestamp}] [${module}] ${message}
+`;
   fs.appendFile(localLogFile, rawLogLine, (err) => {
     if (err) console.error(`[Logging Fault] Failed to write to disk: ${err.message}`);
   });
@@ -202,7 +203,14 @@ const server = http.createServer(async (req, res) => {
           from: '"CTRLABLE Node System" <node@ctrlable.pl>', 
           to: cleanEmail,
           subject: '🔒 CTRLABLE Node Temporary Password Token',
-          text: `Dzień dobry,\n\nTwoje tymczasowe hasło dostępowe do systemu CTRLABLE Node to: ${dynamicTemporaryToken}\n\nZmień je po zalogowaniu w sekcji ustawień.\n\nPozdrawiamy,\nCTRLABLE Core Engineering Team`,
+          text: `Dzień dobry,
+
+Twoje tymczasowe hasło dostępowe do systemu CTRLABLE Node to: ${dynamicTemporaryToken}
+
+Zmień je po zalogowaniu w sekcji ustawień.
+
+Pozdrawiamy,
+CTRLABLE Core Engineering Team`,
           html: `<p>Dzień dobry,</p><p>Twoje tymczasowe hasło dostępowe do systemu <strong>CTRLABLE Node</strong> to: <strong><code>${dynamicTemporaryToken}</code></strong></p><p>Zmień je po zalogowaniu w sekcji ustawień aplikacji mobilnej.</p>`
         };
 
@@ -257,7 +265,7 @@ const server = http.createServer(async (req, res) => {
           total: processedUsersList.length,
           users: processedUsersList, 
           logs: localizedLogsFeed,
-          version: primaryDevice.firmware_version || '2.9.4' // Dodano przekazywanie wersji do aplikacji mobilnej
+          version: primaryDevice.firmware_version || '2.9.4'
         });
       }
 
@@ -345,7 +353,7 @@ const server = http.createServer(async (req, res) => {
         writeToLocalLogFile('Settings Update', `Relaying fresh Wi-Fi configuration profiles down to lock node: ${targetIp}`);
 
         const syncSuccess = await syncMutationToHardware(targetIp, `/api/save_settings?s=${encodeURIComponent(wifiSSID)}&p=${encodeURIComponent(wifiPass)}&pass=${HARDWARE_OTA_PASS}`);
-        return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
+        return sendJSON(res, 200, { status: "ok", hardwareSynced: success });
       }
 
       if (pathname === '/api/unlock' && req.method === 'GET') {
@@ -394,10 +402,15 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // 🌟 ODBUDOWANY, DYNAMICZNY STRUMIEŃ BINARNY DLA ARDUINO (PULL OTA)
-      if (pathname === '/api/firmware/latest' && req.method === 'GET') {
+      // 🌟 ENDPOINT DLA TELEFONU: SPRAWDZANIE NAJNOWSZEJ WERSJI (ZWRACA JSON)
+      if (pathname === '/api/firmware/version' && req.method === 'GET') {
         const fwContext = getLatestFirmwareContext();
         return sendJSON(res, 200, { latestVersion: fwContext.version });
+      }
+
+      // 🌟 ENDPOINT DLA ARDUINO: STRUMIEŃ BINARNY PLIKU FIRMWARE (PULL OTA)
+      if (pathname === '/api/firmware/latest' && req.method === 'GET') {
+        const fwContext = getLatestFirmwareContext();
         
         if (!fwContext.filename) {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
