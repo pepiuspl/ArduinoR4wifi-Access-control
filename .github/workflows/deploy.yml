@@ -1,4 +1,4 @@
-name: Node.js Automated Production Deployment
+name: Node.js Automated Production Deployment (Final)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - main  # Zmień na master, jeśli tak nazywa się Twoja główna gałąź
     paths:
       - 'Server_app/server.js'
-  workflow_dispatch: # Przycisk ręcznego uruchamiania na GitHubie
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -22,10 +22,14 @@ jobs:
           echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
-      - name: Copy server.js via Verbose Native SCP
+          # Dodanie hosta do zaufanych, aby zapobiec przerwaniu sesji
+          ssh-keyscan -p 22044 ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Transfer server.js via Raw SSH Pipe
         run: |
-          echo "📦 Rozpoczynam bezpośredni transfer pliku..."
-          scp -v -P 22044 -o StrictHostKeyChecking=no Server_app/server.js ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/smartlock-server/server.js
+          echo "🚀 Przesyłam plik server.js bezpośrednio przez strumień tekstowy SSH..."
+          ssh -p 22044 -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "cat > /opt/smartlock-server/server.js" < Server_app/server.js
+          echo "✅ Plik został pomyślnie zapisany na Proxmoxie!"
 
       - name: Execute Systemd Daemon Restart over SSH
         uses: appleboy/ssh-action@v1.0.3
@@ -35,6 +39,6 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22044
           script: |
-            echo "🔄 Plik zaktualizowany. Restartowanie daemona smartlock..."
+            echo "🔄 Restartowanie daemona smartlock w systemd..."
             systemctl restart smartlock
-            echo "✅ Gotowe! Nowy kod produkcyjny został załadowany."
+            echo "🎉 Sukces! Nowy kod produkcyjny przejął kontrolę."
