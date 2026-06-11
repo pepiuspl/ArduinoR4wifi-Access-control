@@ -398,7 +398,7 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/firmware/latest' && req.method === 'GET') {
         const fwContext = getLatestFirmwareContext();
         return sendJSON(res, 200, { latestVersion: fwContext.version });
-      }  
+        
         if (!fwContext.filename) {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
           return res.end('No firmware files available on server');
