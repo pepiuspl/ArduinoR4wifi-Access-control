@@ -800,8 +800,8 @@ void executeCloudSynchronization() {
     return; 
   } 
   lastSuccessfulPollTime = millis(); 
-  String macStr = WiFi.macAddress();
-  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0"); 
+  String macStr = getMacAddressString();
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0");
   httpCheck.println("GET " + pollPath + " HTTP/1.1"); 
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server); 
   httpCheck.println("Connection: close\r\n"); 
@@ -840,7 +840,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   httpPost.setTimeout(400); 
   if (!httpPost.connect(proxmox_log_server, proxmox_log_port)) return; 
   String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan"; 
-  String macStr = WiFi.macAddress();
+  String macStr = getMacAddressString(); // <--- Zmiana na nową funkcję
   String postData = runRegister ? 
     "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\",\"name\":\"" + pendingUsername + "\",\"slot\":" + String(totalCards > 0 ? totalCards - 1 : 0) + "}" : 
     "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\"}"; 
@@ -864,7 +864,14 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 void setup() { 
   Serial.begin(9600); 
   delay(1500); 
-  pinMode(BUTTON_PIN, INPUT_PULLUP); 
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  String getMacAddressString() {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char macBuf[18];
+    sprintf(macBuf, "%02X:%02X:%02X:%02X:%02X:%02X", mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]);
+    return String(macBuf);
+  } 
   loadConfiguration(); 
   loadCards(); 
   if (digitalRead(BUTTON_PIN) == LOW) { 

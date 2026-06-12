@@ -197,74 +197,15 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { auth: true, accountId: result.rows[0].id });
       }
 
-      // =========================================================================
-      // KROK 1: ZGŁOSZENIE PROŚBY O RESET (WYSYŁKA 6-CYFROWEGO KODU)
-      // =========================================================================
       if (pathname === '/api/auth/forgot_password' && req.method === 'POST') {
         const cleanEmail = body.email ? body.email.trim().toLowerCase() : '';
         if (!cleanEmail) return sendJSON(res, 400, { error: "Target email missing" });
 
         const checkAccount = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [cleanEmail]);
         if (checkAccount.rows.length === 0) {
-          return sendJSON(res, 200, { status: "processed" }); // Bezpieczeństwo: nie zdradzamy czy email istnieje
+          writeToLocalLogFile('Reset System', `Password reset requested for non-existent user: ${cleanEmail}`);
+          return sendJSON(res, 200, { status: "processed" });
         }
-
-        // Generujemy 6-cyfrowy bezpieczny kod zabezpieczający
-        const secureCode = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        // Zapisujemy TOKEN i czas wygaśnięcia (15 minut), stare hasło pozostaje nienaruszone!
-        await dbPool.query(
-          `UPDATE accounts 
-           SET reset_token = $1, reset_token_expires = NOW() + INTERVAL '15 minutes'
-           WHERE email = $2`,
-          [secureCode, cleanEmail]
-        );
-
-        const automatedMailManifest = {
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>', 
-          to: cleanEmail,
-          subject: 'Kod autoryzacyjny resetu hasła CTRLABLE',
-          html: `<h3>Twój kod weryfikacyjny:</h3>
-                 <h1 style="color:#0284c7; font-family:monospace; letter-spacing:2px;">${secureCode}</h1>
-                 <p>Kod jest ważny przez 15 minut. Jeśli nie prosiłeś o reset hasła, możesz bezpiecznie zignorować tę wiadomość.</p>`
-        };
-        
-        mailTransport.sendMail(automatedMailManifest, (mailError, info) => {
-          if (mailError) writeToLocalLogFile('Reset SMTP Fail', mailError.message);
-        });
-
-        return sendJSON(res, 200, { status: "processed" });
-      }
-
-      // =========================================================================
-      // KROK 2: POTWIERDZENIE KODU I ZMIANA HASŁA NA NOWE
-      // =========================================================================
-      if (pathname === '/api/auth/confirm_password_reset' && req.method === 'POST') {
-        const { email, code, newPassword } = body;
-        if (!email || !code || !newPassword) return sendJSON(res, 400, { error: "Missing parameters" });
-
-        const cleanEmail = email.trim().toLowerCase();
-        
-        // Sprawdzamy token i czy nie wygasł czas ważności
-        const userRes = await dbPool.query(
-          'SELECT id FROM accounts WHERE email = $1 AND reset_token = $2 AND reset_token_expires > NOW()',
-          [cleanEmail, code]
-        );
-
-        if (userRes.rows.length === 0) {
-          return sendJSON(res, 400, { error: "Kod jest nieprawidłowy lub wygasł" });
-        }
-
-        // Kod jest poprawny -> Dopiero teraz bezpiecznie generujemy hash nowego hasła
-        const hash = await bcrypt.hash(newPassword, 10);
-        await dbPool.query(
-          'UPDATE accounts SET password_hash = $1, reset_token = null, reset_token_expires = null WHERE id = $2',
-          [hash, userRes.rows[0].id]
-        );
-
-        writeToLocalLogFile('Reset System', `Hasło zostało pomyślnie zmienione dla: ${cleanEmail}`);
-        return sendJSON(res, 200, { success: true });
-      }
 
         const dynamicTemporaryToken = Math.random().toString(36).slice(-8);
         const tokenHash = await bcrypt.hash(dynamicTemporaryToken, 10);
@@ -374,7 +315,7 @@ Zespół CTRLABLE`,
           auth: true,
           account: appAccountContext, 
           mode: primaryDevice.operational_mode,
-          lock: (actualLockStates[primaryMac] || false),
+          lock: (unlockQueues[primaryMac] || false),
           total: processedUsersList.length,
           users: processedUsersList, 
           logs: localizedLogsFeed,
