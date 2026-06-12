@@ -13,6 +13,10 @@ const nodemailer = require('nodemailer');
 const HARDWARE_OTA_USER = 'admin';
 const HARDWARE_OTA_PASS = 'admin'; 
 
+const GITHUB_PAT = "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"; 
+const GITHUB_USER = "pepiuspl";
+const GITHUB_REPO = "ArduinoR4wifi-Access-control";
+
 // 🗄️ CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
 const dbPool = new Pool({
   user: 'admin',
@@ -325,7 +329,8 @@ const server = http.createServer(async (req, res) => {
           total: processedUsersList.length,
           users: processedUsersList, 
           logs: localizedLogsFeed,
-          version: primaryDevice.firmware_version || '2.9.4'
+          version: primaryDevice.firmware_version || latestFirmwareVersion,
+          otaPending: otaUpdatePending,
         });
       }
 
@@ -486,44 +491,121 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // =========================================================================
-      // POBIERANIE WERSJI FIRMWARE DLA SMARTFONA
-      // =========================================================================
+      // UPDATE LOGC 
+
+      let otaUpdatePending = false;
+      let latestFirmwareVersion = "2.9.4";
+      const updatesDir = '/opt/smartlock-server/updates';
+
+      if (!fs.existsSync(updatesDir)) {
+        fs.mkdirSync(updatesDir, { recursive: true });
+      }
+
+      // UPDATE LOGIC -- CHECK NEW PACKAGES
+
       if (pathname === '/api/firmware/version' && req.method === 'GET') {
-        const fwContext = getLatestFirmwareContext();
-        return sendJSON(res, 200, { latestVersion: fwContext.version });
-      }
-
-      // =========================================================================
-      // STRUMIEŃ BINARNY FIRMWARE DLA AKTUALIZACJI OTA ARDUINO
-      // =========================================================================
-      if (pathname === '/api/firmware/latest' && req.method === 'GET') {
-        const fwContext = getLatestFirmwareContext();
-        
-        if (!fwContext.filename) {
-          res.writeHead(404, { 'Content-Type': 'text/plain' });
-          return res.end('No firmware files available on server');
+        const options = {
+        hostname: 'api.github.com',
+        path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
+        headers: { 
+            'User-Agent': 'NodeJS-SmartLock-Server',
+            'Authorization': `token ${GITHUB_PAT}`
         }
+      };
 
-        const filePath = path.join('/opt/smartlock-server/updates', fwContext.filename);
-        if (fs.existsSync(filePath)) {
-          const stat = fs.statSync(filePath);
-          
-          writeToLocalLogFile('OTA Stream Engine', `Streaming structural binary packet: ${fwContext.filename} (${stat.size} bytes) to lock node IP: ${cleanIp}`);
-          
-          res.writeHead(200, {
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': stat.size,
-            'X-Firmware-Version': fwContext.version
+    https.get(options, (githubRes) => {
+        let data = '';
+        githubRes.on('data', (chunk) => data += chunk);
+        githubRes.on('end', () => {
+            try {
+                const release = JSON.parse(data);
+                if (release.message === "Not Found") return sendJSON(res, 404, { error: "Repozytorium lub wydanie nie odnalezione. Sprawdź token." });
+                
+                latestFirmwareVersion = release.tag_name;
+                return sendJSON(res, 200, { latestVersion: latestFirmwareVersion });
+            } catch (e) {
+                return sendJSON(res, 500, { error: "Błąd parsowania danych z GitHub API" });
+            }
           });
+        }).on('error', () => sendJSON(res, 500, { error: "Błąd połączenia z GitHub" }));
+    }
 
-          const readStream = fs.createReadStream(filePath);
-          return readStream.pipe(res);
-        } else {
-          res.writeHead(404, { 'Content-Type': 'text/plain' });
-          return res.end('Firmware file target missing from filesystem');
+    // UPDATE LOGIC -- GET NEW PACKAGE
+
+    if (pathname === '/api/ota/push' && req.method === 'POST') {
+      const options = {
+        hostname: 'api.github.com',
+        path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
+        headers: { 
+            'User-Agent': 'NodeJS-SmartLock-Server',
+            'Authorization': `token ${GITHUB_PAT}`
         }
-      }
+    };
+
+    https.get(options, (githubRes) => {
+        let data = '';
+        githubRes.on('data', (chunk) => data += chunk);
+        githubRes.on('end', () => {
+            try {
+                const release = JSON.parse(data);
+                const binAsset = release.assets.find(asset => asset.name.endsWith('.bin'));
+                
+                if (!binAsset) return sendJSON(res, 404, { error: "Brak pliku .bin w tym wydaniu." });
+
+                // 🌟 Dla prywatnych repozytoriów uderzamy w endpoint ID zasobu z odpowiednim nagłówkiem Accept
+                const downloadOptions = {
+                    hostname: 'api.github.com',
+                    path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${binAsset.id}`,
+                    headers: {
+                        'User-Agent': 'NodeJS-SmartLock-Server',
+                        'Authorization': `token ${GITHUB_PAT}`,
+                        'Accept': 'application/octet-stream' // Wymuszenie strumienia binarnego
+                    }
+                };
+
+                const file = fs.createWriteStream(path.join(updatesDir, 'firmware.bin'));
+                
+                https.get(downloadOptions, (fileRes) => {
+                    // GitHub przekieruje nas (302) do zaszyfrowanej, bezpiecznej przestrzeni AWS S3
+                    if (fileRes.statusCode === 302) {
+                        // Przy przekierowaniu AWS S3 nie wolno przesyłać nagłówka "Authorization", 
+                        // dlatego czysty https.get(url) bez dodatkowych obiektów konfiguracyjnych jest tu idealny
+                        https.get(fileRes.headers.location, (redirectRes) => {
+                            redirectRes.pipe(file);
+                            file.on('finish', () => {
+                                file.close();
+                                otaUpdatePending = true;
+                                return sendJSON(res, 200, { success: true, message: "Prywatna paczka pobrana pomyślnie." });
+                            });
+                        });
+                    } else {
+                        fileRes.pipe(file);
+                        file.on('finish', () => {
+                            file.close();
+                            otaUpdatePending = true;
+                            return sendJSON(res, 200, { success: true });
+                        });
+                    }
+                });
+            } catch (e) {
+                return sendJSON(res, 500, { error: "Inicjalizacja pobierania nieudana." });
+            }
+        });
+    });
+  }
+      // Return .bin file
+
+      if (pathname === '/updates/firmware.bin' && req.method === 'GET') {
+    const filePath = path.join(updatesDir, 'firmware.bin');
+    if (fs.existsSync(filePath)) {
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+        fs.createReadStream(filePath).pipe(res);
+        otaUpdatePending = false;
+    } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('404 Not Found');
+    }
+}
 
       // =========================================================================
       // PROVISIONING: PAROWANIE KOLEJNYCH NOWYCH ZAMKÓW W BAZIE POPRZEZ ADRES MAC

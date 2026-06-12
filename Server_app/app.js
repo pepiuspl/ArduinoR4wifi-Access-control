@@ -286,7 +286,7 @@ export default function App() {
     setSettingsSsid('');
   };
 
-  // 💾 LOGIKA WYKRYWANIA I ANALIZY AKTUALIZACJI OTA
+  //LOGIKA WYKRYWANIA I ANALIZY AKTUALIZACJI OTA
   const handleCheckUpdate = () => {
     setOtaState('checking');
     fetch(`${backendUrl}/api/firmware/version`)
@@ -300,13 +300,18 @@ export default function App() {
         
         if (currentVer === latestVer) {
           setOtaState('up-to-date');
+          
+          setTimeout(() => {
+            setOtaState('idle');
+          }, 5000);
+
         } else {
           setOtaState('available');
         }
       })
       .catch(() => {
         setOtaState('idle');
-        Alert.alert('Błąd systemu', 'Nie udało się pobrać danych o plikach binarnych z Proxmoxa.');
+        Alert.alert('Błąd systemu', 'Nie udało się pobrać danych o plikach binarnych z Serwera.');
       });
   };
 
