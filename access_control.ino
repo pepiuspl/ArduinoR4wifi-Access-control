@@ -119,6 +119,7 @@ int globalAnimFrame = 0;
 unsigned long lastFrameTick = 0; 
 
 bool blockTelemetry = false;
+bool systemWasOnline = false;
 
 String urlDecode(String str) { 
   String decoded = ""; 
@@ -327,6 +328,8 @@ void renderSystemUI() {
   display.setTextSize(1); 
   display.setCursor(4, 56);
   if (WiFi.status() == WL_CONNECTED) { 
+    systemWasOnline = true;
+    timeClient.begin();
     display.print("ONLINE");
   } else if (isOfflineStandby) { 
     display.print("AP: SETUP"); 
@@ -981,11 +984,14 @@ void loop() {
 
   if (isOfflineStandby) { 
     handleProvisioningServer();
-    if (millis() - lastWifiRetryTime > 60000) { 
+    
+    // Watchdog sprawdzi sieć tylko, jeśli system był wcześniej pomyślnie online
+    if (systemWasOnline && (millis() - lastWifiRetryTime > 60000)) { 
       lastWifiRetryTime = millis(); 
       updateDisplay("RESCUE WATCHDOG", "Sprawdzam Wi-Fi...");
       WiFi.begin(ssid, pass); 
-      unsigned long checkStart = millis(); 
+      unsigned long checkStart = millis();
+      
       while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) { 
         delay(200);
       } 
@@ -1010,6 +1016,7 @@ void loop() {
         displayProvisioningInstructions("ERR: REKONEKCJA FAIL"); 
       } 
     } 
+  } 
   } else { 
     handleWebServer();
     if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) { 
