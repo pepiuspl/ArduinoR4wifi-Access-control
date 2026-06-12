@@ -11,11 +11,15 @@ const nodemailer = require('nodemailer');
 // =========================================================================
 
 const HARDWARE_OTA_USER = 'admin';
-const HARDWARE_OTA_PASS = 'admin'; 
+const HARDWARE_OTA_PASS = 'admin';
 
 const GITHUB_PAT = "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"; 
 const GITHUB_USER = "pepiuspl";
 const GITHUB_REPO = "ArduinoR4wifi-Access-control";
+
+let otaUpdatePending = false;
+let latestFirmwareVersion = "2.9.4";
+const updatesDir = '/opt/smartlock-server/updates';
 
 // 🗄️ CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
 const dbPool = new Pool({
@@ -493,10 +497,7 @@ const server = http.createServer(async (req, res) => {
 
       // UPDATE LOGC 
 
-      let otaUpdatePending = false;
-      let latestFirmwareVersion = "2.9.4";
-      const updatesDir = '/opt/smartlock-server/updates';
-
+      
       if (!fs.existsSync(updatesDir)) {
         fs.mkdirSync(updatesDir, { recursive: true });
       }
