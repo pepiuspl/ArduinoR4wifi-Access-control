@@ -202,16 +202,50 @@ const server = http.createServer(async (req, res) => {
         const automatedMailManifest = {
           from: '"CTRLABLE Node System" <node@ctrlable.pl>', 
           to: cleanEmail,
-          subject: '🔒 CTRLABLE Node Temporary Password Token',
+          subject: 'CTRLABLE Node Tymczasowo Wygenerowane Hasło',
           text: `Dzień dobry,
 
-Twoje tymczasowe hasło dostępowe do systemu CTRLABLE Node to: ${dynamicTemporaryToken}
+Otrzymaliśmy prośbę o zresetowanie hasła do Twojego konta w systemie CTRLABLE Node. 
 
-Zmień je po zalogowaniu w sekcji ustawień.
+Twoje nowe, tymczasowe hasło dostępowe to:
+${dynamicTemporaryToken}
 
-Pozdrawiamy,
-CTRLABLE Core Engineering Team`,
-          html: `<p>Dzień dobry,</p><p>Twoje tymczasowe hasło dostępowe do systemu <strong>CTRLABLE Node</strong> to: <strong><code>${dynamicTemporaryToken}</code></strong></p><p>Zmień je po zalogowaniu w sekcji ustawień aplikacji mobilnej.</p>`
+Ważne: Po zalogowaniu do naszej aplikacji mobilnej, przejdź do sekcji "Ustawienia" i natychmiast zmień hasło na własne.
+
+Jeśli to nie Ty prosiłeś o reset hasła, możesz bezpiecznie zignorować tę wiadomość. 
+
+Pozdrawiamy serdecznie,
+Zespół CTRLABLE`,
+          html: `<div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; color: #333333; line-height: 1.6;">
+  
+  <div style="padding: 20px 0; text-align: center;">
+    <h2 style="color: #2c3e50; margin-bottom: 0;">Reset hasła w CTRLABLE Node 🔐</h2>
+  </div>
+
+  <div style="background-color: #f9fafb; padding: 30px; border-radius: 8px; border: 1px solid #e5e7eb;">
+    <p style="margin-top: 0;">Dzień dobry,</p>
+    <p>Otrzymaliśmy prośbę o zresetowanie hasła do Twojego konta. Poniżej znajduje się Twoje nowe, tymczasowe hasło dostępowe:</p>
+
+    <div style="text-align: center; margin: 30px 0;">
+      <span style="display: inline-block; background-color: #e0f2fe; color: #0284c7; font-family: 'Courier New', Courier, monospace; font-size: 22px; padding: 12px 24px; border-radius: 6px; letter-spacing: 2px; font-weight: bold; border: 1px solid #bae6fd;">
+        ${dynamicTemporaryToken}
+      </span>
+    </div>
+
+    <p>
+      <strong>🔒 Co dalej?</strong> Po pomyślnym zalogowaniu do naszej aplikacji mobilnej, przejdź do sekcji <em>Ustawienia</em> i natychmiast zmień hasło na własne.
+    </p>
+
+    <p style="margin-bottom: 0; font-size: 13px; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 15px; margin-top: 20px;">
+      Jeśli to nie Ty prosiłeś o reset hasła, możesz bezpiecznie zignorować tę wiadomość. Twoje obecne hasło pozostanie niezmienione do momentu użycia powyższego kodu.
+    </p>
+  </div>
+
+  <div style="margin-top: 20px; font-size: 14px; color: #6b7280; text-align: center;">
+    <p>Pozdrawiamy serdecznie,<br><strong style="color: #374151;">Zespół CTRLABLE</strong></p>
+  </div>
+
+</div>`
         };
 
         mailTransport.sendMail(automatedMailManifest, (mailError, info) => {
