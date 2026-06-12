@@ -524,7 +524,8 @@ const server = http.createServer(async (req, res) => {
                 if (release.message === "Not Found") return sendJSON(res, 404, { error: "Repozytorium lub wydanie nie odnalezione. Sprawdź token." });
                 
                 latestFirmwareVersion = release.tag_name;
-                return sendJSON(res, 200, { latestVersion: latestFirmwareVersion });
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ latestVersion: latestFirmwareVersion }));
             } catch (e) {
                 return sendJSON(res, 500, { error: "Błąd parsowania danych z GitHub API" });
             }

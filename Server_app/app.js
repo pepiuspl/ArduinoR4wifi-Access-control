@@ -295,7 +295,7 @@ export default function App() {
         return res.json();
       })
       .then((data) => {
-        const currentVer = lockState.version.replace('v', '').trim();
+        const currentVer = (lockState.version || '0.0.0').replace('v', '').trim();
         const latestVer = data.latestVersion.replace('v', '').trim();
         
         if (currentVer === latestVer) {
