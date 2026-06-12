@@ -33,7 +33,8 @@ export default function App() {
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
 
   // 💾 STAN OBSŁUGI AKTUALIZACJI OTA
-  const [otaState, setOtaState] = useState('idle'); // idle, checking, up-to-date, available
+  const [otaState, setOtaState] = useState('idle'); 
+  const [latestVersion, setLatestVersion] = useState('');
 
   const [lockState, setLockState] = useState({ 
     auth: false, 
@@ -125,6 +126,7 @@ export default function App() {
         return res.json();
       })
       .then((data) => {
+        setLatestVersion(data.latestVersion);
         setIsAuthenticating(false);
         if (data.status === 'registered') {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
