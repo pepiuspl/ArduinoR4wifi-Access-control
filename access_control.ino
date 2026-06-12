@@ -11,6 +11,9 @@
 #include <ArduinoOTA.h>
 #include <WDT.h>  
 
+unsigned long lastOtaCheck = 0;
+const unsigned long otaInterval = 10000;
+
 const char* app_version = "v2.9.4";
 
 struct User { 
@@ -889,28 +892,25 @@ void performLocalFirmwareUpdate() {
 
 void checkOtaStatusFromServer() {
   WiFiClient client;
-
+  
   if (client.connect("192.168.0.200", 3000)) {
-    client.setTimeout(5000);
+    client.setTimeout(1000);
+    
     client.print("GET /api/lock/ota-check HTTP/1.1\r\n");
     client.print("Host: 192.168.0.200\r\n");
     client.print("Connection: close\r\n\r\n");
     
-    // Pomijamy nagłówki HTTP, szukając pustej linii (\r\n), po której leci właściwa treść
     while (client.connected()) {
       String line = client.readStringUntil('\n');
-      if (line == "\r") {
+      
+      if (line == "\r" || line == "\r\n" || line.length() == 0) {
         break;
       }
     }
     
-    // Czytamy ostatni, właściwy znak odpowiedzi z serwera ("0" lub "1")
     if (client.available()) {
       char response = client.read();
-      
-      // Jeśli serwer zwrócił "1", oznacza to, że użytkownik kliknął aktualizację w aplikacji!
       if (response == '1') {
-        // Wywołujemy funkcję pobierania pliku firmware.bin, którą przygotowaliśmy wcześniej
         performLocalFirmwareUpdate();
       }
     }
