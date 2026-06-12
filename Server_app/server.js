@@ -506,32 +506,46 @@ const server = http.createServer(async (req, res) => {
       // UPDATE LOGIC -- CHECK NEW PACKAGES
 
       if (pathname === '/api/firmware/version' && req.method === 'GET') {
-        const options = {
+    const options = {
         hostname: 'api.github.com',
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
         headers: { 
             'User-Agent': 'NodeJS-SmartLock-Server',
             'Authorization': `token ${GITHUB_PAT}`
         }
-      };
+    };
 
     https.get(options, (githubRes) => {
         let data = '';
         githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
+            // 🌟 LOG DIAGNOSTYCZNY: Zobaczymy status odpowiedzi z GitHuba w Twoim logu systemowym!
+            console.log(`[${new Date().toISOString()}] [GitHub API Link] Response status code: ${githubRes.statusCode}`);
+            
             try {
                 const release = JSON.parse(data);
-                if (release.message === "Not Found") return sendJSON(res, 404, { error: "Repozytorium lub wydanie nie odnalezione. Sprawdź token." });
+                
+                // Jeśli GitHub zwrócił cokolwiek innego niż status 200 OK
+                if (githubRes.statusCode !== 200) {
+                    console.log(`[${new Date().toISOString()}] [GitHub API Link] Error response message: ${release.message}`);
+                    res.writeHead(githubRes.statusCode, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ error: release.message }));
+                }
                 
                 latestFirmwareVersion = release.tag_name;
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ latestVersion: latestFirmwareVersion }));
             } catch (e) {
-                return sendJSON(res, 500, { error: "Błąd parsowania danych z GitHub API" });
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: "Blad parsowania JSON" }));
             }
-          });
-        }).on('error', () => sendJSON(res, 500, { error: "Błąd połączenia z GitHub" }));
-    }
+        });
+    }).on('error', (err) => {
+        console.log(`[${new Date().toISOString()}] [GitHub API Link] Connection error: ${err.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: "Blad polaczenia sieciowego" }));
+    });
+}
 
     // UPDATE LOGIC -- GET NEW PACKAGE
 
