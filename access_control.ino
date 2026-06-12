@@ -1038,7 +1038,7 @@ void setup() {
   } 
   lastRfidWatchdogTime = millis();
   lastFrameTick = millis();
-  
+
   if (WDT.begin(4000)) {
     WDT.refresh(); 
 } 
@@ -1238,4 +1238,4 @@ void loop() {
     digitalWrite(LED_RED, LOW); 
   }
   checkOtaStatusFromServer(); 
-}
+}}
