@@ -519,6 +519,7 @@ const server = http.createServer(async (req, res) => {
     const options = {
         hostname: 'api.github.com',
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
+        family: 4,
         headers: { 
             'User-Agent': 'NodeJS-SmartLock-Server',
             'Authorization': `token ${GITHUB_PAT}`
