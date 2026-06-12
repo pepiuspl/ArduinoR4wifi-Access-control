@@ -297,6 +297,9 @@ export default function App() {
         return res.json();
       })
       .then((data) => {
+        // 🌟 Zapisujemy numer wersji z GitHuba do stanu, aby użyć go w tekście UI
+        setLatestVersion(data.latestVersion);
+
         const currentVer = (lockState.version || '0.0.0').replace('v', '').trim();
         const latestVer = data.latestVersion.replace('v', '').trim();
         
@@ -314,6 +317,43 @@ export default function App() {
       .catch(() => {
         setOtaState('idle');
         Alert.alert('Błąd systemu', 'Nie udało się pobrać danych o plikach binarnych z Serwera.');
+      });
+  };
+
+  // ⚡ 2. URUCHOMIENIE PROCESU AKTUALIZACJI NODE ORAZ ZAMKA
+  const handleExecuteUpdate = () => {
+    // Informujemy klienta, że serwer Proxmox zaczął pobierać paczkę z AWS S3 GitHuba
+    setOtaState('downloading_server');
+
+    // Wysyłamy zapytanie GET, które widzieliśmy w logach serwera
+    fetch(`${backendUrl}/api/ota/push`, { method: 'GET' })
+      .then((res) => {
+        if (!res.ok) throw new Error();
+        return res.json();
+      })
+      .then((data) => {
+        if (data.success) {
+          // Serwer pobrał plik. Teraz informujemy, że zamek instaluje oprogramowanie z sieci LAN.
+          setOtaState('flashing_device');
+
+          // Dajemy zamkowi bezpieczne 20 sekund na pobranie pliku z Proxmoxa, flash wewnętrzny i hard-reset
+          setTimeout(() => {
+            setOtaState('success');
+            
+            // Po kolejnych 5 sekundach wracamy przyciskiem do stanu normalnego
+            setTimeout(() => {
+              setOtaState('idle');
+            }, 5000);
+          }, 20000); 
+
+        } else {
+          throw new Error();
+        }
+      })
+      .catch(() => {
+        // W razie błędu wracamy do opcji ponownego kliknięcia
+        setOtaState('available');
+        Alert.alert('Błąd aktualizacji', 'Serwer nie mógł pobrać stabilnego pliku binarnego z GitHuba.');
       });
   };
 
