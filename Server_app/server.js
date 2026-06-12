@@ -506,6 +506,17 @@ const server = http.createServer(async (req, res) => {
       // UPDATE LOGIC -- CHECK NEW PACKAGES
 
       if (pathname === '/api/firmware/version' && req.method === 'GET') {
+    const logFile = '/var/log/smartlock/smartlock_system.log';
+    
+    // Funkcja wymuszająca zapis bezpośrednio do Twojego pliku logów
+    const forceLog = (msg) => {
+        try {
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG GITHUB] ${msg}\n`);
+        } catch (e) {}
+    };
+
+    forceLog("Inicjalizacja bezpiecznego zapytania do GitHub API...");
+
     const options = {
         hostname: 'api.github.com',
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
@@ -515,35 +526,39 @@ const server = http.createServer(async (req, res) => {
         }
     };
 
-    https.get(options, (githubRes) => {
+    const githubReq = https.get(options, (githubRes) => {
         let data = '';
+        forceLog(`Odebrano odpowiedź z GitHuba. Kod statusu: ${githubRes.statusCode}`);
+        
         githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
-            // 🌟 LOG DIAGNOSTYCZNY: Zobaczymy status odpowiedzi z GitHuba w Twoim logu systemowym!
-            console.log(`[${new Date().toISOString()}] [GitHub API Link] Response status code: ${githubRes.statusCode}`);
-            
             try {
                 const release = JSON.parse(data);
                 
-                // Jeśli GitHub zwrócił cokolwiek innego niż status 200 OK
                 if (githubRes.statusCode !== 200) {
-                    console.log(`[${new Date().toISOString()}] [GitHub API Link] Error response message: ${release.message}`);
+                    forceLog(`GitHub odrzucił autoryzację. Powód: ${release.message}`);
                     res.writeHead(githubRes.statusCode, { 'Content-Type': 'application/json' });
                     return res.end(JSON.stringify({ error: release.message }));
                 }
                 
                 latestFirmwareVersion = release.tag_name;
+                forceLog(`Sukces! Najnowsza wersja na GitHubie to: ${latestFirmwareVersion}`);
+                
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ latestVersion: latestFirmwareVersion }));
             } catch (e) {
+                forceLog(`Błąd parsowania odpowiedzi JSON z GitHuba: ${e.message}`);
                 res.writeHead(500, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ error: "Blad parsowania JSON" }));
+                return res.end(JSON.stringify({ error: "Blad parsowania" }));
             }
         });
-    }).on('error', (err) => {
-        console.log(`[${new Date().toISOString()}] [GitHub API Link] Connection error: ${err.message}`);
+    });
+
+    githubReq.on('error', (err) => {
+        // 🌟 JEŚLI KONTENER NIE MA INTERNETU LUB FAILI DNS - TU POJAWI SIĘ WPIS
+        forceLog(`Krytyczny błąd sieciowy połączenia HTTPS: ${err.message}`);
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: "Blad polaczenia sieciowego" }));
+        return res.end(JSON.stringify({ error: err.message }));
     });
 }
 
