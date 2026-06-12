@@ -508,7 +508,6 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/firmware/version' && req.method === 'GET') {
     const logFile = '/var/log/smartlock/smartlock_system.log';
     
-    // Funkcja wymuszająca zapis bezpośrednio do Twojego pliku logów
     const forceLog = (msg) => {
         try {
             fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG GITHUB] ${msg}\n`);
@@ -537,29 +536,39 @@ const server = http.createServer(async (req, res) => {
                 
                 if (githubRes.statusCode !== 200) {
                     forceLog(`GitHub odrzucił autoryzację. Powód: ${release.message}`);
-                    res.writeHead(githubRes.statusCode, { 'Content-Type': 'application/json' });
-                    return res.end(JSON.stringify({ error: release.message }));
+                    if (!res.headersSent) {
+                        res.writeHead(githubRes.statusCode, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: release.message }));
+                    }
+                    return;
                 }
                 
                 latestFirmwareVersion = release.tag_name;
                 forceLog(`Sukces! Najnowsza wersja na GitHubie to: ${latestFirmwareVersion}`);
                 
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ latestVersion: latestFirmwareVersion }));
+                // Wysyłamy odpowiedź do aplikacji tylko, jeśli wątek główny jej nie uprzedził
+                if (!res.headersSent) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ latestVersion: latestFirmwareVersion }));
+                }
             } catch (e) {
                 forceLog(`Błąd parsowania odpowiedzi JSON z GitHuba: ${e.message}`);
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ error: "Blad parsowania" }));
+                if (!res.headersSent) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: "Blad parsowania" }));
+                }
             }
         });
     });
 
     githubReq.on('error', (err) => {
-        // 🌟 JEŚLI KONTENER NIE MA INTERNETU LUB FAILI DNS - TU POJAWI SIĘ WPIS
         forceLog(`Krytyczny błąd sieciowy połączenia HTTPS: ${err.message}`);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: err.message }));
+        if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+        }
     });
+    return; 
 }
 
     // UPDATE LOGIC -- GET NEW PACKAGE
