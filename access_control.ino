@@ -947,7 +947,9 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 
 void setup() { 
   Serial.begin(9600); 
-  delay(1500); 
+  delay(1500);
+  unsigned long lastOtaCheck = 0;
+  const unsigned long otaInterval = 10000; 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   loadConfiguration(); 
@@ -1044,7 +1046,7 @@ void setup() {
   //} 
 }
 void loop() {
-  WDT.refresh(); 
+  // WDT.refresh(); 
   if (millis() - lastFrameTick > 80) { 
     lastFrameTick = millis();
     globalAnimFrame++; 
@@ -1238,6 +1240,9 @@ void loop() {
     digitalWrite(LED_RED, LOW); 
   }
   if (WiFi.status() == WL_CONNECTED) {
-    checkOtaStatusFromServer();
-  } 
+    if (millis() - lastOtaCheck >= otaInterval) {
+      lastOtaCheck = millis(); // Resetujemy licznik
+      checkOtaStatusFromServer(); // Odpalamy zapytanie sieciowe
+    }
+  }
 }
