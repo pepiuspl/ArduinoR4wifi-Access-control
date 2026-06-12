@@ -593,13 +593,15 @@ const server = http.createServer(async (req, res) => {
         hostname: 'api.github.com',
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
         family: 4,
+        timeout: 10000, // 🌟 Max 10 sekund oczekiwania - zapobiega zawieszeniu aplikacji
         headers: { 
             'User-Agent': 'NodeJS-SmartLock-Server',
             'Authorization': `token ${GITHUB_PAT}`
         }
     };
 
-    https.get(options, (githubRes) => {
+    // Przypisujemy żądanie do zmiennej, aby móc obsłużyć błędy sieciowe gniazda
+    const githubReq = https.get(options, (githubRes) => {
         let data = '';
         githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
@@ -615,11 +617,9 @@ const server = http.createServer(async (req, res) => {
                     return;
                 }
 
-                // Szukamy pliku .bin w wydaniu (np. lock_v2.9.5.bin)
                 const binAsset = release.assets.find(asset => asset.name.endsWith('.bin'));
-                
                 if (!binAsset) {
-                    forceLog("Krytyczny błąd: Brak skompilowanego pliku .bin w tym wydaniu GitHuba!");
+                    forceLog("Krytyczny błąd: Brak skompilowanego pliku .bin w wydaniu!");
                     if (!res.headersSent) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: "Brak pliku .bin" }));
@@ -627,15 +627,13 @@ const server = http.createServer(async (req, res) => {
                     return;
                 }
 
-                const targetFileName = binAsset.name; // Zmienna przechowa np. "lock_v2.9.5.bin"
+                const targetFileName = binAsset.name;
                 const targetFilePath = path.join(updatesDir, targetFileName);
 
-                // 🌟 SPRAWDZANIE TRWAŁEGO KESZU NA DYSKU PROXMOXA:
                 if (fs.existsSync(targetFilePath)) {
                     forceLog(`[KESZ HIT] Plik ${targetFileName} znajduje się już na dysku! Pomijam pobieranie.`);
-                    
-                    latestFirmwareFile = targetFileName; // Ustalamy aktualny plik dla zamka
-                    otaUpdatePending = true; // Zapalamy flagę dla Arduino
+                    latestFirmwareFile = targetFileName;
+                    otaUpdatePending = true;
 
                     if (!res.headersSent) {
                         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -644,7 +642,6 @@ const server = http.createServer(async (req, res) => {
                     return;
                 }
 
-                // --- Jeśli pliku nie ma na dysku, pobieramy go z GitHuba pod jego oryginalną nazwą ---
                 forceLog(`Brak pliku w systemie. Pobieranie nowej paczki: ${targetFileName}...`);
 
                 const downloadOptions = {
@@ -663,8 +660,8 @@ const server = http.createServer(async (req, res) => {
                 https.get(downloadOptions, (fileRes) => {
                     const handleFinish = () => {
                         file.close();
-                        latestFirmwareFile = targetFileName; // Zapisujemy nazwę pliku do zmiennej dystrybucyjnej
-                        otaUpdatePending = true; // Flaga w górę
+                        latestFirmwareFile = targetFileName;
+                        otaUpdatePending = true;
                         forceLog(`Sukces! Plik ${targetFileName} pobrany i zabezpieczony w /updates/`);
                         
                         if (!res.headersSent) {
@@ -692,12 +689,32 @@ const server = http.createServer(async (req, res) => {
             }
         });
     });
+
+    githubReq.on('error', (err) => {
+        forceLog(`Krytyczny błąd sieciowy połączenia z GitHub API: ${err.message}`);
+        if (!res.headersSent) {
+            res.writeHead(504, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: "Timeout lub blad sieci GitHub" }));
+        }
+    });
+
+    githubReq.on('timeout', () => {
+        githubReq.destroy();
+        forceLog("Żądanie do GitHub API zostało przerwane z powodu przekroczenia limitu czasu (Timeout).");
+    });
+
     return;
 }
       // Return .bin file
 
       if (pathname === '/api/lock/download-firmware' && req.method === 'GET') {
+    const logFile = '/var/log/smartlock/smartlock_system.log';
+    const forceLog = (msg) => {
+        try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
+    };
+
     if (!latestFirmwareFile) {
+        forceLog("Zamek próbował pobrać soft, ale brak zdefiniowanego pliku w pamięci serwera.");
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         return res.end("Brak aktywnego pliku aktualizacji.");
     }
@@ -705,21 +722,30 @@ const server = http.createServer(async (req, res) => {
     const filePath = path.join(updatesDir, latestFirmwareFile);
 
     if (fs.existsSync(filePath)) {
+        const fileSize = fs.statSync(filePath).size;
+        forceLog(`Zamek podłączył się. Rozpoczynam strumieniowanie pliku: ${latestFirmwareFile} (${fileSize} bajtów) do Arduino...`);
+
         res.writeHead(200, { 
             'Content-Type': 'application/octet-stream',
-            'Content-Length': fs.statSync(filePath).size
+            'Content-Length': fileSize
         });
 
         const readStream = fs.createReadStream(filePath);
         readStream.pipe(res);
 
         readStream.on('end', () => {
-            // Po udanym pobraniu pliku przez zamek, automatycznie gasimy flagę aktualizacji! 🏁
             otaUpdatePending = false;
+            forceLog(`Sukces! Strumieniowanie pliku ${latestFirmwareFile} do zamka zakończone pomyślnie.`);
         });
+
+        readStream.on('error', (err) => {
+            forceLog(`Błąd podczas przesyłania pliku do zamka: ${err.message}`);
+        });
+
     } else {
+        forceLog(`Krytyczny błąd: Plik ${latestFirmwareFile} zniknął z dysku serwera!`);
         res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end("Plik zdefiniowany w keszu nie istnieje na dysku.");
+        res.end("Plik nie istnieje na dysku.");
     }
     return;
 }
