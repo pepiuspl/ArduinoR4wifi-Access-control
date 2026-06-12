@@ -8,7 +8,8 @@
 #include <NTPClient.h> 
 #include <EEPROM.h> 
 #include "RTC.h" 
-#include <ArduinoOTA.h>  
+#include <ArduinoOTA.h>
+#include <WDT.h>  
 
 const char* app_version = "v2.9.4";
 
@@ -1037,6 +1038,7 @@ void setup() {
   } 
   lastRfidWatchdogTime = millis();
   lastFrameTick = millis();
+  
   if (WDT.begin(4000)) {
     WDT.refresh(); 
 } 
