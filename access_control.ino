@@ -1041,8 +1041,8 @@ void setup() {
 
   if (WDT.begin(4000)) {
     WDT.refresh(); 
-} 
-
+  } 
+}
 void loop() {
   WDT.refresh(); 
   if (millis() - lastFrameTick > 80) { 
@@ -1238,4 +1238,4 @@ void loop() {
     digitalWrite(LED_RED, LOW); 
   }
   checkOtaStatusFromServer(); 
-}}
+}
