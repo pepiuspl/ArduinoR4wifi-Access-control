@@ -20,6 +20,7 @@ const GITHUB_REPO = "ArduinoR4wifi-Access-control";
 
 let otaUpdatePending = false;
 let latestFirmwareVersion = "2.9.4";
+let latestFirmwareFile = "";
 const updatesDir = '/opt/smartlock-server/updates';
 
 // 🗄️ CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
@@ -586,7 +587,7 @@ const server = http.createServer(async (req, res) => {
         } catch (e) {}
     };
 
-    forceLog("Inicjalizacja żądania OTA PUSH (pobieranie pliku .bin z GitHuba)...");
+    forceLog("Inicjalizacja żądania OTA PUSH (Sprawdzanie struktury oryginalnych nazw plików)...");
 
     const options = {
         hostname: 'api.github.com',
@@ -600,8 +601,6 @@ const server = http.createServer(async (req, res) => {
 
     https.get(options, (githubRes) => {
         let data = '';
-        forceLog(`Odebrano strukturę zasobów z GitHuba. Kod statusu: ${githubRes.statusCode}`);
-        
         githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
             try {
@@ -616,18 +615,37 @@ const server = http.createServer(async (req, res) => {
                     return;
                 }
 
+                // Szukamy pliku .bin w wydaniu (np. lock_v2.9.5.bin)
                 const binAsset = release.assets.find(asset => asset.name.endsWith('.bin'));
                 
                 if (!binAsset) {
-                    forceLog("Krytyczny błąd: Nie znaleziono skompilowanego pliku .bin w tym wydaniu GitHuba!");
+                    forceLog("Krytyczny błąd: Brak skompilowanego pliku .bin w tym wydaniu GitHuba!");
                     if (!res.headersSent) {
                         res.writeHead(404, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: "Brak pliku .bin w Release" }));
+                        res.end(JSON.stringify({ error: "Brak pliku .bin" }));
                     }
                     return;
                 }
 
-                forceLog(`Zlokalizowano plik: ${binAsset.name} (ID: ${binAsset.id}). Pobieranie strumienia...`);
+                const targetFileName = binAsset.name; // Zmienna przechowa np. "lock_v2.9.5.bin"
+                const targetFilePath = path.join(updatesDir, targetFileName);
+
+                // 🌟 SPRAWDZANIE TRWAŁEGO KESZU NA DYSKU PROXMOXA:
+                if (fs.existsSync(targetFilePath)) {
+                    forceLog(`[KESZ HIT] Plik ${targetFileName} znajduje się już na dysku! Pomijam pobieranie.`);
+                    
+                    latestFirmwareFile = targetFileName; // Ustalamy aktualny plik dla zamka
+                    otaUpdatePending = true; // Zapalamy flagę dla Arduino
+
+                    if (!res.headersSent) {
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ success: true, cached: true }));
+                    }
+                    return;
+                }
+
+                // --- Jeśli pliku nie ma na dysku, pobieramy go z GitHuba pod jego oryginalną nazwą ---
+                forceLog(`Brak pliku w systemie. Pobieranie nowej paczki: ${targetFileName}...`);
 
                 const downloadOptions = {
                     hostname: 'api.github.com',
@@ -640,43 +658,33 @@ const server = http.createServer(async (req, res) => {
                     }
                 };
 
-                const file = fs.createWriteStream(path.join(updatesDir, 'firmware.bin'));
+                const file = fs.createWriteStream(targetFilePath);
                 
                 https.get(downloadOptions, (fileRes) => {
-                    forceLog(`Połączenie z magazynem pliku. Kod HTTP: ${fileRes.statusCode}`);
-                    
-                    if (fileRes.statusCode === 302) {
-                        forceLog(`Przekierowanie AWS S3 wykryte. Adres docelowy autoryzowany.`);
+                    const handleFinish = () => {
+                        file.close();
+                        latestFirmwareFile = targetFileName; // Zapisujemy nazwę pliku do zmiennej dystrybucyjnej
+                        otaUpdatePending = true; // Flaga w górę
+                        forceLog(`Sukces! Plik ${targetFileName} pobrany i zabezpieczony w /updates/`);
                         
+                        if (!res.headersSent) {
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ success: true, cached: false }));
+                        }
+                    };
+
+                    if (fileRes.statusCode === 302) {
                         https.get(fileRes.headers.location, { family: 4 }, (redirectRes) => {
                             redirectRes.pipe(file);
-                            file.on('finish', () => {
-                                file.close();
-                                otaUpdatePending = true; // ZAPALAMY FLAGĘ DLA ZAMKA! 🎯
-                                forceLog("Sukces! Nowy plik firmware.bin został pobrany i zabezpieczony w katalogu updates.");
-                                
-                                if (!res.headersSent) {
-                                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                                    res.end(JSON.stringify({ success: true, message: "Paczka pobrana lokalnie." }));
-                                }
-                            });
+                            file.on('finish', handleFinish);
                         });
                     } else {
                         fileRes.pipe(file);
-                        file.on('finish', () => {
-                            file.close();
-                            otaUpdatePending = true;
-                            forceLog("Sukces! Plik firmware.bin pobrany bezpośrednio.");
-                            
-                            if (!res.headersSent) {
-                                res.writeHead(200, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ success: true }));
-                            }
-                        });
+                        file.on('finish', handleFinish);
                     }
                 });
             } catch (e) {
-                forceLog(`Błąd przetwarzania OTA PUSH: ${e.message}`);
+                forceLog(`Błąd przetwarzania: ${e.message}`);
                 if (!res.headersSent) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: e.message }));
@@ -688,16 +696,32 @@ const server = http.createServer(async (req, res) => {
 }
       // Return .bin file
 
-      if (pathname === '/updates/firmware.bin' && req.method === 'GET') {
-    const filePath = path.join(updatesDir, 'firmware.bin');
+      if (pathname === '/api/lock/download-firmware' && req.method === 'GET') {
+    if (!latestFirmwareFile) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        return res.end("Brak aktywnego pliku aktualizacji.");
+    }
+
+    const filePath = path.join(updatesDir, latestFirmwareFile);
+
     if (fs.existsSync(filePath)) {
-        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
-        fs.createReadStream(filePath).pipe(res);
-        otaUpdatePending = false;
+        res.writeHead(200, { 
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': fs.statSync(filePath).size
+        });
+
+        const readStream = fs.createReadStream(filePath);
+        readStream.pipe(res);
+
+        readStream.on('end', () => {
+            // Po udanym pobraniu pliku przez zamek, automatycznie gasimy flagę aktualizacji! 🏁
+            otaUpdatePending = false;
+        });
     } else {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('404 Not Found');
+        res.end("Plik zdefiniowany w keszu nie istnieje na dysku.");
     }
+    return;
 }
 
       // =========================================================================

@@ -854,7 +854,7 @@ void performLocalFirmwareUpdate() {
   updateDisplay("AKTUALIZACJA OTA", "Pobieranie pliku..."); 
   
   if (otaClient.connect("192.168.0.200", 3000)) {
-    otaClient.print("GET /updates/firmware.bin HTTP/1.1\r\n");
+    otaClient.print("GET /api/lock/download-firmware HTTP/1.1\r\n");
     otaClient.print("Host: 192.168.0.200\r\n");
     otaClient.print("Connection: close\r\n\r\n");
     
