@@ -496,9 +496,12 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // UPDATE LOGC 
-
-      
+      //  UPDATE -- OTA CHECK
+      if (pathname === '/api/lock/ota-check' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });  
+        return res.end(otaUpdatePending ? "1" : "0");
+      }
+      // UPDATE LOGIC 
       if (!fs.existsSync(updatesDir)) {
         fs.mkdirSync(updatesDir, { recursive: true });
       }

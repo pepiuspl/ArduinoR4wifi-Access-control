@@ -800,7 +800,8 @@ void handleOnlineInstallerServer() {
 } 
 
 void executeCloudSynchronization() { 
-  if (strlen(proxmox_log_server) < 4) return; 
+  if (strlen(proxmox_log_server) < 4) return;
+  checkOtaStatusFromServer(); 
   WiFiClient httpCheck; 
   httpCheck.setTimeout(250);
   if (!httpCheck.connect(proxmox_log_server, proxmox_log_port)) { 
@@ -846,7 +847,39 @@ void executeCloudSynchronization() {
   } else { 
     learningMode = false;
   } 
-} 
+}
+
+void checkOtaStatusFromServer() {
+  WiFiClient client;
+  
+  // Łączymy się z Twoim serwerem Node.js na Proxmoxie
+  if (client.connect("192.168.0.200", 3000)) {
+    // Wysyłamy proste zapytanie do nowej ścieżki
+    client.print("GET /api/lock/ota-check HTTP/1.1\r\n");
+    client.print("Host: 192.168.0.200\r\n");
+    client.print("Connection: close\r\n\r\n");
+    
+    // Pomijamy nagłówki HTTP, szukając pustej linii (\r\n), po której leci właściwa treść
+    while (client.connected()) {
+      String line = client.readStringUntil('\n');
+      if (line == "\r") {
+        break;
+      }
+    }
+    
+    // Czytamy ostatni, właściwy znak odpowiedzi z serwera ("0" lub "1")
+    if (client.available()) {
+      char response = client.read();
+      
+      // Jeśli serwer zwrócił "1", oznacza to, że użytkownik kliknął aktualizację w aplikacji!
+      if (response == '1') {
+        // Wywołujemy funkcję pobierania pliku firmware.bin, którą przygotowaliśmy wcześniej
+        performLocalFirmwareUpdate();
+      }
+    }
+    client.stop();
+  }
+}
 
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) { 
   if (strlen(proxmox_log_server) < 4) return; 

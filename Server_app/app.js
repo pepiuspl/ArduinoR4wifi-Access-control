@@ -541,6 +541,7 @@ export default function App() {
     );
   }
 
+    
   return (
     <SafeAreaView style={styles.darkContainer}>
       <View style={styles.navigationHeaderBar}>
@@ -551,6 +552,7 @@ export default function App() {
         <View style={{ width: 24 }} />
       </View>
 
+      
       <View style={{ flex: 1 }}>
         {currentScreen === 'dashboard' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
@@ -601,7 +603,7 @@ export default function App() {
           </ScrollView>
         )}
 
-        {/* EKRAN AKTUALIZACJI OTA (Z POPRAWIONYM STANEM otaState) */}
+        {/* EKRAN AKTUALIZACJI OTA (Z INTEGRACJĄ NOWYCH STATUSÓW) */}
         {currentScreen === 'ota' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
             <Text style={styles.screenHeaderText}>💾 Aktualizacja Firmware (OTA)</Text>
@@ -635,10 +637,33 @@ export default function App() {
               {otaState === 'available' && (
                 <View style={{ marginTop: 8 }}>
                   <Text style={[styles.learningAlertText, { marginBottom: 16 }]}>🚀 Wykryto nowszą wersję oprogramowania {latestVersion || 'v2.9.5'}</Text>
-                  <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#e11d48', marginTop: 0 }]} onPress={() => executeCommand('/api/ota/push')}>
+                  <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#e11d48', marginTop: 0 }]} onPress={handleExecuteUpdate}>
                     <Text style={styles.btnText}>Zaktualizuj oprogramowanie</Text>
                   </TouchableOpacity>
                 </View>
+              )}
+
+              {otaState === 'downloading_server' && (
+                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#f59e0b' }]} disabled>
+                  <Text style={styles.btnText}>📥 Pobieranie paczki {latestVersion || 'v2.9.5'} na serwer...</Text>
+                </TouchableOpacity>
+              )}
+
+              {otaState === 'flashing_device' && (
+                <View style={{ marginTop: 8 }}>
+                  <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#2563eb', marginTop: 0 }]} disabled>
+                    <Text style={styles.btnText}>⚡ Zamek aktualizuje system przez Wi-Fi...</Text>
+                  </TouchableOpacity>
+                  <Text style={[styles.subLabel, { marginTop: 8, textAlign: 'center', color: '#aaa' }]}>
+                    Proszę nie odłączać zasilania urządzenia. Szacowany czas: 20s.
+                  </Text>
+                </View>
+              )}
+
+              {otaState === 'success' && (
+                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#059669' }]} disabled>
+                  <Text style={styles.btnText}>🎉 Zaktualizowano pomyślnie!</Text>
+                </TouchableOpacity>
               )}
             </View>
           </ScrollView>
@@ -672,6 +697,7 @@ export default function App() {
             </View>
           </ScrollView>
         )}
+        
 
         {isMenuOpen && <TouchableOpacity style={styles.menuDimBackdropMask} activeOpacity={1} onPress={toggleBurgerMenu} />}
         <Animated.View style={[styles.burgerSidebarDrawerContainer, { left: menuAnimation }]}>
@@ -688,12 +714,12 @@ export default function App() {
             setIsMenuOpen(false);
             setCurrentScreen('dashboard');
             setIsConfigured(false);
+            setCurrentScreen('dashboard');
           }}><Text style={styles.btnText}>Wyloguj Profil</Text></TouchableOpacity>
         </Animated.View>
       </View>
     </SafeAreaView>
-  );
-}
+);}
 
 const styles = StyleSheet.create({
   darkContainer: { flex: 1, backgroundColor: '#0f0f11' },
