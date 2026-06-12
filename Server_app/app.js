@@ -52,10 +52,6 @@ export default function App() {
   const [settingsWifiPass, setSettingsWifiPass] = useState('');
   const [settingsAdminPass, setSettingsAdminPass] = useState('');
 
-  // STANY DLA MECHANIZMU AKTUALIZACJI OTA GITHUB
-  const [otaState, setOtaState] = useState('idle'); // 'idle', 'checking', 'available', 'up-to-date'
-  const [githubVersion, setGithubVersion] = useState('');
-
   const resetUiToDefault = useCallback(() => {
     setCurrentScreen('dashboard');
     setIsMenuOpen(false);
@@ -405,7 +401,6 @@ export default function App() {
                 <View key={user.idx} style={styles.userRow}>
                   <View style={{ flex: 1, paddingRight: 6 }}>
                     <Text style={styles.userName}>{user.name}</Text>
-                    <Text style={styles.userUid}>Indeks hardware: ArraySlot[#{user.idx}]</Text>
                   </View>
                   <View style={styles.rowActions}>
                     <TouchableOpacity style={{ padding: 4 }} onPress={() => promptUserRename(user.idx, user.name)}><Text style={{ color: '#64b5f6', marginRight: 16, fontWeight: 'bold', fontSize: 13 }}>✏️ Edytuj</Text></TouchableOpacity>
@@ -439,10 +434,10 @@ export default function App() {
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.sectionHeader}>Weryfikacja wydań z serwerów GitHub</Text>
+              <Text style={styles.sectionHeader}>Weryfikacja wydań</Text>
               
               {otaState === 'idle' && (
-                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#3b82f6' }]} onPress={checkGitHubUpdate}>
+                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#3b82f6' }]}>
                   <Text style={styles.btnText}>🔍 Sprawdź dostępność aktualizacji</Text>
                 </TouchableOpacity>
               )}
@@ -461,9 +456,9 @@ export default function App() {
 
               {otaState === 'available' && (
                 <View style={{ marginTop: 8 }}>
-                  <Text style={[styles.learningAlertText, { marginBottom: 16 }]}>🚀 Wykryto nowszą wersję oprogramowania: {githubVersion}</Text>
+                  <Text style={[styles.learningAlertText, { marginBottom: 16 }]}>🚀 Wykryto nowszą wersję oprogramowania</Text>
                   <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#e11d48', marginTop: 0 }]} onPress={() => executeCommand('/api/ota/push')}>
-                    <Text style={styles.btnText}>⚡ Wepchnij aktualizację {githubVersion} do Arduino</Text>
+                    <Text style={styles.btnText}>Zaktualizuj Node</Text>
                   </TouchableOpacity>
                 </View>
               )}

@@ -800,13 +800,15 @@ void executeCloudSynchronization() {
     return; 
   } 
   lastSuccessfulPollTime = millis(); 
-  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)); 
+  String macStr = WiFi.macAddress();
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0"); 
   httpCheck.println("GET " + pollPath + " HTTP/1.1"); 
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server); 
   httpCheck.println("Connection: close\r\n"); 
   unsigned long deadline = millis() + 300; 
   String payloadResponse = ""; 
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) { 
+    if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK");
     if (httpCheck.available()) { 
       char c = httpCheck.read(); 
       payloadResponse += c; 
@@ -838,8 +840,10 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   httpPost.setTimeout(400); 
   if (!httpPost.connect(proxmox_log_server, proxmox_log_port)) return; 
   String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan"; 
+  String macStr = WiFi.macAddress();
   String postData = runRegister ? 
-  "{\"uid\":\"" + uidStr + "\",\"name\":\"" + pendingUsername + "\"}" : "{\"uid\":\"" + uidStr + "\"}"; 
+    "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\",\"name\":\"" + pendingUsername + "\",\"slot\":" + String(totalCards > 0 ? totalCards - 1 : 0) + "}" : 
+    "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\"}"; 
   httpPost.println("POST " + endpoint + " HTTP/1.1"); 
   httpPost.print("Host: "); httpPost.println(proxmox_log_server); 
   httpPost.println("Content-Type: application/json"); 
