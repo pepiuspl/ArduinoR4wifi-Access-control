@@ -26,6 +26,15 @@ export default function App() {
   const [isRegisterMode, setIsRegisterMode] = useState(false); 
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
   
+  // 🔐 STANY OBSŁUGI BEZPIECZNEGO RESETU HASŁA (OPCJA B)
+  const [resetStep, setResetStep] = useState(1); // 1: Email, 2: Kod, 3: Nowe Hasło
+  const [resetCode, setResetCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+
+  // 💾 STAN OBSŁUGI AKTUALIZACJI OTA
+  const [otaState, setOtaState] = useState('idle'); // idle, checking, up-to-date, available
+
   const [lockState, setLockState] = useState({ 
     auth: false, 
     account: { email: '-' },
@@ -35,7 +44,7 @@ export default function App() {
     users: [], 
     logs: [],
     ssid: 'Ecosystem LAN',
-    version: '2.9.4' // Domyślna wersja bazowa na wypadek braku odpowiedzi z backendu
+    version: '2.9.4' 
   });
   
   const [newName, setNewName] = useState('');
@@ -165,9 +174,12 @@ export default function App() {
       });
   };
 
+  // 🔐 PIPELINE ODZYSKIWANIA HASŁA (3 KROKI)
   const handleForgotPasswordSubmit = () => {
-    if (!email) return alert('Wprowadź swój adres email!');
+    if (!email) return Alert.alert('Błąd', 'Wprowadź swój adres email!');
     setIsAuthenticating(true);
+    setErrorMessage('Wysyłanie cyfrowego kodu weryfikacyjnego...');
+
     fetch(`${backendUrl}/api/auth/forgot_password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -176,8 +188,10 @@ export default function App() {
       .then((res) => {
         setIsAuthenticating(false);
         if (res.status === 200) {
-          Alert.alert('Procedura Uruchomiona', 'Jeśli adres istnieje w bazie, wysłano wiadomość z nowym hasłem tymczasowym.');
-          setIsForgotPasswordMode(false);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          Alert.alert('Kod został wysłany', 'Jeśli adres istnieje w systemie, wysłano 6-cyfrowy kod autoryzacyjny.');
+          setResetStep(2); // Przejdź do pola wpisywania kodu
+          setErrorMessage('');
         } else {
           alert('Wystąpił błąd po stronie serwera.');
         }
@@ -185,6 +199,66 @@ export default function App() {
       .catch(() => {
         setIsAuthenticating(false);
         alert('Błąd sieciowy podczas wywoływania SMTP.');
+      });
+  };
+
+  const handleVerifyResetCode = () => {
+    if (!resetCode) return Alert.alert('Błąd', 'Wpisz 6-cyfrowy kod z wiadomości e-mail!');
+    setIsAuthenticating(true);
+    setErrorMessage('Autoryzacja kodu zabezpieczającego...');
+
+    fetch(`${backendUrl}/api/auth/verify_reset_code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim(), code: resetCode.trim() })
+    })
+      .then(async (res) => {
+        setIsAuthenticating(false);
+        const data = await res.json();
+        if (res.status === 200 && data.valid) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          setResetStep(3); // Kod zmatchowany -> Odblokuj formularz nowego hasła
+          setErrorMessage('');
+        } else {
+          Alert.alert('Odmowa dostępu', data.error || 'Kod jest nieprawidłowy lub wygasł.');
+        }
+      })
+      .catch(() => {
+        setIsAuthenticating(false);
+        alert('Błąd komunikacji z chmurą.');
+      });
+  };
+
+  const handleConfirmPasswordReset = () => {
+    if (!newPassword || !confirmNewPassword) return Alert.alert('Błąd', 'Wypełnij pola nowego hasła!');
+    if (newPassword !== confirmNewPassword) return Alert.alert('Błąd', 'Wprowadzone hasła nie są identyczne!');
+    setIsAuthenticating(true);
+    setErrorMessage('Zapisywanie nowego klucza master...');
+
+    fetch(`${backendUrl}/api/auth/confirm_password_reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim(), code: resetCode.trim(), newPassword: newPassword.trim() })
+    })
+      .then(async (res) => {
+        setIsAuthenticating(false);
+        const data = await res.json();
+        if (res.status === 200 && data.success) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          Alert.alert('Sukces', 'Hasło zostało zmienione. Możesz się zalogować.');
+          setIsForgotPasswordMode(false);
+          setResetStep(1);
+          setResetCode('');
+          setNewPassword('');
+          setConfirmNewPassword('');
+          setErrorMessage('');
+        } else {
+          Alert.alert('Błąd', data.error || 'Modyfikacja odrzucona przez serwer.');
+        }
+      })
+      .catch(() => {
+        setIsAuthenticating(false);
+        alert('Błąd transakcji bazodanowej.');
       });
   };
 
@@ -210,6 +284,30 @@ export default function App() {
     setSettingsWifiPass('');
     setSettingsAdminPass('');
     setSettingsSsid('');
+  };
+
+  // 💾 LOGIKA WYKRYWANIA I ANALIZY AKTUALIZACJI OTA
+  const handleCheckUpdate = () => {
+    setOtaState('checking');
+    fetch(`${backendUrl}/api/firmware/version`)
+      .then((res) => {
+        if (!res.ok) throw new Error();
+        return res.json();
+      })
+      .then((data) => {
+        const currentVer = lockState.version.replace('v', '').trim();
+        const latestVer = data.latestVersion.replace('v', '').trim();
+        
+        if (currentVer === latestVer) {
+          setOtaState('up-to-date');
+        } else {
+          setOtaState('available');
+        }
+      })
+      .catch(() => {
+        setOtaState('idle');
+        Alert.alert('Błąd systemu', 'Nie udało się pobrać danych o plikach binarnych z Proxmoxa.');
+      });
   };
 
   const fetchStatus = useCallback(() => {
@@ -316,7 +414,7 @@ export default function App() {
             <Text style={styles.lockIconSymbol}>🔒</Text>
           </TouchableOpacity>
           <Text style={styles.titleText}>
-            {isForgotPasswordMode ? 'Odzyskiwanie Hasła' : isRegisterMode ? 'Rejestracja CTRLABLE' : 'CTRLABLE Portal'}
+            {isForgotPasswordMode ? `Odzyskiwanie [Krok ${resetStep}/3]` : isRegisterMode ? 'Rejestracja CTRLABLE' : 'CTRLABLE Portal'}
           </Text>
           
           {showInstallerMenu && (
@@ -330,23 +428,56 @@ export default function App() {
             </View>
           )}
 
-          <Text style={styles.inputLabelText}>Adres E-mail:</Text>
-          <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
-          
-          {!isForgotPasswordMode && (
+          {/* DYNAMICZNE RENDEROWANIE POLA RESETU LUB PANELU LOGOWANIA */}
+          {isForgotPasswordMode ? (
             <>
+              {resetStep === 1 && (
+                <>
+                  <Text style={styles.inputLabelText}>Adres E-mail konta do zresetowania:</Text>
+                  <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
+                  <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleForgotPasswordSubmit} disabled={isAuthenticating}>
+                    <Text style={styles.btnText}>Wyślij Kod Autoryzacyjny</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+              {resetStep === 2 && (
+                <>
+                  <Text style={styles.inputLabelText}>Wprowadź 6-cyfrowy kod z wiadomości:</Text>
+                  <TextInput style={styles.inputField} placeholder="np. 482910" keyboardType="number-pad" autoCapitalize="none" maxLength={6} placeholderTextColor="#444" editable={!isAuthenticating} value={resetCode} onChangeText={setResetCode} />
+                  <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleVerifyResetCode} disabled={isAuthenticating}>
+                    <Text style={styles.btnText}>Zweryfikuj Token</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+              {resetStep === 3 && (
+                <>
+                  <Text style={styles.inputLabelText}>Nowe Hasło Master:</Text>
+                  <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={newPassword} onChangeText={setNewPassword} />
+                  <Text style={styles.inputLabelText}>Powtórz Nowe Hasło:</Text>
+                  <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={confirmNewPassword} onChangeText={setConfirmNewPassword} />
+                  <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleConfirmPasswordReset} disabled={isAuthenticating}>
+                    <Text style={styles.btnText}>Zapisz Nowy Klucz i Zakończ</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <Text style={styles.inputLabelText}>Adres E-mail:</Text>
+              <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
+              
               <Text style={styles.inputLabelText}>Klucz Bezpieczeństwa (Hasło):</Text>
               <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={password} onChangeText={setPassword} />
+              
+              <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={isRegisterMode ? handleAccountRegistration : handleSecurityLogin} disabled={isAuthenticating}>
+                <Text style={styles.btnText}>{isAuthenticating ? 'Przetwarzanie żądania...' : isRegisterMode ? 'Utwórz Przestrzeń Chmurową' : 'Zaloguj się'}</Text>
+              </TouchableOpacity>
             </>
           )}
-          
-          <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={isForgotPasswordMode ? handleForgotPasswordSubmit : isRegisterMode ? handleAccountRegistration : handleSecurityLogin} disabled={isAuthenticating}>
-            <Text style={styles.btnText}>{isAuthenticating ? 'Przetwarzanie żądania...' : isForgotPasswordMode ? 'Wyślij Hasło Tymczasowe' : isRegisterMode ? 'Utwórz Przestrzeń Chmurową' : 'Zaloguj się'}</Text>
-          </TouchableOpacity>
 
-          <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setIsForgotPasswordMode(!isForgotPasswordMode); setIsRegisterMode(false); }}>
+          <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setIsForgotPasswordMode(!isForgotPasswordMode); setResetStep(1); setIsRegisterMode(false); }}>
             <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>
-              {isForgotPasswordMode ? 'Powrót do logowania' : 'Zapomniałeś hasła? Zresetuj przez e-mail'}
+              {isForgotPasswordMode ? 'Powrót do ekranu logowania' : 'Zapomniałeś hasła? Bezpieczny reset przez e-mail'}
             </Text>
           </TouchableOpacity>
 
@@ -423,7 +554,7 @@ export default function App() {
           </ScrollView>
         )}
 
-        {/* EKRAN AKTUALIZACJI OTA (Z LOGIKĄ DYNAMICZNEGO PRZYCISKU i TIMEREM 5s) */}
+        {/* EKRAN AKTUALIZACJI OTA (Z POPRAWIONYM STANEM otaState) */}
         {currentScreen === 'ota' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
             <Text style={styles.screenHeaderText}>💾 Aktualizacja Firmware (OTA)</Text>
@@ -437,7 +568,7 @@ export default function App() {
               <Text style={styles.sectionHeader}>Weryfikacja wydań</Text>
               
               {otaState === 'idle' && (
-                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#3b82f6' }]}>
+                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#3b82f6' }]} onPress={handleCheckUpdate}>
                   <Text style={styles.btnText}>🔍 Sprawdź dostępność aktualizacji</Text>
                 </TouchableOpacity>
               )}
@@ -449,7 +580,7 @@ export default function App() {
               )}
 
               {otaState === 'up-to-date' && (
-                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#10b981' }]} disabled>
+                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#10b981' }]} onPress={handleCheckUpdate}>
                   <Text style={styles.btnText}>✅ Jesteś na najnowszej wersji ({lockState.version})</Text>
                 </TouchableOpacity>
               )}
@@ -501,9 +632,7 @@ export default function App() {
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Panel Główny</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Roster Lokatorów</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'system' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('system')}><Text style={styles.menuItemLabelText}>📋 Logi Systemowe</Text></TouchableOpacity>
-          
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'ota' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('ota')}><Text style={styles.menuItemLabelText}>💾 Aktualizacja OTA</Text></TouchableOpacity>
-          
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'settings' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('settings')}><Text style={styles.menuItemLabelText}>⚙️ Ustawienia</Text></TouchableOpacity>
           <View style={{flex: 1}} />
           <TouchableOpacity style={styles.sidebarDisconnectBtn} onPress={async () => {
