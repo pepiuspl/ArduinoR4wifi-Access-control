@@ -192,54 +192,6 @@ export default function App() {
       });
   };
 
-  // LOGIKA SPRAWDZANIA AKTUALIZACJI Z PRYWATNEGO REPOZYTORIUM GITHUB (AUTORYZACJA PAT)
-  const checkGitHubUpdate = () => {
-    setOtaState('checking');
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-
-    // 🔑 TUTAJ WKLEJ SWOJE DANE DOSTĘPOWE DO PRYWATNEGO REPO
-    const GITHUB_TOKEN = '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';
-    const REPO_URL = 'https://github.com/pepiuspl/ArduinoR4wifi-Access-control';
-
-    fetch(REPO_URL, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28'
-      }
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error('Problem z autoryzacją lub brak wydań w repozytorium.');
-        return res.json();
-      })
-      .then((data) => {
-        if (!data.tag_name) throw new Error('Nie znaleziono tagu wersji w ostatnim wydaniu.');
-        
-        const cleanGitVer = data.tag_name.replace('v', '').trim();
-        const cleanLocalVer = lockState.version.replace('v', '').trim();
-
-        setGithubVersion(cleanGitVer);
-
-        if (cleanGitVer !== cleanLocalVer) {
-          // Jest dostępny nowszy soft! Pokazujemy przycisk Push OTA
-          setOtaState('available');
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        } else {
-          // Brak aktualizacji - zablokowanie przycisku na 5 sekund, po czym powrót
-          setOtaState('up-to-date');
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-          setTimeout(() => {
-            setOtaState('idle');
-          }, 5000);
-        }
-      })
-      .catch((err) => {
-        alert(`Błąd połączenia z GitHub API: ${err.message}`);
-        setOtaState('idle');
-      });
-  };
-
   const handleSaveSystemSettings = () => {
     if (settingsAdminPass) {
       fetch(`${backendUrl}/api/settings/password`, {
