@@ -1240,6 +1240,9 @@ void loop() {
     digitalWrite(LED_RED, LOW); 
   }
   if (WiFi.status() == WL_CONNECTED) {
-    checkOtaStatusFromServer();
+    if (millis() - lastOtaCheck >= otaInterval) {
+      lastOtaCheck = millis(); // Resetujemy licznik
+      checkOtaStatusFromServer(); // Odpalamy zapytanie sieciowe
+    }
   } 
 }
