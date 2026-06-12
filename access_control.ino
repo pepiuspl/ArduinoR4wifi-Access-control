@@ -995,6 +995,7 @@ void loop() {
       while (WiFi.status() != WL_CONNECTED && millis() - checkStart < 6000) { 
         delay(200);
       } 
+      
       if (WiFi.status() == WL_CONNECTED) { 
         isOfflineStandby = false;
         timeClient.begin(); 
@@ -1016,8 +1017,8 @@ void loop() {
         displayProvisioningInstructions("ERR: REKONEKCJA FAIL"); 
       } 
     } 
-  } 
   } else { 
+    // 🌟 Normalny tryb pracy urządzenia, gdy sieć jest stabilna
     handleWebServer();
     if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) { 
       lastPollTime = millis();
