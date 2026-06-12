@@ -887,7 +887,7 @@ void performLocalFirmwareUpdate() {
 
 void checkOtaStatusFromServer() {
   WiFiClient client;
-  
+
   if (client.connect("192.168.0.200", 3000)) {
     client.setTimeout(5000);
     client.print("GET /api/lock/ota-check HTTP/1.1\r\n");
@@ -1035,7 +1035,9 @@ void setup() {
     lastWifiRetryTime = millis(); 
   } 
   lastRfidWatchdogTime = millis();
-  lastFrameTick = millis(); 
+  lastFrameTick = millis();
+  if (WDT.begin(4000)) {
+    WDT.refresh(); 
 } 
 
 void loop() {
