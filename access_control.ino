@@ -1237,5 +1237,7 @@ void loop() {
     digitalWrite(LED_GREEN, LOW); 
     digitalWrite(LED_RED, LOW); 
   }
-  checkOtaStatusFromServer(); 
+  if (WiFi.status() == WL_CONNECTED) {
+    checkOtaStatusFromServer();
+  } 
 }
