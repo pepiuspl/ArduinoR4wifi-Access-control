@@ -1,4 +1,4 @@
-name: Node.js Automated Production Deployment (Armored Debug Mode)
+name: Node.js Automated Production Deployment (Monolith KeepAlive)
 
 on:
   push:
@@ -13,69 +13,40 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: "01. [Lokalny] Pobieranie kodu z repozytorium GitHub"
+      - name: "01. Pobieranie kodu z repozytorium GitHub"
         uses: actions/checkout@v4
 
-      - name: "02. [Lokalny] Sprawdzenie obecności pliku źródłowego"
-        run: |
-          if [ -f "Server_app/server.js" ]; then
-            echo "✅ Plik istnieje."
-            ls -lh Server_app/server.js
-          else
-            echo "❌ BŁĄD: Brak pliku!"
-            exit 1
-          fi
-
-      - name: "03. [Lokalny] Tworzenie katalogu .ssh"
-        run: mkdir -p ~/.ssh
-
-      - name: "04. [Lokalny] Wstrzykiwanie klucza prywatnego SSH"
+      - name: "02. Wstrzykiwanie klucza prywatnego SSH"
         env:
           PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
-        run: echo "$PRIVATE_KEY" > ~/.ssh/id_ed25519
-
-      - name: "05. [Lokalny] Nadawanie uprawnień do klucza SSH"
-        run: chmod 600 ~/.ssh/id_ed25519
-
-      - name: "06. [Sieć] Test widoczności portu (Netcat)"
-        run: nc -zv -w 10 ${{ secrets.SERVER_HOST }} 22044
-
-      - name: "07. [SSH] Test czystego logowania i autoryzacji klucza"
         run: |
-          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'echo ✅ Krok 7: Autoryzacja SSH pomyślna!'"
+          mkdir -p ~/.ssh
+          echo "$PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
 
-      - name: "08. [Proxmox] Weryfikacja istnienia katalogu docelowego"
+      - name: "03. Transfer & Execute Monolith (JEDNA SESJA + KEEPALIVE)"
         run: |
-          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'mkdir -p /opt/smartlock-server && echo ✅ Krok 8: Katalog gotowy.'"
-
-      - name: "09. [Proxmox] Test uprawnień do zapisu w katalogu"
-        run: |
-          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'touch /opt/smartlock-server/.write_test && rm /opt/smartlock-server/.write_test && echo ✅ Krok 9: Uprawnienia zapisu OK.'"
-
-      - name: "10. [Lokalny] Test pakowania archiwum TAR"
-        run: tar -czf /tmp/test.tar.gz -C Server_app server.js
-
-      - name: "11. [Transfer] Przesyłanie i rozpakowywanie pliku (Tar Stream)"
-        run: |
-          echo "📦 Rozpoczynam pancerny przesył strumieniowy pliku..."
-          tar -czf - -C Server_app server.js | ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'tar -xzf - -C /opt/smartlock-server'"
-          echo "✅ Krok 11: Plik przesłany i rozpakowany."
-
-      - name: "12. [Proxmox] Weryfikacja integralności przesłanego pliku"
-        run: |
-          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'grep -n /api/firmware/version /opt/smartlock-server/server.js'"
-
-      - name: "13. [Proxmox] Sprawdzenie obecności usługi Systemd"
-        run: |
-          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'systemctl status smartlock --no-pager | head -n 5'"
-
-      - name: "14. [Proxmox] Wykonanie restartu usługi smartlock"
-        run: |
-          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'systemctl restart smartlock'"
-          echo "✅ Krok 14: Usługa zrestartowana."
-
-      - name: "15. [Proxmox] Weryfikacja końcowa statusu po restarcie"
-        run: |
-          sleep 2
-          ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c 'systemctl is-active smartlock'"
-          echo "🎉 GRATULACJE! Kod produkcyjny działa na porcie 3000!"
+          echo "📦 Rozpoczynam transfer i wdrażanie w JEDNEJ sesji odpornej na zrywanie..."
+          # Flagi ServerAliveInterval i TCPKeepAlive zmuszają router do utrzymania sesji!
+          tar -czf - -C Server_app server.js | ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c '
+            echo "========================================="
+            echo "1. Rozpakowywanie archiwum do /opt/smartlock-server/"
+            tar -xzf - -C /opt/smartlock-server/ || exit 1
+            
+            echo "2. Weryfikacja obecności kodu"
+            if grep -q "/api/firmware/version" /opt/smartlock-server/server.js; then
+              echo "✅ Kod zaktualizowany!"
+            else
+              echo "❌ Błąd: Nowy kod nie dotarł!"
+              exit 1
+            fi
+            
+            echo "3. Restartowanie usługi smartlock"
+            systemctl restart smartlock || exit 1
+            
+            echo "4. Sprawdzanie statusu usługi"
+            sleep 2
+            systemctl is-active smartlock
+            echo "========================================="
+            echo "🎉 Wdrożenie zakończone sukcesem!"
+          '"
