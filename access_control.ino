@@ -10,6 +10,8 @@
 #include "RTC.h" 
 #include <ArduinoOTA.h>  
 
+void performLocalFirmwareUpdate();
+
 const char* app_version = "v2.9.4";
 
 struct User { 
