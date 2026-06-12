@@ -240,9 +240,23 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { status: "processed" });
       }
 
-      // =========================================================================
-      // KROK 2: POTWIERDZENIE KODU Z MAILA I WPISANIE NOWEGO HASŁA
-      // =========================================================================
+      if (pathname === '/api/auth/verify_reset_code' && req.method === 'POST') {
+        const { email, code } = body;
+        if (!email || !code) return sendJSON(res, 400, { error: "Missing parameters" });
+
+        const cleanEmail = email.trim().toLowerCase();
+        const userRes = await dbPool.query(
+          'SELECT id FROM accounts WHERE email = $1 AND reset_token = $2 AND reset_token_expires > NOW()',
+          [cleanEmail, code]
+        );
+
+        if (userRes.rows.length === 0) {
+          return sendJSON(res, 400, { error: "Kod jest nieprawidłowy lub wygasł" });
+        }
+
+        return sendJSON(res, 200, { valid: true });
+      }
+      
       if (pathname === '/api/auth/confirm_password_reset' && req.method === 'POST') {
         const { email, code, newPassword } = body;
         if (!email || !code || !newPassword) return sendJSON(res, 400, { error: "Missing parameters" });
