@@ -10,8 +10,6 @@
 #include "RTC.h" 
 #include <ArduinoOTA.h>  
 
-void performLocalFirmwareUpdate();
-
 const char* app_version = "v2.9.4";
 
 struct User { 
@@ -849,6 +847,42 @@ void executeCloudSynchronization() {
   } else { 
     learningMode = false;
   } 
+}
+
+void performLocalFirmwareUpdate() {
+  WiFiClient otaClient;
+  updateDisplay("AKTUALIZACJA OTA", "Pobieranie pliku..."); 
+  
+  if (otaClient.connect("192.168.0.200", 3000)) {
+    otaClient.print("GET /updates/firmware.bin HTTP/1.1\r\n");
+    otaClient.print("Host: 192.168.0.200\r\n");
+    otaClient.print("Connection: close\r\n\r\n");
+    
+    while (otaClient.connected()) {
+      String line = otaClient.readStringUntil('\n');
+      if (line == "\r") {
+        break;
+      }
+    }
+    
+    unsigned long contentLength = 120000; 
+    if (InternalStorage.open(contentLength)) {
+      while (otaClient.available()) {
+        uint8_t b = otaClient.read();
+        InternalStorage.write(b);
+      }
+      InternalStorage.close();
+      otaClient.stop();
+      
+      updateDisplay("SUKCES OTA", "Restart urządzenia");
+      delay(2000);
+      NVIC_SystemReset(); // Hard-reset procesora Uno R4, wstaje na nowym sofcie!
+    } else {
+      updateDisplay("BŁĄD OTA", "Brak miejsca flash");
+    }
+  } else {
+    updateDisplay("BŁĄD OTA", "Brak linku z nodem");
+  }
 }
 
 void checkOtaStatusFromServer() {
