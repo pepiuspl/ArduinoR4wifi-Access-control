@@ -574,10 +574,21 @@ const server = http.createServer(async (req, res) => {
 
     // UPDATE LOGIC -- GET NEW PACKAGE
 
-    if (pathname === '/api/ota/push' && req.method === 'POST') {
-      const options = {
+    if (pathname === '/api/ota/push' && (req.method === 'POST' || req.method === 'GET')) {
+    const logFile = '/var/log/smartlock/smartlock_system.log';
+    
+    const forceLog = (msg) => {
+        try {
+            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG OTA PUSH] ${msg}\n`);
+        } catch (e) {}
+    };
+
+    forceLog("Inicjalizacja żądania OTA PUSH (pobieranie pliku .bin z GitHuba)...");
+
+    const options = {
         hostname: 'api.github.com',
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
+        family: 4,
         headers: { 
             'User-Agent': 'NodeJS-SmartLock-Server',
             'Authorization': `token ${GITHUB_PAT}`
@@ -586,38 +597,65 @@ const server = http.createServer(async (req, res) => {
 
     https.get(options, (githubRes) => {
         let data = '';
+        forceLog(`Odebrano strukturę zasobów z GitHuba. Kod statusu: ${githubRes.statusCode}`);
+        
         githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
             try {
                 const release = JSON.parse(data);
+                
+                if (githubRes.statusCode !== 200) {
+                    forceLog(`GitHub odrzucił żądanie. Powód: ${release.message}`);
+                    if (!res.headersSent) {
+                        res.writeHead(githubRes.statusCode, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: release.message }));
+                    }
+                    return;
+                }
+
                 const binAsset = release.assets.find(asset => asset.name.endsWith('.bin'));
                 
-                if (!binAsset) return sendJSON(res, 404, { error: "Brak pliku .bin w tym wydaniu." });
+                if (!binAsset) {
+                    forceLog("Krytyczny błąd: Nie znaleziono skompilowanego pliku .bin w tym wydaniu GitHuba!");
+                    if (!res.headersSent) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: "Brak pliku .bin w Release" }));
+                    }
+                    return;
+                }
 
-                // 🌟 Dla prywatnych repozytoriów uderzamy w endpoint ID zasobu z odpowiednim nagłówkiem Accept
+                forceLog(`Zlokalizowano plik: ${binAsset.name} (ID: ${binAsset.id}). Pobieranie strumienia...`);
+
                 const downloadOptions = {
                     hostname: 'api.github.com',
                     path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${binAsset.id}`,
+                    family: 4,
                     headers: {
                         'User-Agent': 'NodeJS-SmartLock-Server',
                         'Authorization': `token ${GITHUB_PAT}`,
-                        'Accept': 'application/octet-stream' // Wymuszenie strumienia binarnego
+                        'Accept': 'application/octet-stream'
                     }
                 };
 
                 const file = fs.createWriteStream(path.join(updatesDir, 'firmware.bin'));
                 
                 https.get(downloadOptions, (fileRes) => {
-                    // GitHub przekieruje nas (302) do zaszyfrowanej, bezpiecznej przestrzeni AWS S3
+                    forceLog(`Połączenie z magazynem pliku. Kod HTTP: ${fileRes.statusCode}`);
+                    
                     if (fileRes.statusCode === 302) {
-                        // Przy przekierowaniu AWS S3 nie wolno przesyłać nagłówka "Authorization", 
-                        // dlatego czysty https.get(url) bez dodatkowych obiektów konfiguracyjnych jest tu idealny
-                        https.get(fileRes.headers.location, (redirectRes) => {
+                        forceLog(`Przekierowanie AWS S3 wykryte. Adres docelowy autoryzowany.`);
+                        
+                        https.get(fileRes.headers.location, { family: 4 }, (redirectRes) => {
                             redirectRes.pipe(file);
                             file.on('finish', () => {
                                 file.close();
-                                otaUpdatePending = true;
-                                return sendJSON(res, 200, { success: true, message: "Prywatna paczka pobrana pomyślnie." });
+                                otaUpdatePending = true; // ZAPALAMY FLAGĘ DLA ZAMKA! 🎯
+                                forceLog("Sukces! Nowy plik firmware.bin został pobrany i zabezpieczony w katalogu updates.");
+                                
+                                if (!res.headersSent) {
+                                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                                    res.end(JSON.stringify({ success: true, message: "Paczka pobrana lokalnie." }));
+                                }
                             });
                         });
                     } else {
@@ -625,16 +663,26 @@ const server = http.createServer(async (req, res) => {
                         file.on('finish', () => {
                             file.close();
                             otaUpdatePending = true;
-                            return sendJSON(res, 200, { success: true });
+                            forceLog("Sukces! Plik firmware.bin pobrany bezpośrednio.");
+                            
+                            if (!res.headersSent) {
+                                res.writeHead(200, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ success: true }));
+                            }
                         });
                     }
                 });
             } catch (e) {
-                return sendJSON(res, 500, { error: "Inicjalizacja pobierania nieudana." });
+                forceLog(`Błąd przetwarzania OTA PUSH: ${e.message}`);
+                if (!res.headersSent) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: e.message }));
+                }
             }
         });
     });
-  }
+    return;
+}
       // Return .bin file
 
       if (pathname === '/updates/firmware.bin' && req.method === 'GET') {

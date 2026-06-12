@@ -592,9 +592,9 @@ export default function App() {
 
               {otaState === 'available' && (
                 <View style={{ marginTop: 8 }}>
-                  <Text style={[styles.learningAlertText, { marginBottom: 16 }]}>🚀 Wykryto nowszą wersję oprogramowania</Text>
+                  <Text style={[styles.learningAlertText, { marginBottom: 16 }]}>🚀 Wykryto nowszą wersję oprogramowania {latestVersion || 'v2.9.5'}</Text>
                   <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#e11d48', marginTop: 0 }]} onPress={() => executeCommand('/api/ota/push')}>
-                    <Text style={styles.btnText}>Zaktualizuj Node</Text>
+                    <Text style={styles.btnText}>Zaktualizuj oprogramowanie</Text>
                   </TouchableOpacity>
                 </View>
               )}
