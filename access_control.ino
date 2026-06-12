@@ -1039,9 +1039,9 @@ void setup() {
   lastRfidWatchdogTime = millis();
   lastFrameTick = millis();
 
-  if (WDT.begin(4000)) {
-    WDT.refresh(); 
-  } 
+  //if (WDT.begin(4000)) {
+  //  WDT.refresh(); 
+  //} 
 }
 void loop() {
   WDT.refresh(); 
