@@ -1058,7 +1058,7 @@ void loop() {
       for (byte i = 0; i < rfid.uid.size; i++) { 
         if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
         uidStr += String(rfid.uid.uidByte[i], HEX); 
-        if (i < rfid.uid.size - 1) uidStr += " ");
+        if (i < rfid.uid.size - 1) uidStr += " ";
       } 
       uidStr.toUpperCase(); 
       transmitCardPayloadToCloud(uidStr, rfid.uid.uidByte, learningMode);
