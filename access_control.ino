@@ -870,6 +870,7 @@ void performLocalFirmwareUpdate() {
       while (otaClient.available()) {
         uint8_t b = otaClient.read();
         InternalStorage.write(b);
+        WDT.refresh();
       }
       InternalStorage.close();
       otaClient.stop();
