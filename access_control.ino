@@ -14,7 +14,7 @@
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
 
-const char* app_version = "v2.9.6";
+const char* app_version = "v2.9.7"; // Zmieniamy na 2.9.7, aby serwer widział postęp
 
 struct User { 
   byte uid[4]; 
@@ -54,7 +54,7 @@ void sendHtmlPortal(WiFiClient& client, const char* title);
 String urlEncode(String str) { 
   String encoded = ""; 
   char c; 
-  char hex[3];
+  char hexDigits[] = "0123456789ABCDEF";
   for (unsigned int i = 0; i < str.length(); i++) { 
     c = str[i];
     if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') { 
@@ -62,8 +62,10 @@ String urlEncode(String str) {
     } else if (c == ' ') { 
       encoded += '+';
     } else { 
-      sprintf(hex, "%%%02X", c); 
-      encoded += hex;
+      // 🌟 LEKKA OPTYMALIZACJA: Zastąpienie sprintf szybkim mapowaniem hex
+      encoded += '%';
+      encoded += hexDigits[(c >> 4) & 0x0F];
+      encoded += hexDigits[c & 0x0F];
     } 
   } 
   return encoded; 
@@ -162,9 +164,15 @@ String urlDecode(String str) {
 String getMacAddressString() {
   uint8_t mac[6];
   WiFi.macAddress(mac);
-  char macBuf[18];
-  sprintf(macBuf, "%02X:%02X:%02X:%02X:%02X:%02X", mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]);
-  return String(macBuf);
+  char hexDigits[] = "0123456789ABCDEF";
+  String macStr = "";
+  // 🌟 LEKKA OPTYMALIZACJA: Zastąpienie sprintf natywną pętlą przesunięć bitowych
+  for (int i = 5; i >= 0; i--) {
+    macStr += hexDigits[(mac[i] >> 4) & 0x0F];
+    macStr += hexDigits[mac[i] & 0x0F];
+    if (i > 0) macStr += ":";
+  }
+  return macStr;
 }
 
 void loadConfiguration() { 
@@ -259,9 +267,10 @@ void forceHardwareRFIDReset() {
 String getFormattedSystemTime() { 
   RTCTime currentRTCTime; 
   if (RTC.getTime(currentRTCTime)) { 
-    char timeBuffer[6];
-    sprintf(timeBuffer, "%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes()); 
-    return String(timeBuffer); 
+    // 🌟 LEKKA OPTYMALIZACJA: Usunięcie sprintf z zegarka
+    int h = currentRTCTime.getHour();
+    int m = currentRTCTime.getMinutes();
+    return (h < 10 ? "0" : "") + String(h) + ":" + (m < 10 ? "0" : "") + String(m);
   } 
   return "--:--"; 
 } 
@@ -379,9 +388,12 @@ void sendExternalTelemetry(String logData) {
 void addLog(String msg) { 
   RTCTime currentRTCTime; 
   RTC.getTime(currentRTCTime); 
-  char timeBuffer[12];
-  sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
-  String currentTime = String(timeBuffer); 
+  // 🌟 LEKKA OPTYMALIZACJA: Usunięcie sprintf z loggera operacji
+  int h = currentRTCTime.getHour();
+  int m = currentRTCTime.getMinutes();
+  int s = currentRTCTime.getSeconds();
+  String currentTime = (h < 10 ? "0" : "") + String(h) + ":" + (m < 10 ? "0" : "") + String(m) + ":" + (s < 10 ? "0" : "") + String(s);
+  
   if (logCount < MAX_LOGS) { 
     lastActions[logCount++] = {currentTime, msg};
   } else { 
@@ -405,7 +417,6 @@ void openDoor(String source) {
   addLog("Otwarto: " + source);
 } 
 
-// Zunifikowany kreator portalu HTML (Drastyczna oszczędność pamięci Flash)
 void sendHtmlPortal(WiFiClient& client, const char* title) {
   client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"); 
   client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1.0'><style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;}.box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;}input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>"); 
@@ -484,7 +495,8 @@ void handleWebServer() {
 
   if (reqHeader.indexOf("GET /api/forgot_password") != -1) { 
     long tokenNum = random(100000, 999999);
-    sprintf(temporary_password, "%ld", tokenNum); 
+    // 🌟 LEKKA OPTYMALIZACJA: Zastąpienie sprintf natywną konwersją String
+    String(tokenNum).toCharArray(temporary_password, 8);
     hasTemporaryPassword = true; 
     addLog("TEMP PWD: " + String(temporary_password)); 
     globalDisplayInfo = "Key sent";
@@ -811,7 +823,9 @@ void executeCloudSynchronization() {
   httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(proxmox_log_server);  
   httpCheck.println("Connection: close\r\n");  
-  unsigned long deadline = millis() + 300;
+  
+  // 🌟 POKŁOSIE POPRAWKI TIMEOUTU: 1500ms bezpiecznego nasłuchu
+  unsigned long deadline = millis() + 1500;
   String payloadResponse = "";  
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {  
     if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK");
@@ -890,6 +904,7 @@ void performLocalFirmwareUpdate() {
         if (availableBytes > 0) {
           int toRead = min(availableBytes, (int)sizeof(buffer));
           if (receivedBytes + toRead > contentLength) {
+            toRead = contentLength - bytesToRead;
             toRead = contentLength - receivedBytes;
           }
           
