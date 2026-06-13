@@ -8,7 +8,7 @@ const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 
 // =========================================================================
-// ⚙️ GLOBAL PLATFORM CONFIGURATION SPACE
+// GLOBAL PLATFORM CONFIGURATION SPACE
 // =========================================================================
 
 const HARDWARE_OTA_USER = 'admin';
@@ -32,12 +32,12 @@ const dbPool = new Pool({
   port: 5432,
 });
 
-// 📧 REINFORCED PRODUCTION BREVO SMTP RELAY CHANNEL LAYER
+// REINFORCED PRODUCTION BREVO SMTP RELAY CHANNEL LAYER
 const mailTransport = nodemailer.createTransport({
   host: '127.0.0.1',
   port: 25,
   secure: false,
-  ignoreTLS: true, // 🌟 Nakazuje Nodemailerowi zignorować brak certyfikatów SSL na porcie 25
+  ignoreTLS: true,
   auth: null
 });
 

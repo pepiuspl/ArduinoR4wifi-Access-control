@@ -599,10 +599,12 @@ HEADER_COMPLETE:
     client.println("{\"success\":true}"); 
     delay(100); 
     client.stop(); 
+    
     addLog("OTA COMPLETE. APPLYING CORE REWRITE..."); 
     tone(BUZZER_PIN, 1800, 300); delay(100); tone(BUZZER_PIN, 2200, 500); 
     delay(1000); 
     InternalStorage.apply();
+    NVIC_SystemReset(); 
     blockTelemetry = false; 
     return; 
   } 
