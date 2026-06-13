@@ -3,7 +3,7 @@ name: Automated Firmware Compiler & Release
 on:
   push:
     tags:
-      - 'v*' # Triggers automatically whenever you push a version tag (e.g., v2.9.3)
+      - 'v*' # Triggers automatically whenever you push a version tag (e.g., v2.9.5)
 
 jobs:
   build-and-release:
@@ -41,7 +41,7 @@ jobs:
         arduino-cli lib install "NTPClient"
         arduino-cli lib install "ArduinoOTA"
 
-    # 5. Hyper-Robust Workspace Assembly & Compilation
+    # 5. Hyper-Robust Workspace Assembly & Compilation (FIXED VERSION)
     - name: Compile Firmware to Binary
       run: |
         INO_FILE=$(find . -name "*.ino" | head -n 1)
@@ -52,16 +52,27 @@ jobs:
         
         SKETCH_NAME=$(basename "$INO_FILE" .ino)
         SKETCH_DIR=$(dirname "$INO_FILE")
-        echo "🎯 Target sketch file found: $INO_FILE"
-        echo "⚙️ Creating clean workspace folder named: $SKETCH_NAME"
+        CURRENT_PARENT_DIR=$(basename "$SKETCH_DIR")
         
-        mkdir -p "$SKETCH_NAME"
-        cp "$INO_FILE" "$SKETCH_NAME/$SKETCH_NAME.ino"
-        cp "$SKETCH_DIR"/*.h "$SKETCH_NAME"/ 2>/dev/null || true
-        cp "$SKETCH_DIR"/*.cpp "$SKETCH_NAME"/ 2>/dev/null || true
+        echo "🎯 Target sketch file found: $INO_FILE"
+        
+        # 🌟 INTELIGENTNY SAFETÝ GUARD: 
+        # Jeśli plik leży już w prawidłowym folderze (np. access_control/access_control.ino), 
+        # nie kopiujemy go, aby Linux nie rzucał błędu "same file".
+        if [ "$CURRENT_PARENT_DIR" = "$SKETCH_NAME" ]; then
+          echo "✅ Struktura katalogów jest już prawidłowa. Kompilacja bezpośrednia."
+          COMPILE_TARGET="$SKETCH_DIR"
+        else
+          echo "⚙️ Plik znaleziony luzem. Tworzenie czystego folderu roboczego: $SKETCH_NAME"
+          mkdir -p "$SKETCH_NAME"
+          cp "$INO_FILE" "$SKETCH_NAME/$SKETCH_NAME.ino"
+          cp "$SKETCH_DIR"/*.h "$SKETCH_NAME"/ 2>/dev/null || true
+          cp "$SKETCH_DIR"/*.cpp "$SKETCH_NAME"/ 2>/dev/null || true
+          COMPILE_TARGET="./$SKETCH_NAME"
+        fi
         
         mkdir -p build
-        arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi --output-dir ./build "./$SKETCH_NAME"
+        arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi --output-dir ./build "$COMPILE_TARGET"
 
     - name: Debug Build Output
       run: |
