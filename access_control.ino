@@ -861,41 +861,63 @@ void performLocalFirmwareUpdate() {
     otaClient.print("Host: 192.168.0.200\r\n");
     otaClient.print("Connection: close\r\n\r\n");
 
-    // Bezpieczne parsowanie nagłówków z filtrem anty-zwisowym
+    unsigned long contentLength = 0;
+
+    // 🌟 DYNAMICZNE PARSOWANIE NAGŁÓWKÓW HTTP
     while (otaClient.connected()) {
       String line = otaClient.readStringUntil('\n');
+      
+      // Szukamy linijki z rozmiarem pliku przesyłanym przez Proxmox
+      if (line.indexOf("Content-Length:") >= 0) {
+        contentLength = line.substring(line.indexOf(":") + 1).toInt();
+      }
+      
+      // Pusta linia (\r lub \r\n) oznacza koniec nagłówków i początek czystego pliku .bin
       if (line == "\r" || line == "\r\n" || line.length() == 0) {
         break;
       }
     }
     
-    unsigned long contentLength = 120000; // Stały rozmiar bufora aktualizacyjnego binu
+    // Zabezpieczenie: jeśli serwer nie podał rozmiaru, przerywamy, żeby nie uszkodzić Flasha
+    if (contentLength == 0) {
+      updateDisplay("BŁĄD OTA", "Brak rozmiaru naglowka");
+      otaClient.stop();
+      delay(3000);
+      return;
+    }
     
+    // Otwieramy InternalStorage na IDEALNĄ wielkość pliku
     if (InternalStorage.open(contentLength)) {
       uint32_t receivedBytes = 0;
-      unsigned long receiveDeadline = millis() + 30000; // 30 sekund twardego limitu na brak transmisji
+      unsigned long receiveDeadline = millis() + 10000; // 10 sekund timeoutu na pakiety
       
-      // 🌟 STABILNA PĘTLA POBIERANIA (Identyczna jak w Twoim WebServerze)
-      while (receivedBytes < contentLength && millis() < receiveDeadline) { 
+      // 🌟 PĘTLA POBIERANIA ZWIĄZANA Z REALNYM ROZMIAREM PLIKU
+      while (receivedBytes < contentLength && otaClient.connected()) { 
         while (otaClient.available()) { 
           uint8_t b = otaClient.read();
           InternalStorage.write(b); 
           receivedBytes++; 
-          receiveDeadline = millis() + 30000; // Odświeżamy czas po odebraniu każdego bajtu
+          receiveDeadline = millis() + 10000; // Reset timeoutu po każdym odebranym bajcie
           if (receivedBytes >= contentLength) break;
         } 
+        
+        if (millis() > receiveDeadline) {
+          Serial.println("[OTA ERR] Przekroczono limit czasu transmisji danych.");
+          break;
+        }
         delay(1); 
       } 
       
       InternalStorage.close(); 
       otaClient.stop(); 
       
+      // Jeśli odebraliśmy dokładnie tyle bajtów, ile zadeklarował serwer - robimy flash!
       if (receivedBytes == contentLength) {
-        updateDisplay("SUKCES OTA", "Restart urządzenia"); 
+        updateDisplay("SUKCES OTA", "Wgrywanie i Reset..."); 
         delay(2000); 
-        NVIC_SystemReset(); 
+        NVIC_SystemReset(); // Płytka wstaje z nowym programem v2.9.5!
       } else {
-        updateDisplay("BŁĄD OTA", "Niekompletny plik");
+        updateDisplay("BŁĄD OTA", "Blad sumy bajtow");
         delay(3000);
       }
     } else {

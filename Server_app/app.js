@@ -17,7 +17,7 @@ try {
 }
 
 export default function App() {
-  let [backendUrl, setBackendUrl] = useState('http://192.168.0.200:3000'); 
+  let [backendUrl, setBackendUrl] = useState('http://185.101.191.76:3000'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [accountId, setAccountId] = useState(null);
@@ -381,21 +381,36 @@ export default function App() {
   }, [isConfigured, accountId, backendUrl]);
 
   const executeCommand = (endpoint, payload = null) => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const method = payload ? 'POST' : 'GET';
-    const config = {
-      method: method,
-      headers: payload ? { 'Content-Type': 'application/json' } : {}
-    };
-    if (payload) config.body = JSON.stringify({ ...payload, accountId });
+  // Wywołujemy Twoją haptykę (wibrację) natychmiast po dotknięciu
+  Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
-    const separator = endpoint.includes('?') ? '&' : '?';
-    fetch(`${backendUrl}${endpoint}${payload ? '' : separator + 'accountId=' + accountId}`, config)
-      .then(() => {
-        fetchStatus();
-      })
-      .catch((error) => setErrorMessage(`Transaction failure: ${error.message}`));
+  if (endpoint === '/api/unlock') {
+    setLockState(prevState => ({ ...prevState, lock: 'pending' }));
+  }
+
+  const method = payload ? 'POST' : 'GET';
+  const config = {
+    method: method,
+    headers: payload ? { 'Content-Type': 'application/json' } : {}
   };
+  if (payload) config.body = JSON.stringify({ ...payload, accountId });
+
+  const separator = endpoint.includes('?') ? '&' : '?';
+  
+  fetch(`${backendUrl}${endpoint}${payload ? '' : separator + 'accountId=' + accountId}`, config)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+      
+      fetchStatus();
+    })
+    .catch((error) => {
+      if (endpoint === '/api/unlock') {
+        setLockState(prevState => ({ ...prevState, lock: false }));
+      }
+      
+      setErrorMessage(`Transaction failure: ${error.message}`);
+    });
+};
 
   const handleToggleLearn = () => {
     if (lockState.mode === 'Uczenie') {
@@ -447,11 +462,15 @@ export default function App() {
   }, [backendUrl, resetUiToDefault]); 
 
   useEffect(() => {
-    if (!isConfigured || !accountId) return;
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
-    return () => clearInterval(interval);
-  }, [isConfigured, accountId, fetchStatus]);
+  if (!isConfigured || !accountId) return;
+
+  fetchStatus(); // Pobierz stan od razu
+  
+  const dynamicIntervalTime = (lockState.lock === true || lockState.lock === 'pending') ? 500 : 3000;
+  
+  const interval = setInterval(fetchStatus, dynamicIntervalTime);
+  return () => clearInterval(interval);
+}, [isConfigured, accountId, fetchStatus, lockState.lock]);
 
   if (!isConfigured) {
     return (
@@ -559,11 +578,32 @@ export default function App() {
             <Text style={styles.screenHeaderText}>📱 Pokój Kontrolny</Text>
             {errorMessage ? <View style={styles.errorCard}><Text style={styles.errorTextInsideCard}>⚠️ {errorMessage}</Text></View> : null}
             <View style={styles.statusBox}>
-              <Text style={styles.label}>Stan Rygla Elektromagnetycznego:</Text>
-              <Text style={[styles.valueBold, { color: lockState.lock ? '#81c784' : '#e57373' }]}>{lockState.lock ? '🔓 OTWARTY / SYSTEM ZWOLNIONY' : '🔒 ZABEZPIECZONY / RYGIEL ZABLOKOWANY'}</Text>
-              <Text style={styles.subLabel}>Bieżący tryb operacyjny hardware: {lockState.mode}</Text>
-            </View>
-            <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: lockState.lock ? '#cc3333' : '#2e7d32' }]} onPress={() => executeCommand('/api/unlock')}><Text style={styles.btnText}>{lockState.lock ? 'Zwalnianie impulsu...' : '⚡ Otwórz Drzwi Zdalnie'}</Text></TouchableOpacity>
+  <Text style={styles.label}>Stan Rygla Elektromagnetycznego:</Text>
+  
+  {/* 🌟 Dynamiczne kolory dla 3 stanów automatyki */}
+  <Text style={[styles.valueBold, { 
+    color: lockState.lock === true ? '#81c784' : lockState.lock === 'pending' ? '#ffb74d' : '#e57373' 
+  }]}>
+    {lockState.lock === true && '🔓 OTWARTY / SYSTEM ZWOLNIONY'}
+    {lockState.lock === 'pending' && '⚡ WYWOŁYWANIE SYGNAŁU WĘZŁA...'}
+    {lockState.lock === false && '🔒 ZABEZPIECZONY / RYGIEL ZABLOKOWANY'}
+  </Text>
+  
+  <Text style={styles.subLabel}>Bieżący tryb operacyjny hardware: {lockState.mode}</Text>
+</View>
+
+{/* 🌟 Dynamiczny przycisk */}
+<TouchableOpacity 
+  style={[styles.actionTriggerBtn, { 
+    backgroundColor: lockState.lock === true ? '#cc3333' : lockState.lock === 'pending' ? '#ffa726' : '#2e7d32' 
+  }]} 
+  disabled={lockState.lock === 'pending'}
+  onPress={() => executeCommand('/api/unlock')}
+>
+  <Text style={styles.btnText}>
+    {lockState.lock === true ? 'Zwalnianie impulsu...' : lockState.lock === 'pending' ? 'Czekam na hardware...' : '⚡ Otwórz Drzwi Zdalnie'}
+  </Text>
+</TouchableOpacity>
             <View style={styles.card}>
               <Text style={styles.sectionHeader}>➕ Mapowanie Nowego Lokatora</Text>
               {lockState.mode === 'Uczenie' ? <Text style={styles.learningAlertText}>⚠️ Urządzenie oczekuje na zbliżenie fizycznego klucza RFID do czytnika...</Text> : <TextInput style={styles.inputField} placeholder="Nazwa nowego profilu (np. Jan Kowalski)" placeholderTextColor="#555" value={newName} onChangeText={setNewName} />}

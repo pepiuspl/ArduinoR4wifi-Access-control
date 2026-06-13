@@ -446,21 +446,35 @@ const server = http.createServer(async (req, res) => {
       // ZDALNE WYWOŁANIE OTWARCIA Z APLIKACJI
       // =========================================================================
       if (pathname === '/api/unlock' && req.method === 'GET') {
-        const accountId = query.accountId;
-        const devRes = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
-        if (devRes.rows.length > 0) {
-          const targetMac = devRes.rows[0].mac_address;
-          unlockQueues[targetMac] = true; 
-          unlockQueues['00:00:00:00:00:00'] = true;
-          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
-          writeToLocalLogFile('API Control Command', `Dispatched remote unlock trigger down to: ${targetMac}`);
-          setTimeout(() => { 
-            unlockQueues[targetMac] = false; 
-            unlockQueues['00:00:00:00:00:00'] = false;
-          }, 15000); 
-        }
-        return sendJSON(res, 200, { status: "ok" });
+  const accountId = query.accountId;
+  const devRes = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+  if (devRes.rows.length > 0) {
+    const targetMac = devRes.rows[0].mac_address;
+    
+    unlockQueues[targetMac] = true; 
+    unlockQueues['00:00:00:00:00:00'] = true;
+
+    // 🌟 POPRAWKA: Ustawiamy stan rygla na TRUE natychmiast na poziomie serwera!
+    // Dzięki temu aplikacja przy najbliższym zapytaniu od razu zobaczy status OTWARTY.
+    if (typeof actualLockStates === 'object') {
+      actualLockStates[targetMac] = true;
+    }
+
+    await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
+    writeToLocalLogFile('API Control Command', `Dispatched remote unlock trigger down to: ${targetMac}`);
+    
+    setTimeout(() => { 
+      unlockQueues[targetMac] = false; 
+      unlockQueues['00:00:00:00:00:00'] = false;
+      
+      // Po 5 sekundach (gdy zamek się zablokuje), serwer bezpiecznie przywróci false
+      if (typeof actualLockStates === 'object') {
+        actualLockStates[targetMac] = false;
       }
+    }, 5000); 
+  }
+  return sendJSON(res, 200, { status: "ok" });
+}
 
       // =========================================================================
       // WŁĄCZENIE TRYBU UCZENIA CZYTNIKA RFID
@@ -766,53 +780,62 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
-      // PĘTLA POLL ZAMKA (Z PARAMETRAMI: MAC, VERSION ORAZ OPENED)
+      // LOOP POLL ZAMKA 
       // =========================================================================
       if ((pathname === '/api/hardware/poll' || pathname === '/api/poll' || pathname === '/poll') && req.method === 'GET') {
-        let mac = query.mac;
-        if (mac) {
-          actualLockStates[mac] = (query.opened === '1'); // Synchronizacja stanu fizycznego w locie
-        }
-        let currentHardwareVersion = '0.0.0';
+  let mac = query.mac;
 
-        if (!mac) {
-          const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
-          if (ipLookup.rows.length > 0) {
-            mac = ipLookup.rows[0].mac_address;
-            currentHardwareVersion = ipLookup.rows[0].firmware_version || '0.0.0';
-          } else {
-            mac = '00:00:00:00:00:00';
-          }
-        } else {
-          const devLookup = await dbPool.query('UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version', [cleanIp, mac]);
-          if (devLookup.rows.length > 0) {
-            currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
-          }
-        }
+  let currentHardwareVersion = '0.0.0';
 
-        const unlockAction = unlockQueues[mac] || unlockQueues['00:00:00:00:00:00'] || false;
-        const isLearning = learningQueues[mac] ? true : false;
+  if (!mac) {
+    const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
+    if (ipLookup.rows.length > 0) {
+      mac = ipLookup.rows[0].mac_address;
+      currentHardwareVersion = ipLookup.rows[0].firmware_version || '0.0.0';
+    } else {
+      mac = '00:00:00:00:00:00';
+    }
+  } else {
+    const devLookup = await dbPool.query('UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version', [cleanIp, mac]);
+    if (devLookup.rows.length > 0) {
+      currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
+    }
+  }
 
-        if (unlockAction) {
-          unlockQueues[mac] = false;
-          unlockQueues['00:00:00:00:00:00'] = false;
-          writeToLocalLogFile('Hardware Node Poll Pipeline', `Consumed unlock signal token packet down to hardware node: ${mac}`);
-        }
+  const unlockAction = unlockQueues[mac] || unlockQueues['00:00:00:00:00:00'] || false;
+  const isLearning = learningQueues[mac] ? true : false;
 
-        const latestFw = getLatestFirmwareContext();
-        const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
-        const cleanLatest = latestFw.version.trim();
-        
-        const otaUpdateTrigger = (cleanLatest !== '0.0.0' && cleanCurrent !== cleanLatest);
+  if (unlockAction) {
+    unlockQueues[mac] = false;
+    unlockQueues['00:00:00:00:00:00'] = false;
+    writeToLocalLogFile('Hardware Node Poll Pipeline', `Consumed unlock signal token packet down to hardware node: ${mac}`);
 
-        return sendJSON(res, 200, {
-          unlock: unlockAction,
-          learn: isLearning,
-          username: learningQueues[mac] || '',
-          ota: otaUpdateTrigger,
-          latest_version: latestFw.version
-        });
-      }
+    actualLockStates[mac] = true;
+
+    setTimeout(() => {
+      actualLockStates[mac] = false;
+    }, 2000);
+
+  } else {
+    if (actualLockStates[mac] !== true && mac !== '00:00:00:00:00:00') {
+      actualLockStates[mac] = (query.opened === '1');
+    }
+  }
+
+  const latestFw = getLatestFirmwareContext();
+  const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
+  const cleanLatest = latestFw.version.trim();
+  
+  const otaUpdateTrigger = (cleanLatest !== '0.0.0' && cleanCurrent !== cleanLatest);
+
+  return sendJSON(res, 200, {
+    unlock: unlockAction,
+    learn: isLearning,
+    username: learningQueues[mac] || '',
+    ota: otaUpdateTrigger,
+    latest_version: latestFw.version
+  });
+}
 
       // =========================================================================
       // ODBIERANIE STRUMIENIA TELEMETRII Z ZAMKA
