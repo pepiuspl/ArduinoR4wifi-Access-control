@@ -19,7 +19,7 @@ const GITHUB_USER = "pepiuspl";
 const GITHUB_REPO = "ArduinoR4wifi-Access-control";
 
 let otaUpdatePending = false;
-let latestFirmwareVersion = "2.9.4";
+let latestFirmwareVersion = "2.9.5";
 let latestFirmwareFile = "";
 const updatesDir = '/opt/smartlock-server/updates';
 
