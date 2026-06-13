@@ -41,7 +41,8 @@ jobs:
         arduino-cli lib install "NTPClient"
         arduino-cli lib install "ArduinoOTA"
 
-   - name: Compile Firmware to Binary
+    # 5. Hyper-Robust Workspace Assembly & Compilation (PANCERNA WERSJA ANTY-SYMLINK)
+    - name: Compile Firmware to Binary
       run: |
         INO_FILE=$(find . -name "*.ino" | head -n 1)
         if [ -z "$INO_FILE" ]; then
