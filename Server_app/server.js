@@ -794,59 +794,83 @@ if (pathname === '/api/hardware/log' && req.method === 'GET') {
       // LOOP POLL ZAMKA 
       // =========================================================================
       if ((pathname === '/api/hardware/poll' || pathname === '/api/poll' || pathname === '/poll') && req.method === 'GET') {
-          const logFile = '/var/log/smartlock/smartlock_system.log';
-          const forceLog = (msg) => {
-            try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG HARDWARE POLL] ${msg}\n`); } catch (e) {}
-          };
+  const logFile = '/var/log/smartlock/smartlock_system.log';
+  const forceLog = (msg) => {
+    try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG HARDWARE POLL] ${msg}\n`); } catch (e) {}
+  };
 
-        let mac = query.mac;
-        // WYKRYWANIE WERSJI W LOCIE: Sprawdzamy, czy zamek pochwalił się swoją wersją w query stringu
-        let clientReportedVersion = query.version || null; 
-        let currentHardwareVersion = '0.0.0';
+  let mac = query.mac;
+  if (mac) mac = mac.toUpperCase();
+  
+  // Jeśli system nie znajdzie takiego adresu MAC w bazie, automatycznie odwracamy bajty,
+  // aby zapytania SQL idealnie trafiły w zarejestrowane urządzenie.
+  if (mac && mac.includes(':')) {
+    const checkDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [mac]);
+    if (checkDev.rows.length === 0) {
+      const reversedMac = mac.split(':').reverse().join(':');
+      forceLog(`⚠️ Wykryto odwrócony bufor MAC z rygla Arduino! Prostowanie ścieżki: ${mac} -> ${reversedMac}`);
+      mac = reversedMac;
+    }
+  }
 
-        forceLog(`=== NOWE ZAPYTANIE POLL === MAC: ${mac || 'Nie podano'}, IP: ${cleanIp}, Wersja z rygla: ${clientReportedVersion || 'Nie wysłano w żądaniu'}`);
+  // Definiujemy stany na podstawie Twoich globalnych kolejek rygla, zapobiegając ReferenceError
+  const unlockAction = !!(unlockQueues[mac] || unlockQueues['00:00:00:00:00:00']);
+  const isLearning = !!learningQueues[mac]; 
 
-        if (!mac) {
-          const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
-        if (ipLookup.rows.length > 0) {
-          mac = ipLookup.rows[0].mac_address;
-          currentHardwareVersion = ipLookup.rows[0].firmware_version || '0.0.0';
-        } else {
-          mac = '00:00:00:00:00:00';
-        }
-      } else {
-        //  INTELIGENTNY UPDATE BAZY: 
-        // Jeśli zamek przysłał parametrem swoja wersje, zapisujemy ja do bazy. 
-        // Dzięki temu, po udanym OTA i restarcie, baza sama przestawi się z v2.9.4 na v2.9.5!
-        let queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version';
-        let queryParams = [cleanIp, mac];
+  let clientReportedVersion = query.version || null; 
+  let currentHardwareVersion = '0.0.0';
 
-        if (clientReportedVersion) {
-          queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
-          queryParams = [cleanIp, mac, clientReportedVersion];
-        }
+  forceLog(`=== NOWE ZAPYTANIE POLL === MAC: ${mac || 'Nie podano'}, IP: ${cleanIp}, Wersja z rygla: ${clientReportedVersion || 'Nie wysłano w żądaniu'}`);
 
-        const devLookup = await dbPool.query(queryText, queryParams);
-        if (devLookup.rows.length > 0) {
-          currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
-        }
-      }
+  if (!mac) {
+    const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
+    if (ipLookup.rows.length > 0) {
+      mac = ipLookup.rows[0].mac_address;
+      currentHardwareVersion = ipLookup.rows[0].firmware_version || '0.0.0';
+    } else {
+      mac = '00:00:00:00:00:00';
+    }
+  } else {
+    // Zapisujemy i aktualizujemy tętno (heartbeat) urządzenia oraz jego wersję
+    let queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version';
+    let queryParams = [cleanIp, mac];
 
-    forceLog(`Zweryfikowana wersja w bazie dla [${mac}]: ${currentHardwareVersion}`);
+    if (clientReportedVersion) {
+      queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
+      queryParams = [cleanIp, mac, clientReportedVersion];
+    }
+
+    const devLookup = await dbPool.query(queryText, queryParams);
+    if (devLookup.rows.length > 0) {
+      currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
+    }
+  }
+
+  // Konsumpcja tokenu otwierania (przywrócenie fizycznego działania przekaźnika)
+  if (unlockAction) {
+    unlockQueues[mac] = false;
+    unlockQueues['00:00:00:00:00:00'] = false;
+    actualLockStates[mac] = true;
+    
+    // Podtrzymanie statusu "OTWARTY" skrócone do 2 sekund (zgodnie z wcześniejszym planem)
+    setTimeout(() => {
+      actualLockStates[mac] = false;
+    }, 2000); 
+  }
+
+  forceLog(`Zweryfikowana wersja w bazie dla [${mac}]: ${currentHardwareVersion}`);
   
   const latestFw = getLatestFirmwareContext();
   
-  // 🌟 POPRAWKA: Czyścimy z literki 'v' OBA ciągi tekstowe, aby porównywać same cyfry!
+  // Obydwa ciągi tekstowe oczyszczamy z literki 'v', gwarantując stabilne porównanie cyfr
   const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
-  const cleanLatest = latestFw.version.replace('v', '').trim(); 
+  const cleanLatest = latestFw.version.replace('v', '').trim();
   
   const otaUpdateTrigger = (cleanLatest !== '0.0.0' && cleanCurrent !== cleanLatest);
-
-  // Dodatkowy log dla Ciebie, żebyś widział czyste porównanie w konsoli Proxmoxa
   forceLog(`Porównanie OTA -> Lokalna czysta: [${cleanCurrent}] vs Najnowsza czysta: [${cleanLatest}] -> Aktywować update? [${otaUpdateTrigger}]`);
 
   return sendJSON(res, 200, {
-    unlock: unlockAction, // Upewnij się, że ta zmienna globalna jest poprawnie przekazywana
+    unlock: unlockAction,
     learn: isLearning,
     username: learningQueues[mac] || '',
     ota: otaUpdateTrigger,
