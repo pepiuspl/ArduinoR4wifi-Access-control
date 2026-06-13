@@ -1288,15 +1288,16 @@ void loop() {
       lastPollTime = millis();
     } 
   }
-  void sendRemoteLog(String message) {
-    WiFiClient logClient;
-    message.replace(" ", "%20"); // Zamiana spacji na bezpieczny znak URL
+}
+
+void sendRemoteLog(String message) {
+  WiFiClient logClient;
+  message.replace(" ", "%20"); 
   
-    if (logClient.connect("192.168.0.200", 3000)) {
-      logClient.print("GET /api/hardware/log?mac=64:E8:33:5F:2B:84&msg=" + message + " HTTP/1.1\r\n");
-      logClient.print("Host: 192.168.0.200\r\n");
-      logClient.print("Connection: close\r\n\r\n");
-      logClient.stop();
-    }
+  if (logClient.connect("192.168.0.200", 3000)) {
+    logClient.print("GET /api/hardware/log?mac=64:E8:33:5F:2B:84&msg=" + message + " HTTP/1.1\r\n");
+    logClient.print("Host: 192.168.0.200\r\n");
+    logClient.print("Connection: close\r\n\r\n");
+    logClient.stop();
   }
 }
