@@ -801,14 +801,14 @@ if (pathname === '/api/hardware/log' && req.method === 'GET') {
 
   let mac = query.mac;
   if (mac) mac = mac.toUpperCase();
-  
+
   // Jeśli system nie znajdzie takiego adresu MAC w bazie, automatycznie odwracamy bajty,
   // aby zapytania SQL idealnie trafiły w zarejestrowane urządzenie.
   if (mac && mac.includes(':')) {
     const checkDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [mac]);
     if (checkDev.rows.length === 0) {
       const reversedMac = mac.split(':').reverse().join(':');
-      forceLog(`⚠️ Wykryto odwrócony bufor MAC z rygla Arduino! Prostowanie ścieżki: ${mac} -> ${reversedMac}`);
+      // 🤫 WYCISZONE: Usunięto stąd forceLog, aby odwracanie MAC nie spamowało co sekundę
       mac = reversedMac;
     }
   }
@@ -820,7 +820,7 @@ if (pathname === '/api/hardware/log' && req.method === 'GET') {
   let clientReportedVersion = query.version || null; 
   let currentHardwareVersion = '0.0.0';
 
-  forceLog(`=== NOWE ZAPYTANIE POLL === MAC: ${mac || 'Nie podano'}, IP: ${cleanIp}, Wersja z rygla: ${clientReportedVersion || 'Nie wysłano w żądaniu'}`);
+  // 🤫 WYCISZONE: Usunięto stąd forceLog ("=== NOWE ZAPYTANIE POLL ==="), całkowicie żegnając sekundowy spam!
 
   if (!mac) {
     const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
@@ -846,28 +846,26 @@ if (pathname === '/api/hardware/log' && req.method === 'GET') {
     }
   }
 
-  // Konsumpcja tokenu otwierania (przywrócenie fizycznego działania przekaźnika)
+  // 🌟 PRZYWRÓCENIE DZIAŁANIA PRZEKAŹNIKA (Konsumpcja tokenu otwierania z kolejki)
   if (unlockAction) {
     unlockQueues[mac] = false;
     unlockQueues['00:00:00:00:00:00'] = false;
     actualLockStates[mac] = true;
-    
-    // Podtrzymanie statusu "OTWARTY" skrócone do 2 sekund (zgodnie z wcześniejszym planem)
-    setTimeout(() => {
-      actualLockStates[mac] = false;
-    }, 2000); 
+    setTimeout(() => { actualLockStates[mac] = false; }, 2000); 
   }
 
-  forceLog(`Zweryfikowana wersja w bazie dla [${mac}]: ${currentHardwareVersion}`);
-  
+  // 🌟 PANCERNA LOGIKA OTA (Odporna na pętle i sterowana z aplikacji)
   const latestFw = getLatestFirmwareContext();
-  
-  // Obydwa ciągi tekstowe oczyszczamy z literki 'v', gwarantując stabilne porównanie cyfr
   const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
   const cleanLatest = latestFw.version.replace('v', '').trim();
   
-  const otaUpdateTrigger = (cleanLatest !== '0.0.0' && cleanCurrent !== cleanLatest);
-  forceLog(`Porównanie OTA -> Lokalna czysta: [${cleanCurrent}] vs Najnowsza czysta: [${cleanLatest}] -> Aktywować update? [${otaUpdateTrigger}]`);
+  // Zezwalamy na update TYLKO, gdy wersje się różnią ORAZ kliknięto przycisk w aplikacji (otaUpdatePending === true)
+  const otaUpdateTrigger = (cleanLatest !== '0.0.0' && cleanCurrent !== cleanLatest && otaUpdatePending === true);
+
+  // Jedyny log, jaki tu zostaje – zapisze się WYŁĄCZNIE w ułamku sekundy, w którym faktycznie rusza aktualizacja
+  if (otaUpdateTrigger) {
+    forceLog(`[OTA ACTIVATED] Zezwolono urządzeniu [${mac}] na pobranie wersji ${cleanLatest}`);
+  }
 
   return sendJSON(res, 200, {
     unlock: unlockAction,

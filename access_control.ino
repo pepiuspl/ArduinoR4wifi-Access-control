@@ -869,6 +869,7 @@ void executeCloudSynchronization() {
 void performLocalFirmwareUpdate() {
   WiFiClient otaClient;
   updateDisplay("AKTUALIZACJA OTA", "Pobieranie pliku..."); 
+  sendRemoteLog("[OTA PULL] Proba polaczenia z serwerem w celu pobrania binu...");
   
   if (otaClient.connect("192.168.0.200", 3000)) {
     otaClient.setTimeout(5000);
@@ -878,69 +879,94 @@ void performLocalFirmwareUpdate() {
 
     unsigned long contentLength = 0;
 
-    // 🌟 DYNAMICZNE PARSOWANIE NAGŁÓWKÓW HTTP
+    // 🌟 PARSOWANIE NAGŁÓWKÓW HTTP
     while (otaClient.connected()) {
       String line = otaClient.readStringUntil('\n');
-      
-      // Szukamy linijki z rozmiarem pliku przesyłanym przez Proxmox
       if (line.indexOf("Content-Length:") >= 0) {
         contentLength = line.substring(line.indexOf(":") + 1).toInt();
       }
-      
-      // Pusta linia (\r lub \r\n) oznacza koniec nagłówków i początek czystego pliku .bin
       if (line == "\r" || line == "\r\n" || line.length() == 0) {
         break;
       }
     }
     
-    // Zabezpieczenie: jeśli serwer nie podał rozmiaru, przerywamy, żeby nie uszkodzić Flasha
+    sendRemoteLog("[OTA PULL] Naglowki przeczytane. Content-Length: " + String(contentLength));
+    
     if (contentLength == 0) {
       updateDisplay("BŁĄD OTA", "Brak rozmiaru naglowka");
+      sendRemoteLog("[OTA PULL ERR] Serwer zwrocil rozmiar 0. Przerywam.");
       otaClient.stop();
       delay(3000);
       return;
     }
     
-    // Otwieramy InternalStorage na IDEALNĄ wielkość pliku
+    // Otwieramy InternalStorage na wielkość pliku
     if (InternalStorage.open(contentLength)) {
-      uint32_t receivedBytes = 0;
-      unsigned long receiveDeadline = millis() + 10000; // 10 sekund timeoutu na pakiety
+      sendRemoteLog("[OTA PULL] Start szybkiej transmisji blokowej...");
       
-      // 🌟 PĘTLA POBIERANIA ZWIĄZANA Z REALNYM ROZMIAREM PLIKU
+      uint32_t receivedBytes = 0;
+      unsigned long receiveDeadline = millis() + 10000; 
+      
+      // 🌟 POPRAWKA: Tworzymy lokalny bufor na pakiety danych
+      uint8_t buffer[256]; 
+      
       while (receivedBytes < contentLength && otaClient.connected()) { 
-        while (otaClient.available()) { 
-          uint8_t b = otaClient.read();
-          InternalStorage.write(b); 
-          receivedBytes++; 
-          receiveDeadline = millis() + 10000; // Reset timeoutu po każdym odebranym bajcie
-          if (receivedBytes >= contentLength) break;
+        int availableBytes = otaClient.available();
+        
+        if (availableBytes > 0) {
+          // Ustalamy jak dużą paczkę możemy maksymalnie pobrać w tym przebiegu
+          int toRead = min(availableBytes, (int)sizeof(buffer));
+          
+          // Zabezpieczenie przed wyjściem poza Content-Length
+          if (receivedBytes + toRead > contentLength) {
+            toRead = contentLength - receivedBytes;
+          }
+          
+          // Pobieramy całą paczkę bajtów z sieci na raz!
+          int readBytes = otaClient.read(buffer, toRead);
+          
+          if (readBytes > 0) {
+            // Zapisujemy pobrany blok do pamięci flash mikrokontrolera
+            for (int i = 0; i < readBytes; i++) {
+              InternalStorage.write(buffer[i]);
+            }
+            receivedBytes += readBytes;
+            receiveDeadline = millis() + 10000; // Reset timeoutu
+          }
         } 
         
         if (millis() > receiveDeadline) {
-          Serial.println("[OTA ERR] Przekroczono limit czasu transmisji danych.");
+          sendRemoteLog("[OTA PULL ERR] Przekroczono limit czasu transmisji danych.");
           break;
         }
-        delay(1); 
+        delay(1); // Krótkie wytchnienie dla stabilizacji stosu Wi-Fi
       } 
       
       InternalStorage.close(); 
       otaClient.stop(); 
       
-      // Jeśli odebraliśmy dokładnie tyle bajtów, ile zadeklarował serwer - robimy flash!
+      sendRemoteLog("[OTA PULL] Zakonczono pobieranie. Odebrano: " + String(receivedBytes) + "/" + String(contentLength));
+      
       if (receivedBytes == contentLength) {
         updateDisplay("SUKCES OTA", "Wgrywanie i Reset..."); 
+        sendRemoteLog("[OTA PULL SUCCESS] Bajty kompletne! Wywolujem apply() i restart!");
         delay(2000); 
-        NVIC_SystemReset(); // Płytka wstaje z nowym programem v2.9.5!
+        
+        InternalStorage.apply(); 
+        NVIC_SystemReset(); 
       } else {
         updateDisplay("BŁĄD OTA", "Blad sumy bajtow");
+        sendRemoteLog("[OTA PULL ERR] Blad sumy bajtow. Mismatch!");
         delay(3000);
       }
     } else {
       updateDisplay("BŁĄD OTA", "Brak miejsca flash"); 
+      sendRemoteLog("[OTA PULL ERR] Brak miejsca w pamieci flash (open failed).");
       delay(3000);
     }
   } else {
     updateDisplay("BŁĄD OTA", "Brak linku z nodem"); 
+    sendRemoteLog("[OTA PULL ERR] Nie udalo sie polaczyc z serwerem Proxmox.");
     delay(3000);
   }
 }
