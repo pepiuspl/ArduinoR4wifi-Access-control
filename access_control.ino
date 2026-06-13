@@ -268,60 +268,61 @@ String getFormattedSystemTime() {
 void renderSystemUI() { 
   display.clearDisplay(); 
   display.setTextSize(1); 
-  display.setTextColor(SH110X_WHITE);
+  display.setTextColor(SH110X_WHITE); 
   display.setCursor(2, 2); 
   
-  display.print("CTRLABLE Node ");
-  String rawVer = String(app_version);
-  if(rawVer.startsWith("v")) {
-    display.print(rawVer.substring(1));
-  } else {
-    display.print(rawVer);
-  }
+  display.print("CTRLABLE Node "); 
+  String rawVer = String(app_version); 
+  if(rawVer.startsWith("v")) { 
+    display.print(rawVer.substring(1)); 
+  } else { 
+    display.print(rawVer); 
+  } 
 
   display.drawFastHLine(0, 12, 128, SH110X_WHITE); 
   if (provisioningMode || isOfflineStandby) { 
     display.setCursor(0, 18); 
-    display.println(globalDisplayInfo);
-  }  
+    display.println(globalDisplayInfo); 
+  }   
   else if (learningMode) { 
     display.setCursor(20, 20); 
     display.setTextSize(2); 
     display.print("LEARNING"); 
     display.setTextSize(1); 
-    display.setCursor(20, 42);
+    display.setCursor(20, 42); 
     display.print("Target: " + pendingUsername); 
     int rippleRadius = 4 + (globalAnimFrame % 3) * 5; 
-    display.drawCircle(110, 32, rippleRadius, SH110X_WHITE);
+    display.drawCircle(110, 32, rippleRadius, SH110X_WHITE); 
     display.fillCircle(110, 32, 2, SH110X_WHITE); 
-  }  
+  }   
   else if (doorOpen) { 
-    int shackleOffset = (globalAnimFrame > 4) ? 5 : globalAnimFrame; 
+    int shackleOffset = (globalAnimFrame > 4) ? 
+    5 : globalAnimFrame; 
     display.fillRoundRect(14, 34, 22, 16, 2, SH110X_WHITE); 
     display.fillCircle(25, 40, 2, SH110X_BLACK); 
-    display.drawFastVLine(25, 42, 4, SH110X_BLACK);
+    display.drawFastVLine(25, 42, 4, SH110X_BLACK); 
     display.drawCircleHelper(25, 34 - shackleOffset, 7, 1|2, SH110X_WHITE); 
-    display.drawFastVLine(18, 34 - shackleOffset, 4, SH110X_WHITE);        
+    display.drawFastVLine(18, 34 - shackleOffset, 4, SH110X_WHITE);         
     display.setTextSize(2); 
     display.setCursor(48, 20); 
     display.print("OPEN"); 
     display.setTextSize(1); 
-    display.setCursor(48, 40);
+    display.setCursor(48, 40); 
     display.print(globalDisplayInfo); 
     if (globalAnimFrame > 2) { 
-      int checkStage = min(globalAnimFrame - 2, 6);
-      display.drawLine(100, 35, 100 + min(checkStage, 3), 35 + min(checkStage, 3), SH110X_WHITE);
+      int checkStage = min(globalAnimFrame - 2, 6); 
+      display.drawLine(100, 35, 100 + min(checkStage, 3), 35 + min(checkStage, 3), SH110X_WHITE); 
       if (checkStage > 3) { 
-        display.drawLine(103, 38, 103 + (checkStage - 3) * 3, 38 - (checkStage - 3) * 3, SH110X_WHITE);
+        display.drawLine(103, 38, 103 + (checkStage - 3) * 3, 38 - (checkStage - 3) * 3, SH110X_WHITE); 
       } 
     } 
-  }  
+  }   
   else { 
-    display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
+    display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE); 
     display.fillCircle(25, 39, 2, SH110X_BLACK); 
     display.drawFastVLine(25, 41, 5, SH110X_BLACK); 
     display.drawCircleHelper(25, 32, 7, 1|2, SH110X_WHITE); 
-    display.drawFastVLine(18, 32, 4, SH110X_WHITE);
+    display.drawFastVLine(18, 32, 4, SH110X_WHITE); 
     display.drawFastVLine(32, 32, 4, SH110X_WHITE); 
     display.setTextSize(2); 
     display.setCursor(48, 24); 
@@ -330,20 +331,21 @@ void renderSystemUI() {
 
   display.drawFastHLine(0, 53, 128, SH110X_WHITE); 
   display.setTextSize(1); 
-  display.setCursor(4, 56);
+  display.setCursor(4, 56); 
+  
   if (WiFi.status() == WL_CONNECTED) { 
-    systemWasOnline = true;
-    timeClient.begin();
-    display.print("ONLINE");
+    systemWasOnline = true; 
+    // 🌟 WYRZUCONO timeClient.begin() - gniazda UDP są bezpieczne!
+    display.print("ONLINE"); 
   } else if (isOfflineStandby) { 
     display.print("AP: SETUP"); 
   } else { 
-    display.print("DISCONNECTED");
+    display.print("DISCONNECTED"); 
   } 
   String liveTime = getFormattedSystemTime(); 
   display.setCursor(94, 56); 
   display.print(liveTime); 
-  display.display();
+  display.display(); 
 } 
 
 void updateDisplay(String status, String info) { 
@@ -861,32 +863,51 @@ void performLocalFirmwareUpdate() {
     otaClient.print("GET /api/lock/download-firmware HTTP/1.1\r\n");
     otaClient.print("Host: 192.168.0.200\r\n");
     otaClient.print("Connection: close\r\n\r\n");
-    
+
+    // Bezpieczne parsowanie nagłówków z filtrem anty-zwisowym
     while (otaClient.connected()) {
       String line = otaClient.readStringUntil('\n');
-      if (line == "\r") {
+      if (line == "\r" || line == "\r\n" || line.length() == 0) {
         break;
       }
     }
     
-    unsigned long contentLength = 120000; 
+    unsigned long contentLength = 120000; // Stały rozmiar bufora aktualizacyjnego binu
+    
     if (InternalStorage.open(contentLength)) {
-      while (otaClient.available()) {
-        uint8_t b = otaClient.read();
-        InternalStorage.write(b);
-        WDT.refresh();
-      }
-      InternalStorage.close();
-      otaClient.stop();
+      uint32_t receivedBytes = 0;
+      unsigned long receiveDeadline = millis() + 30000; // 30 sekund twardego limitu na brak transmisji
       
-      updateDisplay("SUKCES OTA", "Restart urządzenia");
-      delay(2000);
-      NVIC_SystemReset(); // Hard-reset procesora Uno R4, wstaje na nowym sofcie!
+      // 🌟 STABILNA PĘTLA POBIERANIA (Identyczna jak w Twoim WebServerze)
+      while (receivedBytes < contentLength && millis() < receiveDeadline) { 
+        while (otaClient.available()) { 
+          uint8_t b = otaClient.read();
+          InternalStorage.write(b); 
+          receivedBytes++; 
+          receiveDeadline = millis() + 30000; // Odświeżamy czas po odebraniu każdego bajtu
+          if (receivedBytes >= contentLength) break;
+        } 
+        delay(1); 
+      } 
+      
+      InternalStorage.close(); 
+      otaClient.stop(); 
+      
+      if (receivedBytes == contentLength) {
+        updateDisplay("SUKCES OTA", "Restart urządzenia"); 
+        delay(2000); 
+        NVIC_SystemReset(); 
+      } else {
+        updateDisplay("BŁĄD OTA", "Niekompletny plik");
+        delay(3000);
+      }
     } else {
-      updateDisplay("BŁĄD OTA", "Brak miejsca flash");
+      updateDisplay("BŁĄD OTA", "Brak miejsca flash"); 
+      delay(3000);
     }
   } else {
-    updateDisplay("BŁĄD OTA", "Brak linku z nodem");
+    updateDisplay("BŁĄD OTA", "Brak linku z nodem"); 
+    delay(3000);
   }
 }
 
