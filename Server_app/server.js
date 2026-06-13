@@ -722,16 +722,58 @@ const server = http.createServer(async (req, res) => {
       // Return .bin file
 
       if (pathname === '/api/lock/download-firmware' && req.method === 'GET') {
-    const logFile = '/var/log/smartlock/smartlock_system.log';
-    const forceLog = (msg) => {
-        try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
-    };
+  const logFile = '/var/log/smartlock/smartlock_system.log';
+  const forceLog = (msg) => {
+    try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
+  };
 
-    if (!latestFirmwareFile) {
-        forceLog("Zamek próbował pobrać soft, ale brak zdefiniowanego pliku w pamięci serwera.");
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        return res.end("Brak aktywnego pliku aktualizacji.");
-    }
+  if (!latestFirmwareFile) {
+    forceLog("❌ Zamek próbował pobrać soft, ale brak zdefiniowanego pliku w pamięci RAM serwera (latestFirmwareFile jest puste).");
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    return res.end("Brak aktywnego pliku aktualizacji.");
+  }
+
+  // Budujemy pełną ścieżkę do pobranego z GitHuba binu w folderze /updates/
+  const targetFilePath = path.join(updatesDir, latestFirmwareFile);
+
+  if (!fs.existsSync(targetFilePath)) {
+    forceLog(`❌ Krytyczny rozjazd: Zamek żądał pliku ${latestFirmwareFile}, ale fizycznie nie ma go w katalogu /updates/!`);
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    return res.end("Plik binarny nie istnieje na dysku serwera.");
+  }
+
+  try {
+    const stat = fs.statSync(targetFilePath);
+    forceLog(`🚀 Arduino nawiązało kontakt! Rozpoczynamy wysyłanie pliku: ${latestFirmwareFile} (${stat.size} bajtów).`);
+
+    // Wymuszamy nagłówki binarne, podając dokładny Content-Length dla bufora Arduino
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': stat.size,
+      'Content-Disposition': `attachment; filename=${latestFirmwareFile}`
+    });
+
+    // Strumieniujemy plik prosto do socketu sieciowego Wi-Fi zamka
+    const readStream = fs.createReadStream(targetFilePath);
+    
+    readStream.on('open', () => {
+      readStream.pipe(res);
+    });
+
+    readStream.on('end', () => {
+      forceLog(`✅ Sukces: Cała paczka ${latestFirmwareFile} została przelana do Arduino.`);
+    });
+
+    readStream.on('error', (err) => {
+      forceLog(`❌ Błąd w trakcie przesyłania bajtów do zamka: ${err.message}`);
+    });
+
+  } catch (error) {
+    forceLog(`❌ Wyjątek obsługi systemu plików: ${error.message}`);
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end("Internal Server Error");
+  }
+}
 
     const filePath = path.join(updatesDir, latestFirmwareFile);
 
