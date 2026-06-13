@@ -903,8 +903,9 @@ void performLocalFirmwareUpdate() {
         int availableBytes = otaClient.available();
         if (availableBytes > 0) {
           int toRead = min(availableBytes, (int)sizeof(buffer));
+          
+          // 🌟 POPRAWKA: Usunięto wadliwą linijkę z bytesToRead. Zostało tylko czyste odliczenie:
           if (receivedBytes + toRead > contentLength) {
-            toRead = contentLength - bytesToRead;
             toRead = contentLength - receivedBytes;
           }
           
