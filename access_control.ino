@@ -808,48 +808,45 @@ void handleOnlineInstallerServer() {
 void executeCloudSynchronization() { 
   if (strlen(proxmox_log_server) < 4) return; 
   WiFiClient httpCheck; 
-  httpCheck.setTimeout(250);
+  httpCheck.setTimeout(250); 
+  
   if (!httpCheck.connect(proxmox_log_server, proxmox_log_port)) { 
-    if (millis() - lastSuccessfulPollTime > 30000) { 
-      isOfflineStandby = true;
-      displayProvisioningInstructions("ERR: CLOUD LOSS"); 
-      WiFi.disconnect(); 
-      delay(500); 
-      WiFi.beginAP("CTRLABLE_SETUP"); 
-      server.begin(); 
-    } 
+    // 🌟 Jeśli backend Proxmoxa nie odpowiada, po prostu logujemy to seryjnie i wracamy do loop()
+    // Nie odłączamy Wi-Fi ani nie podnosimy trybu AP!
+    Serial.println("[NET] Serwer Proxmox nieodpowiada. Ponowna proba za 3 sekundy...");
     return; 
   } 
-  lastSuccessfulPollTime = millis();
-  String macStr = getMacAddressString();
-  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0");
-  httpCheck.println("GET " + pollPath + " HTTP/1.1"); 
-  httpCheck.print("Host: "); httpCheck.println(proxmox_log_server); 
-  httpCheck.println("Connection: close\r\n"); 
-  unsigned long deadline = millis() + 300;
-  String payloadResponse = ""; 
-  while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) { 
-    if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK");
-    if (httpCheck.available()) { 
-      char c = httpCheck.read(); 
-      payloadResponse += c;
-    } 
-  } 
-  httpCheck.stop(); 
   
-  bool serverUnlockSignal = (payloadResponse.indexOf("\"unlock\":true") != -1); 
-  bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1);
-  if (serverUnlockSignal) { 
-    if (!doorOpen) openDoor("Zdalne Wywolanie");
-  } 
-  if (serverLearnSignal) { 
-    learningMode = true;
-    int userStart = payloadResponse.indexOf("\"username\":\""); 
-    int userEnd = payloadResponse.indexOf("\"", userStart + 12);
-    if (userStart > -1 && userEnd > userStart) { 
-      pendingUsername = payloadResponse.substring(userStart + 12, userEnd);
-    } 
-  } else { 
+  lastSuccessfulPollTime = millis(); 
+  String macStr = getMacAddressString(); 
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0"); 
+  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
+  httpCheck.print("Host: "); httpCheck.println(proxmox_log_server);  
+  httpCheck.println("Connection: close\r\n");  
+  unsigned long deadline = millis() + 300; 
+  String payloadResponse = "";  
+  while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {  
+    if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK"); 
+    if (httpCheck.available()) {  
+      char c = httpCheck.read();  
+      payloadResponse += c; 
+    }  
+  }  
+  httpCheck.stop();  
+  
+  bool serverUnlockSignal = (payloadResponse.indexOf("\"unlock\":true") != -1);  
+  bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1); 
+  if (serverUnlockSignal) {  
+    if (!doorOpen) openDoor("Zdalne Wywolanie"); 
+  }  
+  if (serverLearnSignal) {  
+    learningMode = true; 
+    int userStart = payloadResponse.indexOf("\"username\":\"");  
+    int userEnd = payloadResponse.indexOf("\"", userStart + 12); 
+    if (userStart > -1 && userEnd > userStart) {  
+      pendingUsername = payloadResponse.substring(userStart + 12, userEnd); 
+    }  
+  } else {  
     learningMode = false;
   } 
 }
@@ -1260,10 +1257,11 @@ void loop() {
     digitalWrite(LED_GREEN, LOW); 
     digitalWrite(LED_RED, LOW); 
   }
-  if (WiFi.status() == WL_CONNECTED) {
-    if (millis() - lastOtaCheck >= otaInterval) {
-      lastOtaCheck = millis(); // Resetujemy licznik
-      checkOtaStatusFromServer(); // Odpalamy zapytanie sieciowe
-    }
-  } 
+  else { 
+    handleWebServer(); 
+    if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 3000) { 
+      executeCloudSynchronization(); 
+      lastPollTime = millis();
+    } 
+  }
 }
