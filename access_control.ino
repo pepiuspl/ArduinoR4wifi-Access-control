@@ -14,7 +14,7 @@
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
 
-const char* app_version = "v2.9.7"; // Zmieniamy na 2.9.7, aby serwer widział postęp
+const char* app_version = "v2.9.6"; 
 
 struct User { 
   byte uid[4]; 
