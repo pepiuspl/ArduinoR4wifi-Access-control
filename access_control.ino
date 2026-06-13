@@ -856,6 +856,7 @@ void executeCloudSynchronization() {
 void performLocalFirmwareUpdate() {
   WiFiClient otaClient;
   updateDisplay("AKTUALIZACJA OTA", "Pobieranie pliku..."); 
+  sendRemoteLog("[OTA PULL] Proba polaczenia z serwerem w celu pobrania binu...");
   
   if (otaClient.connect("192.168.0.200", 3000)) {
     otaClient.setTimeout(5000);
@@ -869,20 +870,20 @@ void performLocalFirmwareUpdate() {
     while (otaClient.connected()) {
       String line = otaClient.readStringUntil('\n');
       
-      // Szukamy linijki z rozmiarem pliku przesyłanym przez Proxmox
       if (line.indexOf("Content-Length:") >= 0) {
         contentLength = line.substring(line.indexOf(":") + 1).toInt();
       }
       
-      // Pusta linia (\r lub \r\n) oznacza koniec nagłówków i początek czystego pliku .bin
       if (line == "\r" || line == "\r\n" || line.length() == 0) {
         break;
       }
     }
     
-    // Zabezpieczenie: jeśli serwer nie podał rozmiaru, przerywamy, żeby nie uszkodzić Flasha
+    sendRemoteLog("[OTA PULL] Naglowki przeczytane. Content-Length: " + String(contentLength));
+    
     if (contentLength == 0) {
       updateDisplay("BŁĄD OTA", "Brak rozmiaru naglowka");
+      sendRemoteLog("[OTA PULL ERR] Serwer zwrocil rozmiar 0. Przerywam.");
       otaClient.stop();
       delay(3000);
       return;
@@ -890,8 +891,9 @@ void performLocalFirmwareUpdate() {
     
     // Otwieramy InternalStorage na IDEALNĄ wielkość pliku
     if (InternalStorage.open(contentLength)) {
+      sendRemoteLog("[OTA PULL] Partycja flash otwarta. Start pobierania danych...");
       uint32_t receivedBytes = 0;
-      unsigned long receiveDeadline = millis() + 10000; // 10 sekund timeoutu na pakiety
+      unsigned long receiveDeadline = millis() + 10000; 
       
       // 🌟 PĘTLA POBIERANIA ZWIĄZANA Z REALNYM ROZMIAREM PLIKU
       while (receivedBytes < contentLength && otaClient.connected()) { 
@@ -899,12 +901,12 @@ void performLocalFirmwareUpdate() {
           uint8_t b = otaClient.read();
           InternalStorage.write(b); 
           receivedBytes++; 
-          receiveDeadline = millis() + 10000; // Reset timeoutu po każdym odebranym bajcie
+          receiveDeadline = millis() + 10000; 
           if (receivedBytes >= contentLength) break;
         } 
         
         if (millis() > receiveDeadline) {
-          Serial.println("[OTA ERR] Przekroczono limit czasu transmisji danych.");
+          sendRemoteLog("[OTA PULL ERR] Przekroczono limit czasu transmisji danych.");
           break;
         }
         delay(1); 
@@ -913,21 +915,31 @@ void performLocalFirmwareUpdate() {
       InternalStorage.close(); 
       otaClient.stop(); 
       
+      sendRemoteLog("[OTA PULL] Zakonczono pobieranie. Odebrano: " + String(receivedBytes) + "/" + String(contentLength));
+      
       // Jeśli odebraliśmy dokładnie tyle bajtów, ile zadeklarował serwer - robimy flash!
       if (receivedBytes == contentLength) {
         updateDisplay("SUKCES OTA", "Wgrywanie i Reset..."); 
+        sendRemoteLog("[OTA PULL SUCCESS] Bajty kompletne. Wywolujem apply() i reset!");
         delay(2000); 
+        
+        // 🌟 KRYTYCZNA POPRAWKA: Przełączamy flagę rozruchową dla bootloadera
+        InternalStorage.apply(); 
+        
         NVIC_SystemReset(); // Płytka wstaje z nowym programem v2.9.5!
       } else {
         updateDisplay("BŁĄD OTA", "Blad sumy bajtow");
+        sendRemoteLog("[OTA PULL ERR] Blad sumy bajtow. Mismatch!");
         delay(3000);
       }
     } else {
       updateDisplay("BŁĄD OTA", "Brak miejsca flash"); 
+      sendRemoteLog("[OTA PULL ERR] Brak miejsca w pamieci flash (open failed).");
       delay(3000);
     }
   } else {
     updateDisplay("BŁĄD OTA", "Brak linku z nodem"); 
+    sendRemoteLog("[OTA PULL ERR] Nie udalo sie polaczyc z serwerem Proxmox.");
     delay(3000);
   }
 }
@@ -1287,5 +1299,15 @@ void loop() {
       executeCloudSynchronization(); 
       lastPollTime = millis();
     } 
+  }
+  void sendRemoteLog(String message) {
+  WiFiClient logClient;
+  message.replace(" ", "%20"); // Zamiana spacji na bezpieczny znak URL
+  
+  if (logClient.connect("192.168.0.200", 3000)) {
+    logClient.print("GET /api/hardware/log?mac=64:E8:33:5F:2B:84&msg=" + message + " HTTP/1.1\r\n");
+    logClient.print("Host: 192.168.0.200\r\n");
+    logClient.print("Connection: close\r\n\r\n");
+    logClient.stop();
   }
 }

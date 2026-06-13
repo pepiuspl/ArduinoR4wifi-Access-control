@@ -719,61 +719,31 @@ const server = http.createServer(async (req, res) => {
 
     return;
 }
+if (pathname === '/api/hardware/log' && req.method === 'GET') {
+    const logFile = '/var/log/smartlock/smartlock_system.log';
+    const msg = query.msg || 'Pusta wiadomosc';
+    const mac = query.mac || 'UNKNOWN_MAC';
+
+    try {
+        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [HARDWARE NODE LOG] [${mac}] ${msg}\n`);
+    } catch (e) {}
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: true }));
+}
       // Return .bin file
 
       if (pathname === '/api/lock/download-firmware' && req.method === 'GET') {
-  const logFile = '/var/log/smartlock/smartlock_system.log';
-  const forceLog = (msg) => {
-    try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
-  };
+    const logFile = '/var/log/smartlock/smartlock_system.log';
+    const forceLog = (msg) => {
+        try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
+    };
 
-  if (!latestFirmwareFile) {
-    forceLog("❌ Zamek próbował pobrać soft, ale brak zdefiniowanego pliku w pamięci RAM serwera (latestFirmwareFile jest puste).");
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    return res.end("Brak aktywnego pliku aktualizacji.");
-  }
-
-  // Budujemy pełną ścieżkę do pobranego z GitHuba binu w folderze /updates/
-  const targetFilePath = path.join(updatesDir, latestFirmwareFile);
-
-  if (!fs.existsSync(targetFilePath)) {
-    forceLog(`❌ Krytyczny rozjazd: Zamek żądał pliku ${latestFirmwareFile}, ale fizycznie nie ma go w katalogu /updates/!`);
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    return res.end("Plik binarny nie istnieje na dysku serwera.");
-  }
-
-  try {
-    const stat = fs.statSync(targetFilePath);
-    forceLog(`🚀 Arduino nawiązało kontakt! Rozpoczynamy wysyłanie pliku: ${latestFirmwareFile} (${stat.size} bajtów).`);
-
-    // Wymuszamy nagłówki binarne, podając dokładny Content-Length dla bufora Arduino
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': stat.size,
-      'Content-Disposition': `attachment; filename=${latestFirmwareFile}`
-    });
-
-    // Strumieniujemy plik prosto do socketu sieciowego Wi-Fi zamka
-    const readStream = fs.createReadStream(targetFilePath);
-    
-    readStream.on('open', () => {
-      readStream.pipe(res);
-    });
-
-    readStream.on('end', () => {
-      forceLog(`✅ Sukces: Cała paczka ${latestFirmwareFile} została przelana do Arduino.`);
-    });
-
-    readStream.on('error', (err) => {
-      forceLog(`❌ Błąd w trakcie przesyłania bajtów do zamka: ${err.message}`);
-    });
-
-  } catch (error) {
-    forceLog(`❌ Wyjątek obsługi systemu plików: ${error.message}`);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end("Internal Server Error");
-  }
-}
+    if (!latestFirmwareFile) {
+        forceLog("Zamek próbował pobrać soft, ale brak zdefiniowanego pliku w pamięci serwera.");
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        return res.end("Brak aktywnego pliku aktualizacji.");
+    }
 
     const filePath = path.join(updatesDir, latestFirmwareFile);
 
@@ -805,7 +775,6 @@ const server = http.createServer(async (req, res) => {
     }
     return;
 }
-
       // =========================================================================
       // PROVISIONING: PAROWANIE KOLEJNYCH NOWYCH ZAMKÓW W BAZIE POPRZEZ ADRES MAC
       // =========================================================================
@@ -825,53 +794,59 @@ const server = http.createServer(async (req, res) => {
       // LOOP POLL ZAMKA 
       // =========================================================================
       if ((pathname === '/api/hardware/poll' || pathname === '/api/poll' || pathname === '/poll') && req.method === 'GET') {
-  let mac = query.mac;
+          const logFile = '/var/log/smartlock/smartlock_system.log';
+          const forceLog = (msg) => {
+            try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG HARDWARE POLL] ${msg}\n`); } catch (e) {}
+          };
 
-  let currentHardwareVersion = '0.0.0';
+        let mac = query.mac;
+        // WYKRYWANIE WERSJI W LOCIE: Sprawdzamy, czy zamek pochwalił się swoją wersją w query stringu
+        let clientReportedVersion = query.version || null; 
+        let currentHardwareVersion = '0.0.0';
 
-  if (!mac) {
-    const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
-    if (ipLookup.rows.length > 0) {
-      mac = ipLookup.rows[0].mac_address;
-      currentHardwareVersion = ipLookup.rows[0].firmware_version || '0.0.0';
-    } else {
-      mac = '00:00:00:00:00:00';
-    }
-  } else {
-    const devLookup = await dbPool.query('UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version', [cleanIp, mac]);
-    if (devLookup.rows.length > 0) {
-      currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
-    }
-  }
+        forceLog(`=== NOWE ZAPYTANIE POLL === MAC: ${mac || 'Nie podano'}, IP: ${cleanIp}, Wersja z rygla: ${clientReportedVersion || 'Nie wysłano w żądaniu'}`);
 
-  const unlockAction = unlockQueues[mac] || unlockQueues['00:00:00:00:00:00'] || false;
-  const isLearning = learningQueues[mac] ? true : false;
+        if (!mac) {
+          const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
+        if (ipLookup.rows.length > 0) {
+          mac = ipLookup.rows[0].mac_address;
+          currentHardwareVersion = ipLookup.rows[0].firmware_version || '0.0.0';
+        } else {
+          mac = '00:00:00:00:00:00';
+        }
+      } else {
+        //  INTELIGENTNY UPDATE BAZY: 
+        // Jeśli zamek przysłał parametrem swoja wersje, zapisujemy ja do bazy. 
+        // Dzięki temu, po udanym OTA i restarcie, baza sama przestawi się z v2.9.4 na v2.9.5!
+        let queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version';
+        let queryParams = [cleanIp, mac];
 
-  if (unlockAction) {
-    unlockQueues[mac] = false;
-    unlockQueues['00:00:00:00:00:00'] = false;
-    writeToLocalLogFile('Hardware Node Poll Pipeline', `Consumed unlock signal token packet down to hardware node: ${mac}`);
+        if (clientReportedVersion) {
+          queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
+          queryParams = [cleanIp, mac, clientReportedVersion];
+        }
 
-    actualLockStates[mac] = true;
+        const devLookup = await dbPool.query(queryText, queryParams);
+        if (devLookup.rows.length > 0) {
+          currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
+        }
+      }
 
-    setTimeout(() => {
-      actualLockStates[mac] = false;
-    }, 2000);
-
-  } else {
-    if (actualLockStates[mac] !== true && mac !== '00:00:00:00:00:00') {
-      actualLockStates[mac] = (query.opened === '1');
-    }
-  }
-
+    forceLog(`Zweryfikowana wersja w bazie dla [${mac}]: ${currentHardwareVersion}`);
+  
   const latestFw = getLatestFirmwareContext();
+  
+  // 🌟 POPRAWKA: Czyścimy z literki 'v' OBA ciągi tekstowe, aby porównywać same cyfry!
   const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
-  const cleanLatest = latestFw.version.trim();
+  const cleanLatest = latestFw.version.replace('v', '').trim(); 
   
   const otaUpdateTrigger = (cleanLatest !== '0.0.0' && cleanCurrent !== cleanLatest);
 
+  // Dodatkowy log dla Ciebie, żebyś widział czyste porównanie w konsoli Proxmoxa
+  forceLog(`Porównanie OTA -> Lokalna czysta: [${cleanCurrent}] vs Najnowsza czysta: [${cleanLatest}] -> Aktywować update? [${otaUpdateTrigger}]`);
+
   return sendJSON(res, 200, {
-    unlock: unlockAction,
+    unlock: unlockAction, // Upewnij się, że ta zmienna globalna jest poprawnie przekazywana
     learn: isLearning,
     username: learningQueues[mac] || '',
     ota: otaUpdateTrigger,
