@@ -813,9 +813,7 @@ void executeCloudSynchronization() {
   httpCheck.setTimeout(250); 
   
   if (!httpCheck.connect(proxmox_log_server, proxmox_log_port)) { 
-    // 🌟 Jeśli backend Proxmoxa nie odpowiada, po prostu logujemy to seryjnie i wracamy do loop()
-    // Nie odłączamy Wi-Fi ani nie podnosimy trybu AP!
-    Serial.println("[NET] Serwer Proxmox nieodpowiada. Ponowna proba za 3 sekundy...");
+    Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba za 3 sekundy...");
     return; 
   } 
   
@@ -836,11 +834,26 @@ void executeCloudSynchronization() {
   }  
   httpCheck.stop();  
   
+  // 🌟 PARSOWANIE SYGNAŁÓW Z SERWERA PROXMOX
   bool serverUnlockSignal = (payloadResponse.indexOf("\"unlock\":true") != -1);  
   bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1); 
+  
+  // 🌟 KRYTYCZNA POPRAWKA: Przechwytujemy flage ota przesyłaną z backendu!
+  bool serverOtaSignal    = (payloadResponse.indexOf("\"ota\":true") != -1); 
+
+  // 1. OBSŁUGA AKTUALIZACJI (NAJWYŻSZY PRIORYTET)
+  if (serverOtaSignal) {
+    sendRemoteLog("[HARDWARE] Wykryto ota:true w pakiecie poll! Przerywam petle i odpalam update.");
+    performLocalFirmwareUpdate(); 
+    return; // Wychodzimy natychmiast, zamek i tak zaraz zrobi reset
+  }
+
+  // 2. OBSŁUGA OTWIERANIA DRZWI
   if (serverUnlockSignal) {  
     if (!doorOpen) openDoor("Zdalne Wywolanie"); 
   }  
+  
+  // 3. OBSŁUGA TRYBU UCZENIA
   if (serverLearnSignal) {  
     learningMode = true; 
     int userStart = payloadResponse.indexOf("\"username\":\"");  
