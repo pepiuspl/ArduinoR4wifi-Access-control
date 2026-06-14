@@ -78,11 +78,15 @@ jobs:
         arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build "$COMPILE_TARGET"
 
     # 6. Dynamiczna zmiana nazwy pliku wynikowego, aby idealnie pasował do serwera Proxmox
-    - name: Package Update Asset
+   - name: Package Update Asset
       run: |
-        BIN_FILE=$(find ./build -name "*.bin" | head -n 1)
+        BIN_FILE=$(find ./build -name "*.ino.bin" ! -name "*.merged.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" | head -n 1)
+        if [ -z "$BIN_FILE" ]; then
+          BIN_FILE=$(find ./build -name "*.bin" ! -name "*merged*" ! -name "*bootloader*" ! -name "*partitions*" | head -n 1)
+        fi
+        echo "💡 Wybrany czysty plik aplikacji do OTA: $BIN_FILE"
         cp "$BIN_FILE" "./lock_${{ github.ref_name }}.bin"
-
+        
     # 7. Automatyczne stworzenie wydania (Release) na GitHubie i podpięcie pliku .bin ESP32
     - name: Broadcast Release to Proxmox Network
       uses: softprops/action-gh-release@v2
