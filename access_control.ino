@@ -7,10 +7,9 @@
 #include <Update.h>  
 #include <WiFiUdp.h> 
 #include <NTPClient.h> 
-#include <EEPROM.h> 
-#include "RTC.h" 
+#include <EEPROM.h>  
 #include <ArduinoOTA.h>
-#include <WDT.h>  
+#include <time.h> 
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
@@ -257,13 +256,16 @@ void forceHardwareRFIDReset() {
 } 
 
 String getFormattedSystemTime() { 
-  RTCTime currentRTCTime; 
-  if (RTC.getTime(currentRTCTime)) { 
-    char timeBuffer[6];
-    sprintf(timeBuffer, "%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes()); 
-    return String(timeBuffer); 
-  } 
-  return "--:--"; 
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+  
+  if (now < 100000000) return "--:--"; 
+  
+  char timeBuffer[6];
+  sprintf(timeBuffer, "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min); 
+  return String(timeBuffer); 
 } 
 
 void renderSystemUI() { 
@@ -380,10 +382,18 @@ void sendExternalTelemetry(String logData) {
 } 
 
 void addLog(String msg) { 
-  RTCTime currentRTCTime; 
-  RTC.getTime(currentRTCTime); 
-  char timeBuffer[12]; 
-  sprintf(timeBuffer, "%02d:%02d:%02d", currentRTCTime.getHour(), currentRTCTime.getMinutes(), currentRTCTime.getSeconds());
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+  
+  char timeBuffer[12];
+  if (now < 100000000) {
+    sprintf(timeBuffer, "00:00:00");
+  } else {
+    sprintf(timeBuffer, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+  }
+  
   String currentTime = String(timeBuffer); 
   if (logCount < MAX_LOGS) { 
     lastActions[logCount++] = {currentTime, msg};
@@ -391,10 +401,9 @@ void addLog(String msg) {
     for (int i = 0; i < MAX_LOGS - 1; i++) { 
       lastActions[i] = lastActions[i+1];
     } 
-    lastActions[MAX_LOGS - 1] = {currentTime, msg}; 
+    lastActions[MAX_LOGS - 1] = {currentTime, msg};
   } 
-  sendExternalTelemetry(msg);
-} 
+}
 
 void openDoor(String source) { 
   doorOpen = true;  
@@ -1099,8 +1108,8 @@ void setup() {
     timeClient.begin(); 
     timeClient.update(); 
     unsigned long epochTime = timeClient.getEpochTime();
-    RTCTime localTime(epochTime); 
-    RTC.setTime(localTime); 
+    struct timeval tv = { .tv_sec = (time_t)epochTime, .tv_usec = 0 };
+    settimeofday(&tv, NULL); 
     forceHardwareRFIDReset(); 
     lastSuccessfulPollTime = millis(); 
     server.begin(); 
@@ -1161,8 +1170,8 @@ void loop() {
         timeClient.begin(); 
         timeClient.update(); 
         unsigned long epochTime = timeClient.getEpochTime(); 
-        RTCTime localTime(epochTime); 
-        RTC.setTime(localTime); 
+        struct timeval tv = { .tv_sec = (time_t)epochTime, .tv_usec = 0 };
+        settimeofday(&tv, NULL); 
         server.begin(); 
         updateDisplay("Gotowy", WiFi.localIP().toString()); 
         addLog("Polaczenie Wi-Fi przywrocone"); 
