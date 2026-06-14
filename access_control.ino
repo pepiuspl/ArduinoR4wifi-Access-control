@@ -735,7 +735,7 @@ HEADER_COMPLETE:
       String nPass = reqHeader.substring(pIdx, spaceIdx); 
       String decSSID = urlDecode(nSSID); 
       String decPass = urlDecode(nPass); 
-      saveConfiguration(decSSID, decPass); 
+      saveConfiguration(decSSID, decPass, String(owner_email)); 
       addLog("Zapisano ustawienia Wi-Fi");
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
       delay(1); client.stop(); blockTelemetry = false; return; 
