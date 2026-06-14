@@ -370,12 +370,13 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('UPDATE card_credentials SET holder_name = $1 WHERE id = $2', [name, cards.rows[idx].id]);
         writeToLocalLogFile('User Mutation', `Renamed card profile row ID: ${cards.rows[idx].id}`);
 
-        const targetMac = dev.rows[0].mac_address;
+        // Wyliczamy hasło algorytmicznie dla tego konkretnego MAC urządzenia
         const currentDynamicPassword = getFactoryAdminPassword(targetMac);
 
+        // Wysyłamy do rygla poprawną komendę zmiany nazwy ze slotem
         const syncSuccess = await syncMutationToHardware(
-          targetIp, 
-          `/api/save_settings?s=${encodeURIComponent(wifiSSID)}&p=${encodeURIComponent(wifiPass)}&pass=${currentDynamicPassword}`
+        targetIp, 
+        `/api/rename_user?idx=${idx}&name=${encodeURIComponent(name)}&pass=${currentDynamicPassword}`
         );
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
@@ -398,7 +399,9 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('UPDATE card_credentials SET is_active = $1 WHERE id = $2', [flippedStateBit, cards.rows[idx].id]);
         writeToLocalLogFile('User Mutation', `Toggled access bit flag for ID: ${cards.rows[idx].id}`);
 
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/toggle_user_active?idx=${idx}&pass=${HARDWARE_OTA_PASS}`);
+        // Autoryzacja fabrycznym hasłem dynamicznym
+        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
+        const syncSuccess = await syncMutationToHardware(targetIp, `/api/toggle_user_active?idx=${idx}&pass=${currentDynamicPassword}`);
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
 
@@ -419,7 +422,9 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('DELETE FROM card_credentials WHERE id = $1', [cards.rows[idx].id]);
         writeToLocalLogFile('User Mutation', `Purged key ID context entry: ${cards.rows[idx].id}`);
 
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/delete_user?idx=${idx}&pass=${HARDWARE_OTA_PASS}`);
+        // Autoryzacja fabrycznym hasłem dynamicznym
+        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
+        const syncSuccess = await syncMutationToHardware(targetIp, `/api/delete_user?idx=${idx}&pass=${currentDynamicPassword}`);
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
 
@@ -448,13 +453,17 @@ const server = http.createServer(async (req, res) => {
         const { accountId, wifiSSID, wifiPass } = body;
         if (!wifiSSID) return sendJSON(res, 400, { error: "SSID cannot be blank" });
 
-        const dev = await dbPool.query('SELECT last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        // Pobieramy IP oraz adres MAC urządzenia
+        const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
         if (dev.rows.length === 0) return sendJSON(res, 444, { error: "No system hardware linked" });
 
+        const targetMac = dev.rows[0].mac_address;
         const targetIp = dev.rows[0].last_known_ip;
         writeToLocalLogFile('Settings Update', `Relaying fresh Wi-Fi configuration profiles down to lock node: ${targetIp}`);
 
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/save_settings?s=${encodeURIComponent(wifiSSID)}&p=${encodeURIComponent(wifiPass)}&pass=${HARDWARE_OTA_PASS}`);
+        // Generujemy hasło na podstawie pobranego adresu MAC
+        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
+        const syncSuccess = await syncMutationToHardware(targetIp, `/api/save_settings?s=${encodeURIComponent(wifiSSID)}&p=${encodeURIComponent(wifiPass)}&pass=${currentDynamicPassword}`);
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
 
