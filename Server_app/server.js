@@ -31,7 +31,7 @@ const dbPool = new Pool({
   port: 5432,
 });
 
-// REINFORCED PRODUCTION BREVO SMTP RELAY CHANNEL LAYER
+// Local Postfix delivery service
 const mailTransport = nodemailer.createTransport({
   host: '127.0.0.1',
   port: 25,
