@@ -345,15 +345,27 @@ export default function App() {
           // Serwer pobrał plik. Teraz informujemy, że zamek instaluje oprogramowanie z sieci LAN.
           setOtaState('flashing_device');
 
-          // Dajemy zamkowi bezpieczne 20 sekund na pobranie pliku z Proxmoxa, flash wewnętrzny i hard-reset
-          setTimeout(() => {
-            setOtaState('success');
+          let attempts = 0;
+          const checkInterval = setInterval(() => {
+            attempts++;
             
-            // Po kolejnych 5 sekundach wracamy przyciskiem do stanu normalnego
-            setTimeout(() => {
-              setOtaState('idle');
-            }, 5000);
-          }, 20000); 
+            // Pobieramy świeży stan z serwera (on odpytuje bazę SQL)
+            fetchStatus(); 
+
+            // Jeśli wersja w lockState zmieniła się na oczekiwaną - mamy sukces!
+            if (lockState.version === latestVersion) {
+              clearInterval(checkInterval);
+              setOtaState('success');
+              setTimeout(() => setOtaState('idle'), 5000);
+            }
+
+            // Bezpiecznik: jeśli po 45 sekundach zamek nie wstał, wyłączamy pętlę i sypiemy błędem
+            if (attempts > 15) {
+              clearInterval(checkInterval);
+              setOtaState('available');
+              Alert.alert('Timeout', 'Centralka pobrała plik, ale nie potwierdziła restartu nową wersją.');
+            }
+          }, 3000); 
 
         } else {
           throw new Error();

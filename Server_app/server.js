@@ -618,144 +618,135 @@ const server = http.createServer(async (req, res) => {
     // UPDATE LOGIC -- GET NEW PACKAGE
 
     if (pathname === '/api/ota/push' && (req.method === 'POST' || req.method === 'GET')) {
-    const logFile = '/var/log/smartlock/smartlock_system.log';
-    
-    const forceLog = (msg) => {
-        try {
-            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG OTA PUSH] ${msg}\n`);
-        } catch (e) {}
-    };
+      const logFile = '/var/log/smartlock/smartlock_system.log';
+      const forceLog = (msg) => {
+        try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG OTA PUSH] ${msg}\n`); } catch (e) {}
+      };
 
-    forceLog("Inicjalizacja żądania OTA PUSH (Sprawdzanie struktury oryginalnych nazw plików)...");
+      forceLog("Inicjalizacja żądania OTA PUSH z aplikacji mobilnej...");
 
-    const options = {
+      const options = {
         hostname: 'api.github.com',
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
         family: 4,
-        timeout: 10000, // 🌟 Max 10 sekund oczekiwania - zapobiega zawieszeniu aplikacji
+        timeout: 8000,
         headers: { 
-            'User-Agent': 'NodeJS-SmartLock-Server',
-            'Authorization': `token ${GITHUB_PAT}`
+          'User-Agent': 'NodeJS-SmartLock-Server',
+          'Authorization': `token ${GITHUB_PAT}`
         }
-    };
+      };
 
-    // Przypisujemy żądanie do zmiennej, aby móc obsłużyć błędy sieciowe gniazda
-    const githubReq = https.get(options, (githubRes) => {
+      const githubReq = https.get(options, (githubRes) => {
         let data = '';
         githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
-            try {
-                const release = JSON.parse(data);
-                
-                if (githubRes.statusCode !== 200) {
-                    forceLog(`GitHub odrzucił żądanie. Powód: ${release.message}`);
-                    if (!res.headersSent) {
-                        res.writeHead(githubRes.statusCode, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: release.message }));
-                    }
-                    return;
-                }
+          try {
+            const release = JSON.parse(data);
+            
+            if (githubRes.statusCode !== 200) {
+              forceLog(`GitHub odrzucił autoryzację: ${release.message}`);
+              return sendJSON(res, githubRes.statusCode, { error: release.message });
+            }
 
-                const binAsset = release.assets.find(asset => asset.name.endsWith('.bin'));
-                if (!binAsset) {
-                    forceLog("Krytyczny błąd: Brak skompilowanego pliku .bin w wydaniu!");
-                    if (!res.headersSent) {
-                        res.writeHead(404, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: "Brak pliku .bin" }));
-                    }
-                    return;
-                }
+            // Szukamy pliku .bin, pomijając ewentualne pozostałości merged
+            const binAsset = release.assets.find(asset => asset.name.endsWith('.bin') && !asset.name.includes('merged'));
+            if (!binAsset) {
+              forceLog("Krytyczny błąd: Brak poprawnego pliku .bin w wydaniu GitHub!");
+              return sendJSON(res, 404, { error: "Brak właściwego pliku .bin" });
+            }
 
-                const targetFileName = binAsset.name;
-                const targetFilePath = path.join(updatesDir, targetFileName);
+            const targetFileName = binAsset.name;
+            const targetFilePath = path.join(updatesDir, targetFileName);
 
-                if (fs.existsSync(targetFilePath)) {
-                    forceLog(`[KESZ HIT] Plik ${targetFileName} znajduje się już na dysku! Pomijam pobieranie.`);
+            if (fs.existsSync(targetFilePath) && fs.statSync(targetFilePath).size > 0) {
+              forceLog(`[CACHE HIT] Plik ${targetFileName} jest już na dysku Proxmox.`);
+              latestFirmwareFile = targetFileName;
+              otaUpdatePending = true;
+              return sendJSON(res, 200, { success: true, cached: true });
+            }
+
+            forceLog(`Rozpoczynam pobieranie paczki z GitHuba: ${targetFileName}...`);
+
+            const downloadOptions = {
+              hostname: 'api.github.com',
+              path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${binAsset.id}`,
+              family: 4,
+              headers: {
+                'User-Agent': 'NodeJS-SmartLock-Server',
+                'Authorization': `token ${GITHUB_PAT}`,
+                'Accept': 'application/octet-stream'
+              }
+            };
+
+            const fileStream = fs.createWriteStream(targetFilePath);
+            
+            // Rekurencyjna funkcja radząca sobie z przekierowaniami 302 (GitHub -> S3)
+            const executeDownloadPipeline = (downloadUrl) => {
+              
+              // 1. Definiujemy osobną funkcję zwrotną (callback), by kod był czytelny
+              const callback = (fileRes) => {
+                if (fileRes.statusCode === 302 || fileRes.statusCode === 301) {
+                  // Wywołanie rekurencyjne dla nowego adresu URL z nagłówka location
+                  executeDownloadPipeline(fileRes.headers.location);
+                } else if (fileRes.statusCode === 200) {
+                  fileRes.pipe(fileStream);
+                  fileStream.on('finish', () => {
+                    fileStream.close();
                     latestFirmwareFile = targetFileName;
                     otaUpdatePending = true;
-
-                    if (!res.headersSent) {
-                        res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ success: true, cached: true }));
-                    }
-                    return;
+                    forceLog(`Sukces! Nowy soft ${targetFileName} pobrany pomyślnie.`);
+                    sendJSON(res, 200, { success: true, cached: false });
+                  });
+                } else {
+                  fileStream.close();
+                  try { fs.unlinkSync(targetFilePath); } catch(e) {}
+                  sendJSON(res, 500, { error: `S3 Server returned status ${fileRes.statusCode}` });
                 }
+              };
 
-                forceLog(`Brak pliku w systemie. Pobieranie nowej paczki: ${targetFileName}...`);
-
-                const downloadOptions = {
-                    hostname: 'api.github.com',
-                    path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${binAsset.id}`,
-                    family: 4,
-                    headers: {
-                        'User-Agent': 'NodeJS-SmartLock-Server',
-                        'Authorization': `token ${GITHUB_PAT}`,
-                        'Accept': 'application/octet-stream'
-                    }
+              // 2. Zamieniamy wszystko na stały obiekt opcji, by uniknąć błędu "listener"
+              let finalOptions = {};
+              if (typeof downloadUrl === 'string') {
+                const urlObj = url.parse(downloadUrl);
+                finalOptions = {
+                  hostname: urlObj.hostname,
+                  path: urlObj.path,
+                  port: urlObj.port,
+                  protocol: urlObj.protocol,
+                  family: 4,
+                  headers: { 'User-Agent': 'NodeJS-SmartLock-Server' }
                 };
+              } else {
+                finalOptions = { ...downloadUrl, family: 4 };
+              }
 
-                const file = fs.createWriteStream(targetFilePath);
-                
-                https.get(downloadOptions, (fileRes) => {
-                    const handleFinish = () => {
-                        file.close();
-                        latestFirmwareFile = targetFileName;
-                        otaUpdatePending = true;
-                        forceLog(`Sukces! Plik ${targetFileName} pobrany i zabezpieczony w /updates/`);
-                        
-                        if (!res.headersSent) {
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({ success: true, cached: false }));
-                        }
-                    };
+              // 3. Wywołujemy żądanie przesyłając ZAWSZE tylko 2 argumenty: (Object, Function)
+              const req = https.get(finalOptions, callback);
 
-                    if (fileRes.statusCode === 302) {
-                        https.get(fileRes.headers.location, { family: 4 }, (redirectRes) => {
-                            redirectRes.pipe(file);
-                            file.on('finish', handleFinish);
-                        });
-                    } else {
-                        fileRes.pipe(file);
-                        file.on('finish', handleFinish);
-                    }
-                });
-            } catch (e) {
-                forceLog(`Błąd przetwarzania: ${e.message}`);
-                if (!res.headersSent) {
-                    res.writeHead(500, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: e.message }));
-                }
-            }
+              req.on('error', (err) => {
+                fileStream.close();
+                try { fs.unlinkSync(targetFilePath); } catch(e) {}
+                forceLog(`Błąd pobierania strumienia: ${err.message}`);
+                sendJSON(res, 500, { error: err.message });
+              });
+            };
+
+            // Uruchomienie bezpiecznego potoku pobierania
+            executeDownloadPipeline(downloadOptions);
+
+          } catch (e) {
+            forceLog(`Błąd krytyczny parsowania: ${e.message}`);
+            sendJSON(res, 500, { error: e.message });
+          }
         });
-    });
+      });
 
-    githubReq.on('error', (err) => {
-        forceLog(`Krytyczny błąd sieciowy połączenia z GitHub API: ${err.message}`);
-        if (!res.headersSent) {
-            res.writeHead(504, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: "Timeout lub blad sieci GitHub" }));
-        }
-    });
-
-    githubReq.on('timeout', () => {
-        githubReq.destroy();
-        forceLog("Żądanie do GitHub API zostało przerwane z powodu przekroczenia limitu czasu (Timeout).");
-    });
-
-    return;
-}
-if (pathname === '/api/hardware/log' && req.method === 'GET') {
-    const logFile = '/var/log/smartlock/smartlock_system.log';
-    const msg = query.msg || 'Pusta wiadomosc';
-    const mac = query.mac || 'UNKNOWN_MAC';
-
-    try {
-        fs.appendFileSync(logFile, `[${new Date().toISOString()}] [HARDWARE NODE LOG] [${mac}] ${msg}\n`);
-    } catch (e) {}
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ success: true }));
-}
+      githubReq.on('error', (err) => {
+        forceLog(`Błąd połączenia z GitHub API: ${err.message}`);
+        sendJSON(res, 504, { error: "Timeout połączenia z GitHub" });
+      });
+      return;
+    }
       // Return .bin file
 
       if (pathname === '/api/lock/download-firmware' && req.method === 'GET') {
@@ -790,7 +781,8 @@ if (pathname === '/api/hardware/log' && req.method === 'GET') {
         });
 
         readStream.on('error', (err) => {
-            forceLog(`Błąd podczas przesyłania pliku do zamka: ${err.message}`);
+          otaUpdatePending = false;
+          forceLog(`Błąd podczas przesyłania pliku do zamka: ${err.message}`);
         });
 
     } else {
