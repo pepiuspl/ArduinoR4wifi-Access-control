@@ -821,11 +821,25 @@ if (pathname === '/api/hardware/log' && req.method === 'GET') {
   // Jeśli system nie znajdzie takiego adresu MAC w bazie, automatycznie odwracamy bajty,
   // aby zapytania SQL idealnie trafiły w zarejestrowane urządzenie.
   if (mac && mac.includes(':')) {
-    const checkDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [mac]);
+    let checkDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [mac]);
     if (checkDev.rows.length === 0) {
       const reversedMac = mac.split(':').reverse().join(':');
-      // 🤫 WYCISZONE: Usunięto stąd forceLog, aby odwracanie MAC nie spamowało co sekundę
-      mac = reversedMac;
+      const checkDevRev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [reversedMac]);
+      
+      if (checkDevRev.rows.length > 0) {
+        mac = reversedMac;
+      } else if (query.email) {
+        // PROVISIONING: Automatyczne dodanie nowej centralki do bazy danych
+        const accountRes = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [query.email.trim().toLowerCase()]);
+        if (accountRes.rows.length > 0) {
+          await dbPool.query(
+            `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
+             VALUES ($1, $2, $3, $4, 'Czuwanie')`,
+            [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
+          );
+          writeToLocalLogFile('Provisioning', `Pomyślnie utworzono i przypisano centralkę ${mac} do konta: ${query.email}`);
+        }
+      }
     }
   }
 

@@ -74,6 +74,7 @@ String urlEncode(String str) {
 
 char ssid[32] = ""; 
 char pass[32] = "";
+char owner_email[64] = "";
 
 #define RELAY_PIN   16   // Na płytce oznaczone jako RX2
 #define BUTTON_PIN  17   // Na płytce oznaczone jako TX2
@@ -179,6 +180,7 @@ void loadConfiguration() {
   if (EEPROM.read(250) == 0x55) { 
     EEPROM.get(260, ssid);
     EEPROM.get(292, pass); 
+    EEPROM.get(324, owner_email); // 🌟 Odczyt emaila z adresu 324
     provisioningMode = false;  
     hasSavedConfig = true;
   } else { 
@@ -187,13 +189,15 @@ void loadConfiguration() {
   } 
 } 
 
-void saveConfiguration(String newSSID, String newPass) { 
+void saveConfiguration(String newSSID, String newPass, String newEmail) { 
   newSSID.toCharArray(ssid, 32);
   newPass.toCharArray(pass, 32); 
+  newEmail.toCharArray(owner_email, 64); 
   EEPROM.put(260, ssid); 
   EEPROM.put(292, pass); 
+  EEPROM.put(324, owner_email); 
   EEPROM.write(250, 0x55);  
-  EEPROM.commit(); // Zapis do kości flash ESP32
+  EEPROM.commit(); 
 } 
 
 void factoryResetSettings() { 
@@ -410,15 +414,18 @@ void handleProvisioningServer() {
   if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) { 
     int sIdx = reqHeader.indexOf("s=") + 2;
     int pIdx = reqHeader.indexOf("&p=") + 3; 
-    int spacePos = reqHeader.indexOf(" ", pIdx);
-    
+    int mIdx = reqHeader.indexOf("&m=") + 3; // Nowy indeks dla pola email
+    int spacePos = reqHeader.indexOf(" ", mIdx);
+
     String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p=")); 
-    String rawPass = reqHeader.substring(pIdx, spacePos); 
+    String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&m=")); 
+    String rawEmail = reqHeader.substring(mIdx, spacePos); 
 
     String decodedSSID = urlDecode(rawSSID); 
     String decodedPass = urlDecode(rawPass); 
+    String decodedEmail = urlDecode(rawEmail); 
 
-    saveConfiguration(decodedSSID, decodedPass);
+    saveConfiguration(decodedSSID, decodedPass, decodedEmail);
     client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;\'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>"); 
     delay(50); client.stop(); 
     tone(BUZZER_PIN, 2000, 800); 
@@ -433,6 +440,7 @@ void handleProvisioningServer() {
   client.println("<h2 style='text-align:center;'>⚙ CTRLABLE Node Setup</h2><div class='box'><form method='GET' action='/save_setup'>");
   client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
   client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
+  client.println("<input type='email' name='m' value='" + String(owner_email) + "' placeholder='Twój adres e-mail w aplikacji' required>"); // Nowy input
   client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Save Infrastructure Settings'></form></div></body></html>"); 
   delay(50); client.stop();
 } 
@@ -446,11 +454,12 @@ void handleWebServer() {
   unsigned long webTimeout = millis() + 200;  
   while (client.connected() && millis() < webTimeout) { 
     if (client.available()) { 
-        char c = client.read();
-        reqHeader += c; 
-        if (c == '\n') break; 
+      char c = client.read();
+      reqHeader += c; 
+      if (c == '\n') break; 
     } 
-  } 
+  }
+  while (client.available()) { client.read(); } 
 
   if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) { 
     client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
@@ -768,8 +777,7 @@ void executeCloudSynchronization() {
   
   lastSuccessfulPollTime = millis(); 
   String macStr = getMacAddressString();
-  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0");
-  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email));  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
   unsigned long deadline = millis() + 300;
@@ -947,13 +955,14 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT); 
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
-  pinMode(RST_PIN, OUTPUT); 
+  pinMode(RST_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT); 
   digitalWrite(RST_PIN, HIGH); 
   delay(50); 
   digitalWrite(RELAY_PIN, HIGH);
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, LOW); 
-  SPI.begin(); 
+  SPI.begin(18, 19, 23, 5); 
   
   randomSeed(analogRead(0)); 
   delay(300); 
@@ -1068,12 +1077,6 @@ void loop() {
         server.begin(); 
         displayProvisioningInstructions("ERR: REKONEKCJA FAIL");
       } 
-    } 
-  } else { 
-    handleWebServer();
-    if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 1000) { 
-      lastPollTime = millis();
-      executeCloudSynchronization(); 
     } 
   } 
 
