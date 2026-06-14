@@ -12,7 +12,6 @@ const nodemailer = require('nodemailer');
 // =========================================================================
 
 const HARDWARE_OTA_USER = 'admin';
-const HARDWARE_OTA_PASS = 'admin';
 
 const GITHUB_PAT = "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"; 
 const GITHUB_USER = "pepiuspl";
@@ -55,6 +54,20 @@ function writeToLocalLogFile(module, message) {
   fs.appendFile(localLogFile, rawLogLine, (err) => {
     if (err) console.error(`[Logging Fault] Failed to write to disk: ${err.message}`);
   });
+}
+
+// Generowanie unikalnego admin pass
+
+function getFactoryAdminPassword(mac) {
+  if (!mac) return 'admin';
+  const cleanMac = mac.toUpperCase(); 
+  const salt = "CTRLABLE_KEY_2026";   
+  const combined = cleanMac + salt;
+  let hashNum = 0;
+  for (let i = 0; i < combined.length; i++) {
+    hashNum += combined.charCodeAt(i) * (i + 1);
+  }
+  return "CN" + String(hashNum).substring(0, 5);
 }
 
 const unlockQueues = {};
@@ -218,11 +231,11 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/auth/forgot_password' && req.method === 'POST') {
         const cleanEmail = body.email ? body.email.trim().toLowerCase() : '';
-        if (!cleanEmail) return sendJSON(res, 400, { error: "Target email missing" });
+        if (!cleanEmail) return sendJSON(res, 400, { error: "Nie podano email" });
 
         const checkAccount = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [cleanEmail]);
         if (checkAccount.rows.length === 0) {
-          return sendJSON(res, 200, { status: "processed" }); // Bezpieczeństwo: ukrywamy istnienie konta
+          return sendJSON(res, 200, { status: "processed" });
         }
 
         const secureCode = Math.floor(100000 + Math.random() * 900000).toString();
@@ -240,11 +253,11 @@ const server = http.createServer(async (req, res) => {
           subject: 'Kod autoryzacyjny resetu hasła CTRLABLE',
           html: `<h3>Twój kod weryfikacyjny:</h3>
                  <h1 style="color:#0284c7; font-family:monospace; letter-spacing:2px;">${secureCode}</h1>
-                 <p>Kod jest ważny przez 15 minut. Jeśli nie prosiłeś o reset hasła, możesz bezpiecznie zignorować tę wiadomość.</p>`
+                 <p>Kod jest ważny przez 15 minut. Jeśli nie prosiłeś o reset hasła, możesz zignorować tę wiadomość.</p>`
         };
         
         mailTransport.sendMail(automatedMailManifest, (mailError, info) => {
-          if (mailError) writeToLocalLogFile('Reset SMTP Fail', mailError.message);
+          if (mailError) writeToLocalLogFile('Błąd serwera SMTP', mailError.message);
         });
 
         return sendJSON(res, 200, { status: "processed" });
@@ -357,7 +370,13 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('UPDATE card_credentials SET holder_name = $1 WHERE id = $2', [name, cards.rows[idx].id]);
         writeToLocalLogFile('User Mutation', `Renamed card profile row ID: ${cards.rows[idx].id}`);
 
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/rename_user?idx=${idx}&name=${encodeURIComponent(name)}&pass=${HARDWARE_OTA_PASS}`);
+        const targetMac = dev.rows[0].mac_address;
+        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
+
+        const syncSuccess = await syncMutationToHardware(
+          targetIp, 
+          `/api/save_settings?s=${encodeURIComponent(wifiSSID)}&p=${encodeURIComponent(wifiPass)}&pass=${currentDynamicPassword}`
+        );
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
 
@@ -405,24 +424,21 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
-      // ZMIANA HASŁA MASTER W USTAWIENIACH
+      // ZMIANA HASŁA UŻYTKOWNIKA W USTAWIENIACH
       // =========================================================================
       if (pathname === '/api/settings/password' && req.method === 'POST') {
         const { accountId, newPassword } = body;
-        if (!newPassword || newPassword.length < 4) return sendJSON(res, 400, { error: "New password too short" });
-
-        const dev = await dbPool.query('SELECT last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
-        const targetIp = dev.rows.length > 0 ? dev.rows[0].last_known_ip : '';
-
-        const newAdminHash = await bcrypt.hash(newPassword, 10);
-        await dbPool.query('UPDATE accounts SET password_hash = $1 WHERE id = $2', [newAdminHash, accountId]);
-        writeToLocalLogFile('Settings Update', `Modified master password for account id: ${accountId}`);
-
-        let hardwareSynced = false;
-        if (targetIp) {
-          hardwareSynced = await syncMutationToHardware(targetIp, `/api/save_settings?a=${encodeURIComponent(newPassword)}&pass=${HARDWARE_OTA_PASS}`);
+        if (!newPassword || newPassword.length < 6) {
+        return sendJSON(res, 400, { error: "Nowe hasło musi mieć minimum 6 znaków." });
         }
-        return sendJSON(res, 200, { status: "ok", hardwareSynced });
+
+        // Hashujemy nowe hasło do APLIKACJI i zapisujemy w tabeli accounts
+        const newAccountHash = await bcrypt.hash(newPassword, 10);
+        await dbPool.query('UPDATE accounts SET password_hash = $1 WHERE id = $2', [newAccountHash, accountId]);
+        writeToLocalLogFile('Settings Update', `Użytkownik ID: ${accountId} zmienił swoje hasło logowania do aplikacji.`);
+
+        // Zwracamy czysty sukces - sprzęt (zamek) jest bezpieczny i nienaruszony
+        return sendJSON(res, 200, { success: true });
       }
 
       // =========================================================================

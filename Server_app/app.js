@@ -4,6 +4,7 @@ import * as Haptics from 'expo-haptics';
 
 const { width } = Dimensions.get('window');
 
+
 let AsyncStorage;
 try {
   AsyncStorage = require('@react-native-async-storage/async-storage').default;
@@ -60,7 +61,7 @@ export default function App() {
 
   const [settingsSsid, setSettingsSsid] = useState('');
   const [settingsWifiPass, setSettingsWifiPass] = useState('');
-  const [settingsAdminPass, setSettingsAdminPass] = useState('');
+  const [settingsAppPass, setSettingsAppPass] = useState('');
 
   const resetUiToDefault = useCallback(() => {
     setCurrentScreen('dashboard');
@@ -265,28 +266,36 @@ export default function App() {
   };
 
   const handleSaveSystemSettings = () => {
-    if (settingsAdminPass) {
-      fetch(`${backendUrl}/api/settings/password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId, newPassword: settingsAdminPass })
+  // 1. Obsługa zmiany hasła do konta w aplikacji
+  if (settingsAppPass) {
+    fetch(`${backendUrl}/api/settings/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId, newPassword: settingsAppPass })
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error();
+        Alert.alert("Sukces", "Twoje hasło do aplikacji zostało pomyślnie zmienione.");
       })
-        .then(() => Alert.alert("Zapisano", "Master password zaktualizowane na zamku."))
-        .catch(() => alert("Błąd synchronizacji hasła z hardware."));
-    }
-    if (settingsSsid) {
-      fetch(`${backendUrl}/api/settings/wifi`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId, wifiSSID: settingsSsid, wifiPass: settingsWifiPass })
-      })
-        .then(() => Alert.alert("Zapisano", "Nowe profile Wi-Fi wysłane. Zamek się restartuje."))
-        .catch(() => alert("Błąd synchronizacji Wi-Fi z hardware."));
-    }
-    setSettingsWifiPass('');
-    setSettingsAdminPass('');
-    setSettingsSsid('');
-  };
+      .catch(() => alert("Błąd podczas zmiany hasła do aplikacji."));
+  }
+
+  // 2. Obsługa zmiany sieci Wi-Fi w centralce
+  if (settingsSsid) {
+    fetch(`${backendUrl}/api/settings/wifi`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId, wifiSSID: settingsSsid, wifiPass: settingsWifiPass })
+    })
+      .then(() => Alert.alert("Zapisano", "Nowa konfiguracja Wi-Fi wysłana. Zamek uruchamia się ponownie."))
+      .catch(() => alert("Błąd synchronizacji Wi-Fi z hardware."));
+  }
+
+  // Czyszczenie pól formularza
+  setSettingsWifiPass('');
+  setSettingsAppPass(''); // <-- Czyszczenie nowego stanu
+  setSettingsSsid('');
+};
 
   //LOGIKA WYKRYWANIA I ANALIZY AKTUALIZACJI OTA
   const handleCheckUpdate = () => {
@@ -719,9 +728,16 @@ export default function App() {
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.sectionHeader}>🔒 Zmiana Hasła Master Panelu (Hardware)</Text>
-              <Text style={styles.inputLabelText}>Nowe Hasło Master Administratora (Zapis do EEPROM):</Text>
-              <TextInput style={styles.inputField} secureTextEntry placeholder="Wprowadź nowe hasło master" placeholderTextColor="#555" value={settingsAdminPass} onChangeText={setSettingsAdminPass} />
+              <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta Aplikacji</Text>
+              <Text style={styles.inputLabelText}>Nowe Hasło Logowania:</Text>
+              <TextInput 
+              style={styles.inputField} 
+              secureTextEntry 
+              placeholder="Wprowadź nowe hasło do aplikacji" 
+              placeholderTextColor="#555" 
+              value={settingsAppPass} 
+              onChangeText={settingsAppPass} 
+              />
             </View>
 
             <View style={styles.card}>
