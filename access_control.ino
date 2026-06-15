@@ -389,7 +389,7 @@ void openDoor(String source) {
   globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source; 
-  digitalWrite(RELAY_PIN, LOW); 
+  digitalWrite(RELAY_PIN, HIGH); 
   digitalWrite(LED_GREEN, HIGH); 
   digitalWrite(LED_RED, LOW); 
   tone(BUZZER_PIN, 1000, 200); 
@@ -959,7 +959,7 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT); 
   digitalWrite(RST_PIN, HIGH); 
   delay(50); 
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW);
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, LOW); 
   SPI.begin(18, 19, 23, 5); 
