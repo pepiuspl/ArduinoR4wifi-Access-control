@@ -392,7 +392,9 @@ void openDoor(String source) {
   globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source; 
-  digitalWrite(RELAY_PIN, HIGH); 
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW); 
+  
   digitalWrite(LED_GREEN, HIGH); 
   digitalWrite(LED_RED, LOW); 
   tone(BUZZER_PIN, 1000, 200); 
@@ -955,17 +957,17 @@ void setup() {
       Serial.println("[FACTORY RESET COMPLETE]");
     } 
   } 
-  pinMode(RELAY_PIN, OUTPUT); 
+  pinMode(RELAY_PIN, INPUT); 
+  
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
   pinMode(RST_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT); 
   digitalWrite(RST_PIN, HIGH); 
-  delay(50); 
-  digitalWrite(RELAY_PIN, LOW);
+  delay(50);
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, LOW); 
-  SPI.begin(18, 19, 23, 5); 
+  SPI.begin(); 
   
   randomSeed(analogRead(0)); 
   delay(300); 
@@ -1211,7 +1213,7 @@ void loop() {
 
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
-    digitalWrite(RELAY_PIN, LOW); 
+    pinMode(RELAY_PIN, INPUT); 
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
