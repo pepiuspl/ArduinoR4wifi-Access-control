@@ -665,7 +665,7 @@ export default function App() {
         style={[styles.secondaryBtn, lockState.mode === 'Uczenie' ? { backgroundColor: '#cc3333' } : { backgroundColor: '#333' }]} 
         onPress={handleToggleLearn}
       >
-        <Text style={styles.btnText}>{lockState.mode === 'Uczenie' ? '🛑 Wyłącz Wykrywanie Czytnika' : 'Uruchom Tryb Parowania Klucza'}</Text>
+        <Text style={styles.btnText}>{lockState.mode === 'Uczenie' ? '🛑 Wyłącz Wykrywanie Czytnika' : 'Uruchom Tryb Uczenia'}</Text>
       </TouchableOpacity>
     </View>
 
