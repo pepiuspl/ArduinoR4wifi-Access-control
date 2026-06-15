@@ -98,7 +98,8 @@ bool learningMode = false;
 bool autoExitLearn = false;  
 bool provisioningMode = false;
 bool isOfflineStandby = false;  
-bool hasSavedConfig = false; 
+bool hasSavedConfig = false;
+bool oledConnected = false; 
 User users[10];
 bool isCardActive[10] = {true, true, true, true, true, true, true, true, true, true};  
 int totalCards = 0;
@@ -270,7 +271,8 @@ String getFormattedSystemTime() {
   return String(timeBuffer); 
 } 
 
-void renderSystemUI() { 
+void renderSystemUI() {
+  if (!oledConnected) return; 
   display.clearDisplay(); 
   display.setTextSize(1); 
   display.setTextColor(SH110X_WHITE); 
@@ -394,7 +396,6 @@ void openDoor(String source) {
   globalDisplayInfo = source; 
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW); 
-  
   digitalWrite(LED_GREEN, HIGH); 
   digitalWrite(LED_RED, LOW); 
   tone(BUZZER_PIN, 1000, 200); 
@@ -950,10 +951,19 @@ void setup() {
 
   // 2. 🌟 KRYTYCZNE: Inicjalizacja ekranu NA SAMYM POCZĄTKU
   // Dzięki temu funkcje rysujące nie wywołają crashu pamięci ESP32
-  display.begin(0x3C, true); 
-  display.clearDisplay();
+  Wire.begin();
+  Wire.beginTransmission(0x3C);
+  if (Wire.endTransmission() == 0) {
+    display.begin(0x3C, true);
+    display.clearDisplay();
+    oledConnected = true;
+    Serial.println("[DISPLAY] Ekran OLED wykryty i zainicjalizowany.");
+  } else {
+    oledConnected = false;
+    Serial.println("[WARN] Brak ekranu OLED. Ekran wyłączony bezpiecznie.");
+  }
 
-  // 3. 🌟 BEZPIECZEŃSTWO: Przekaźnik jako INPUT odcina wyciek prądu 5V/3.3V
+  //BEZPIECZEŃSTWO: Przekaźnik jako INPUT odcina wyciek prądu 5V/3.3V
   pinMode(RELAY_PIN, INPUT); 
   
   pinMode(LED_GREEN, OUTPUT); 
@@ -1227,7 +1237,7 @@ void loop() {
 
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
-    pinMode(RELAY_PIN, INPUT); 
+    pinMode(RELAY_PIN, HIGH); 
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
