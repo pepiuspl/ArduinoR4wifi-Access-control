@@ -942,7 +942,8 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); 
+  digitalWrite(RELAY_PIN, HIGH);
+  pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
   EEPROM.begin(512);
