@@ -445,8 +445,10 @@ void handleProvisioningServer() {
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>"); 
   client.println("<h2 style='text-align:center;'>⚙ CTRLABLE Node Setup</h2><div class='box'><form method='GET' action='/save_setup'>");
   client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
-  client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
-  client.println("<input type='email' name='m' value='" + String(owner_email) + "' placeholder='Twój adres e-mail w aplikacji' required>"); // Nowy input
+  client.println("<input type='password' id='wifi_pass' name='p' value='" + String(pass) + "' placeholder='Password' required>");
+  client.println("<label style='color:#aaa; font-size:14px; display:block; margin:-5px 0 15px 5px; cursor:pointer;'><input type='checkbox' onclick='togglePass()'> Pokaż hasło</label>");
+  client.println("<script>function togglePass() { var x = document.getElementById('wifi_pass'); x.type = (x.type === 'password') ? 'text' : 'password'; }</script>");
+  client.println("<input type='email' name='m' value='" + String(owner_email) + "' placeholder='Twój adres e-mail w aplikacji' required>");
   client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Save Infrastructure Settings'></form></div></body></html>"); 
   delay(50); client.stop();
 } 
@@ -738,7 +740,7 @@ HEADER_COMPLETE:
       int pIdx = reqHeader.indexOf("&p=") + 3; 
       int spaceIdx = reqHeader.indexOf(" ", pIdx);
       String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
-      String nPass = reqHeader.substring(pIdx, spaceIdx); 
+      String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&pass=")); 
       String decSSID = urlDecode(nSSID); 
       String decPass = urlDecode(nPass); 
       saveConfiguration(decSSID, decPass, String(owner_email)); 
@@ -860,7 +862,11 @@ void performLocalFirmwareUpdate() {
       unsigned long receiveDeadline = millis() + 10000; 
       
       uint8_t buffer[256];
-      while (receivedBytes < contentLength && otaClient.connected()) { 
+      while (receivedBytes < contentLength && otaClient.connected()) {
+        if (!otaClient.connected() && !otaClient.available()) {
+          sendRemoteLog("[OTA PULL ERR] Polaczenie zerwane przed pobraniem calosci.");
+          break;
+        } 
         int availableBytes = otaClient.available();
         if (availableBytes > 0) {
           int toRead = min(availableBytes, (int)sizeof(buffer));

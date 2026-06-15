@@ -110,16 +110,20 @@ function getLatestFirmwareContext() {
 
   try {
     const files = fs.readdirSync(updatesDir);
-    // Filtrowanie struktury plików: lock_v*.bin
     const binFiles = files.filter(f => f.startsWith('lock_v') && f.endsWith('.bin'));
     
     if (binFiles.length === 0) return { version: '0.0.0', filename: null };
 
-    // Sortowanie SemVer malejąco (od najwyższej do najniższej wersji)
+    // Bezpieczne wyciąganie cyfr wersji przy pomocy wyrażenia regularnego
+    const getVerArray = (filename) => {
+      const match = filename.match(/lock_v\.?([\d.]+)\.bin/);
+      if (!match) return [0];
+      return match[1].split('.').map(Number);
+    };
+
     binFiles.sort((a, b) => {
-      const verA = a.replace('lock_v', '').replace('.bin', '').split('.').map(Number);
-      const verB = b.replace('lock_v', '').replace('.bin', '').split('.').map(Number);
-      
+      const verA = getVerArray(a);
+      const verB = getVerArray(b);
       for (let i = 0; i < Math.max(verA.length, verB.length); i++) {
         const numA = verA[i] || 0;
         const numB = verB[i] || 0;
@@ -129,7 +133,8 @@ function getLatestFirmwareContext() {
     });
 
     const latestFile = binFiles[0];
-    const extractedVersion = latestFile.replace('lock_v', '').replace('.bin', '').trim();
+    const match = latestFile.match(/lock_v\.?([\d.]+)\.bin/);
+    const extractedVersion = match ? match[1] : "0.0.0";
     return { version: extractedVersion, filename: latestFile };
   } catch (e) {
     return { version: '0.0.0', filename: null };
@@ -537,13 +542,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       //  UPDATE -- OTA CHECK
-      if (pathname === '/api/lock/ota-check' && req.method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });  
-        return res.end(otaUpdatePending ? "1" : "0");
-      }
-      // UPDATE LOGIC 
-      if (!fs.existsSync(updatesDir)) {
-        fs.mkdirSync(updatesDir, { recursive: true });
+      if (pathname === '/api/hardware/log' && req.method === 'GET') {
+        const msg = query.msg || '';
+        const mac = query.mac || '00:00:00:00:00:00';
+        writeToLocalLogFile('Hardware Remote Log', `[Node: ${mac}] ${msg}`);
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+        res.end("OK");
+        return;
       }
 
       // UPDATE LOGIC -- CHECK NEW PACKAGES

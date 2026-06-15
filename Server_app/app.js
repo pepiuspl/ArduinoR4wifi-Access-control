@@ -27,15 +27,21 @@ export default function App() {
   const [isRegisterMode, setIsRegisterMode] = useState(false); 
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
   
-  // 🔐 STANY OBSŁUGI BEZPIECZNEGO RESETU HASŁA (OPCJA B)
+  // STANY OBSŁUGI BEZPIECZNEGO RESETU HASŁA (OPCJA B)
   const [resetStep, setResetStep] = useState(1); // 1: Email, 2: Kod, 3: Nowe Hasło
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
 
-  // 💾 STAN OBSŁUGI AKTUALIZACJI OTA
+  // STAN OBSŁUGI AKTUALIZACJI OTA
   const [otaState, setOtaState] = useState('idle'); 
   const [latestVersion, setLatestVersion] = useState('');
+
+  // STAN WIDOCZNOŚCI HASEŁ
+  const [secureLogin, setSecureLogin] = useState(true);
+  const [secureReset, setSecureReset] = useState(true);
+  const [secureSettingsApp, setSecureSettingsApp] = useState(true);
+  const [secureSettingsWifi, setSecureSettingsWifi] = useState(true);
 
   const [lockState, setLockState] = useState({ 
     auth: false, 
@@ -363,7 +369,7 @@ export default function App() {
             if (attempts > 15) {
               clearInterval(checkInterval);
               setOtaState('available');
-              Alert.alert('Timeout', 'Centralka pobrała plik, ale nie potwierdziła restartu nową wersją.');
+              Alert.alert('Timeout', 'Centralka pobrała plik, ale nie potwierdziła jego instalacji \n Spróbuj ponownie lub zrestartuj urządzenie.');
             }
           }, 3000); 
 
@@ -374,7 +380,7 @@ export default function App() {
       .catch(() => {
         // W razie błędu wracamy do opcji ponownego kliknięcia
         setOtaState('available');
-        Alert.alert('Błąd aktualizacji', 'Serwer nie mógł pobrać stabilnego pliku binarnego z GitHuba.');
+        Alert.alert('Błąd aktualizacji', 'Serwer nie mógł pobrać stabilnego pliku z serwera.');
       });
   };
 
@@ -397,7 +403,7 @@ export default function App() {
         }
       })
       .catch(() => {
-        setErrorMessage(`Handshaking connection lines with Proxmox nodes...`);
+        setErrorMessage(`Łączenie z serwerem...`);
       });
   }, [isConfigured, accountId, backendUrl]);
 
@@ -446,7 +452,7 @@ export default function App() {
   const promptUserRename = (idx, currentName) => {
     Alert.prompt(
       "Edytuj Nazwę",
-      "Wprowadź nową etykietę dla lokatora " + currentName + ":",
+      "Wprowadź nową nazwę użytkownika " + currentName + ":",
       [
         { text: "Anuluj", style: "cancel" },
         { 
@@ -539,9 +545,18 @@ export default function App() {
               {resetStep === 3 && (
                 <>
                   <Text style={styles.inputLabelText}>Nowe Hasło Master:</Text>
-                  <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={newPassword} onChangeText={setNewPassword} />
+                  <View style={{ width: '100%', position: 'relative' }}>
+                    <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureReset} editable={!isAuthenticating} value={newPassword} onChangeText={setNewPassword} />
+                    <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureReset(!secureReset)}>
+                      <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureReset ? "👁️ Pokaż" : "🙈 Ukryj"}</Text>
+                    </TouchableOpacity>
+                  </View>
+
                   <Text style={styles.inputLabelText}>Powtórz Nowe Hasło:</Text>
-                  <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={confirmNewPassword} onChangeText={setConfirmNewPassword} />
+                  <View style={{ width: '100%', position: 'relative' }}>
+                    <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureReset} editable={!isAuthenticating} value={confirmNewPassword} onChangeText={setConfirmNewPassword} />
+                  </View>
+
                   <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleConfirmPasswordReset} disabled={isAuthenticating}>
                     <Text style={styles.btnText}>Zapisz Nowy Klucz i Zakończ</Text>
                   </TouchableOpacity>
@@ -554,7 +569,12 @@ export default function App() {
               <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
               
               <Text style={styles.inputLabelText}>Klucz Bezpieczeństwa (Hasło):</Text>
-              <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={password} onChangeText={setPassword} />
+              <View style={{ width: '100%', position: 'relative' }}>
+                <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureLogin} editable={!isAuthenticating} value={password} onChangeText={setPassword} />
+                <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureLogin(!secureLogin)}>
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureLogin ? "👁️ Pokaż" : "🙈 Ukryj"}</Text>
+                </TouchableOpacity>
+              </View>
               
               <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={isRegisterMode ? handleAccountRegistration : handleSecurityLogin} disabled={isAuthenticating}>
                 <Text style={styles.btnText}>{isAuthenticating ? 'Przetwarzanie żądania...' : isRegisterMode ? 'Utwórz Przestrzeń Chmurową' : 'Zaloguj się'}</Text>
@@ -586,58 +606,72 @@ export default function App() {
     <SafeAreaView style={styles.darkContainer}>
       <View style={styles.navigationHeaderBar}>
         <TouchableOpacity style={styles.burgerIconTouchContainer} onPress={toggleBurgerMenu}>
-          <View style={styles.burgerStripeLine} /><View style={[styles.burgerStripeLine, { marginVertical: 5 }]} /><View style={styles.burgerStripeLine} />
+          <View style={styles.burgerStripeLine} />
+          <View style={[styles.burgerStripeLine, { marginVertical: 5 }]} /><View style={styles.burgerStripeLine} />
         </TouchableOpacity>
-        <Text style={styles.headerTitleText}>CTRLABLE Gateway</Text>
+        <Text style={styles.headerTitleText}>CTRLABLE Gateway
+        </Text>
         <View style={{ width: 24 }} />
-      </View>
+        </View>
 
       
-      <View style={{ flex: 1 }}>
-        {currentScreen === 'dashboard' && (
-          <ScrollView contentContainerStyle={styles.scrollWrapper}>
-            <Text style={styles.screenHeaderText}>📱 Pokój Kontrolny</Text>
-            {errorMessage ? <View style={styles.errorCard}><Text style={styles.errorTextInsideCard}>⚠️ {errorMessage}</Text></View> : null}
-            <View style={styles.statusBox}>
-  <Text style={styles.label}>Stan Rygla Elektromagnetycznego:</Text>
-  
-  {/* 🌟 Dynamiczne kolory dla 3 stanów automatyki */}
-  <Text style={[styles.valueBold, { 
-    color: lockState.lock === true ? '#81c784' : lockState.lock === 'pending' ? '#ffb74d' : '#e57373' 
-  }]}>
-    {lockState.lock === true && '🔓 OTWARTY / SYSTEM ZWOLNIONY'}
-    {lockState.lock === 'pending' && '⚡ WYWOŁYWANIE SYGNAŁU WĘZŁA...'}
-    {lockState.lock === false && '🔒 ZABEZPIECZONY / RYGIEL ZABLOKOWANY'}
-  </Text>
-  
-  <Text style={styles.subLabel}>Bieżący tryb operacyjny hardware: {lockState.mode}</Text>
-</View>
+        <View style={{ flex: 1 }}>
+          {currentScreen === 'dashboard' && (
+            <ScrollView contentContainerStyle={styles.scrollWrapper}>
+              <Text style={styles.screenHeaderText}>📱 Dashboard</Text>
+              {errorMessage ? <View style={styles.errorCard}><Text style={styles.errorTextInsideCard}>⚠️ {errorMessage}</Text></View> : null}
+              <View style={styles.statusBox}>
+                <Text style={styles.label}>Stan Zamka:</Text>
+      
+                {/*Dynamiczne kolory dla 3 stanów automatyki */}
+                <Text style={[styles.valueBold, { 
+                color: lockState.lock === true ? '#81c784' : lockState.lock === 'pending' ? '#ffb74d' : '#e57373' 
+                }]}>
+                {lockState.lock === true && '🔓 OTWARTY / SYSTEM ZWOLNIONY'}
+                {lockState.lock === 'pending' && '⚡ WYWOŁYWANIE SYGNAŁU...'}
+                {lockState.lock === false && '🔒 ZABEZPIECZONY / RYGIEL ZABLOKOWANY'}
+                </Text>
+      
+                <Text style={styles.subLabel}>Bieżący tryb operacyjny: {lockState.mode}</Text>
+              </View>
 
-{/* 🌟 Dynamiczny przycisk */}
-<TouchableOpacity 
-  style={[styles.actionTriggerBtn, { 
-    backgroundColor: lockState.lock === true ? '#cc3333' : lockState.lock === 'pending' ? '#ffa726' : '#2e7d32' 
-  }]} 
-  disabled={lockState.lock === 'pending'}
-  onPress={() => executeCommand('/api/unlock')}
->
-  <Text style={styles.btnText}>
-    {lockState.lock === true ? 'Zwalnianie impulsu...' : lockState.lock === 'pending' ? 'Czekam na hardware...' : '⚡ Otwórz Drzwi Zdalnie'}
-  </Text>
-</TouchableOpacity>
-            <View style={styles.card}>
-              <Text style={styles.sectionHeader}>➕ Mapowanie Nowego Lokatora</Text>
-              {lockState.mode === 'Uczenie' ? <Text style={styles.learningAlertText}>⚠️ Urządzenie oczekuje na zbliżenie fizycznego klucza RFID do czytnika...</Text> : <TextInput style={styles.inputField} placeholder="Nazwa nowego profilu (np. Jan Kowalski)" placeholderTextColor="#555" value={newName} onChangeText={setNewName} />}
-              <TouchableOpacity style={[styles.secondaryBtn, lockState.mode === 'Uczenie' ? { backgroundColor: '#cc3333' } : { backgroundColor: '#333' }]} onPress={handleToggleLearn}><Text style={styles.btnText}>{lockState.mode === 'Uczenie' ? '🛑 Wyłącz Wykrywanie Czytnika' : 'Uruchom Tryb Parowania Klucza'}</Text></TouchableOpacity>
-            </View>
-          </ScrollView>
-        )}
+              {/*Dynamiczny przycisk */}
+              <TouchableOpacity 
+                style={[styles.actionTriggerBtn, { 
+                  backgroundColor: lockState.lock === true ? '#cc3333' : lockState.lock === 'pending' ? '#ffa726' : '#2e7d32' 
+                }]} 
+                disabled={lockState.lock === 'pending'}
+                onPress={() => executeCommand('/api/unlock')}>
+                <Text style={styles.btnText}>
+                  {lockState.lock === true ? 'Zwalnianie zamka...' : lockState.lock === 'pending' ? 'Oczekiwanie na zamek...' : 'Otwórz Drzwi Zdalnie'}
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+          )}
 
         {currentScreen === 'directory' && (
-          <ScrollView contentContainerStyle={styles.scrollWrapper}>
-            <Text style={styles.screenHeaderText}>👥 Wykaz Profilów Lokatorów</Text>
-            <View style={styles.card}>
-              <Text style={styles.sectionHeader}>Zarejestrowane Pozycje ({lockState.total}/10)</Text>
+  <ScrollView contentContainerStyle={styles.scrollWrapper}>
+    <Text style={styles.screenHeaderText}>👥 Lista Użytkowników</Text>
+    
+    {/* 🌟 SEKCJA PAROWANIA PRZENIESIONA TUTAJ */}
+    <View style={styles.card}>
+      <Text style={styles.sectionHeader}>Dodawanie nowej karty</Text>
+      {lockState.mode === 'Uczenie' ? (
+        <Text style={styles.learningAlertText}>⚠️ Urządzenie oczekuje na zbliżenie fizycznego klucza RFID do czytnika...</Text>
+      ) : (
+        <TextInput style={styles.inputField} placeholder="Nazwa nowego profilu (np. Jan Kowalski)" placeholderTextColor="#555" value={newName} onChangeText={setNewName} />
+      )}
+      <TouchableOpacity 
+        style={[styles.secondaryBtn, lockState.mode === 'Uczenie' ? { backgroundColor: '#cc3333' } : { backgroundColor: '#333' }]} 
+        onPress={handleToggleLearn}
+      >
+        <Text style={styles.btnText}>{lockState.mode === 'Uczenie' ? '🛑 Wyłącz Wykrywanie Czytnika' : 'Uruchom Tryb Parowania Klucza'}</Text>
+      </TouchableOpacity>
+    </View>
+
+    {/* LISTA UŻYTKOWNIKÓW */}
+    <View style={styles.card}>
+      <Text style={styles.sectionHeader}>Zarejestrowane Karty ({lockState.total}/10)</Text>
               {lockState.users.map((user) => (
                 <View key={user.idx} style={styles.userRow}>
                   <View style={{ flex: 1, paddingRight: 6 }}>
@@ -650,14 +684,14 @@ export default function App() {
                   </View>
                 </View>
               ))}
-              {lockState.users.length === 0 ? <Text style={styles.subLabel}>Brak rekordów lokatorów przypisanych do tego zamka.</Text> : null}
+              {lockState.users.length === 0 ? <Text style={styles.subLabel}>Brak rekordów przypisanych do tego zamka.</Text> : null}
             </View>
           </ScrollView>
         )}
 
         {currentScreen === 'system' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
-            <Text style={styles.screenHeaderText}>📋 Dzienniki Zdarzeń Teletrycznych (Real-Time)</Text>
+            <Text style={styles.screenHeaderText}>📋 Dziennik Zdarzeń (Real-Time)</Text>
             <View style={styles.card}>
               <ScrollView nestedScrollEnabled style={styles.internalLogBox}>{lockState.logs.map((log, index) => <Text key={index} style={styles.logText}>{log}</Text>)}</ScrollView>
             </View>
@@ -667,15 +701,15 @@ export default function App() {
         {/* EKRAN AKTUALIZACJI OTA (Z INTEGRACJĄ NOWYCH STATUSÓW) */}
         {currentScreen === 'ota' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
-            <Text style={styles.screenHeaderText}>💾 Aktualizacja Firmware (OTA)</Text>
+            <Text style={styles.screenHeaderText}>💾 Aktualizacja Firmware</Text>
             
             <View style={styles.statusBox}>
-              <Text style={styles.label}>Bieżąca wersja struktury zamka:</Text>
+              <Text style={styles.label}>Bieżąca wersja oprogramowania:</Text>
               <Text style={[styles.valueBold, { color: '#64b5f6' }]}>{lockState.version}</Text>
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.sectionHeader}>Weryfikacja wydań</Text>
+              <Text style={styles.sectionHeader}>Weryfikacja dostępności aktualizacji</Text>
               
               {otaState === 'idle' && (
                 <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#3b82f6' }]} onPress={handleCheckUpdate}>
@@ -685,7 +719,7 @@ export default function App() {
 
               {otaState === 'checking' && (
                 <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#4b5563' }]} disabled>
-                  <Text style={styles.btnText}>⏳ Sprawdzanie struktury wydań...</Text>
+                  <Text style={styles.btnText}>⏳ Sprawdzanie dostępności aktualizacji...</Text>
                 </TouchableOpacity>
               )}
 
@@ -713,10 +747,10 @@ export default function App() {
               {otaState === 'flashing_device' && (
                 <View style={{ marginTop: 8 }}>
                   <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#2563eb', marginTop: 0 }]} disabled>
-                    <Text style={styles.btnText}>⚡ Zamek aktualizuje system przez Wi-Fi...</Text>
+                    <Text style={styles.btnText}>⚡ Zamek aktualizuje system...</Text>
                   </TouchableOpacity>
                   <Text style={[styles.subLabel, { marginTop: 8, textAlign: 'center', color: '#aaa' }]}>
-                    Proszę nie odłączać zasilania urządzenia. Szacowany czas: 20s.
+                    Proszę nie odłączać zasilania urządzenia. Szacowany czas: 20s/30s.
                   </Text>
                 </View>
               )}
@@ -732,15 +766,15 @@ export default function App() {
 
         {currentScreen === 'settings' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
-            <Text style={styles.screenHeaderText}>⚙️ Konfiguracja Infrastruktury</Text>
+            <Text style={styles.screenHeaderText}>⚙️ Konfiguracja konta i urządzenia</Text>
             
             <View style={styles.card}>
-              <Text style={styles.sectionHeader}>👤 Dane Profilu Administratora</Text>
+              <Text style={styles.sectionHeader}>👤 Dane Profilu</Text>
               <Text style={[styles.inputLabelText, {color: '#81c784', fontSize: 15, fontWeight:'600'}]}>✓ {lockState.account ? lockState.account.email : email}</Text>
             </View>
 
             <View style={styles.card}>
-              <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta Aplikacji</Text>
+              <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta</Text>
               <Text style={styles.inputLabelText}>Nowe Hasło Logowania:</Text>
               <TextInput 
               style={styles.inputField} 
@@ -760,7 +794,7 @@ export default function App() {
               <TextInput style={styles.inputField} secureTextEntry placeholder="Hasło nowej sieci Wi-Fi" placeholderTextColor="#555" value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
               
               <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 12 }]} onPress={handleSaveSystemSettings}>
-                <Text style={styles.btnText}>💾 Wyślij Ustawienia i Zrestartuj Zamek</Text>
+                <Text style={styles.btnText}>💾 Zapisz Ustawienia i Zrestartuj Zamek</Text>
               </TouchableOpacity>
             </View>
           </ScrollView>
@@ -769,11 +803,11 @@ export default function App() {
 
         {isMenuOpen && <TouchableOpacity style={styles.menuDimBackdropMask} activeOpacity={1} onPress={toggleBurgerMenu} />}
         <Animated.View style={[styles.burgerSidebarDrawerContainer, { left: menuAnimation }]}>
-          <View style={styles.sidebarBrandHeaderBox}><Text style={styles.sidebarBrandTitleText}>Nawigacja Modułów</Text></View>
-          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Panel Główny</Text></TouchableOpacity>
-          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Roster Lokatorów</Text></TouchableOpacity>
+          <View style={styles.sidebarBrandHeaderBox}><Text style={styles.sidebarBrandTitleText}>Nawigacja</Text></View>
+          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Dashboard</Text></TouchableOpacity>
+          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'system' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('system')}><Text style={styles.menuItemLabelText}>📋 Logi Systemowe</Text></TouchableOpacity>
-          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'ota' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('ota')}><Text style={styles.menuItemLabelText}>💾 Aktualizacja OTA</Text></TouchableOpacity>
+          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'ota' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('ota')}><Text style={styles.menuItemLabelText}>💾 Aktualizacja</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'settings' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('settings')}><Text style={styles.menuItemLabelText}>⚙️ Ustawienia</Text></TouchableOpacity>
           <View style={{flex: 1}} />
           <TouchableOpacity style={styles.sidebarDisconnectBtn} onPress={async () => {
@@ -783,7 +817,7 @@ export default function App() {
             setCurrentScreen('dashboard');
             setIsConfigured(false);
             setCurrentScreen('dashboard');
-          }}><Text style={styles.btnText}>Wyloguj Profil</Text></TouchableOpacity>
+          }}><Text style={styles.btnText}>Wyloguj się</Text></TouchableOpacity>
         </Animated.View>
       </View>
     </SafeAreaView>
