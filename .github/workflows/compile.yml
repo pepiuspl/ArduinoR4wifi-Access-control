@@ -1,9 +1,9 @@
-name: Automated Firmware Compiler & Release
+name: Compile on tag push ESP32 
 
 on:
   push:
     tags:
-      - 'v*' # Triggers automatically whenever you push a version tag (e.g., v2.9.5)
+      - 'v*' # Uruchamia się automatycznie po wypchnięciu tagu wersji (np. v2.9.8)
 
 jobs:
   build-and-release:
@@ -13,27 +13,24 @@ jobs:
       contents: write
 
     steps:
-    # 1. Pull down your C++ source code files from the private repo
+    # 1. Pobranie kodu źródłowego C++ z Twojego repozytorium
     - name: Checkout Source Code
       uses: actions/checkout@v4
 
-    # 2. Install the official Arduino CLI compiler engine
+    # 2. Instalacja oficjalnego silnika kompilatora Arduino CLI
     - name: Setup Arduino CLI
       uses: arduino/setup-arduino-cli@v2
 
-    # 3. Download the specific Renesas Uno R4 board cores
+    # 3. Dodanie zewnętrznego repozytorium Espressif i instalacja narzędzi Xtensa dla ESP32
     - name: Install Board Cores and Platform Toolchains
       run: |
-        arduino-cli core update-index
-        arduino-cli core install arduino:renesas_uno
+        arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+        arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-    # 4. Pull down the exact community libraries your code depends on
+    # 4. Pobranie bibliotek społecznościowych, od których zależy Twój kod zamka
     - name: Install Project Dependencies
       run: |
-        # 🌟 CRITICAL FIX: Initializes the global registry cache so the runner knows where to find your files
         arduino-cli lib update-index
-        
-        # Install the required community modules
         arduino-cli lib install "Adafruit GFX Library"
         arduino-cli lib install "Adafruit SH110X"
         arduino-cli lib install "Adafruit BusIO"
@@ -41,7 +38,7 @@ jobs:
         arduino-cli lib install "NTPClient"
         arduino-cli lib install "ArduinoOTA"
 
-    # 5. Hyper-Robust Workspace Assembly & Compilation (PANCERNA WERSJA ANTY-SYMLINK)
+    # 5. Budowanie środowiska i kompilacja kodu bezpośrednio pod ESP32
     - name: Compile Firmware to Binary
       run: |
         INO_FILE=$(find . -name "*.ino" | head -n 1)
@@ -61,11 +58,7 @@ jobs:
           COMPILE_TARGET="$SKETCH_DIR"
         else
           echo "⚙️ Plik znaleziony luzem. Czyszczenie konfliktów i tworzenie folderu roboczego: $SKETCH_NAME"
-          
-          # 🌟 ABSOLUTNY BEZPIECZNIK: Bezwzględnie niszczymy symlink/skrót z Git, 
-          # który oszukiwał system i powodował błąd "same file"
           rm -rf "$SKETCH_NAME" 
-          
           mkdir -p "$SKETCH_NAME"
           cp "$INO_FILE" "$SKETCH_NAME/$SKETCH_NAME.ino"
           cp "$SKETCH_DIR"/*.h "$SKETCH_NAME"/ 2>/dev/null || true
@@ -74,15 +67,19 @@ jobs:
         fi
         
         mkdir -p build
-        arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi --output-dir ./build "$COMPILE_TARGET"
+        arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build "$COMPILE_TARGET"
 
-    # 6. Rename the output file dynamically to match your server's naming convention
+    # 6. Filtrowanie i izolacja czystego pliku aplikacji (Odrzucamy 4-megabajtowy merged.bin)
     - name: Package Update Asset
       run: |
-        BIN_FILE=$(find ./build -name "*.bin" | head -n 1)
+        BIN_FILE=$(find ./build -name "*.ino.bin" ! -name "*.merged.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" | head -n 1)
+        if [ -z "$BIN_FILE" ]; then
+          BIN_FILE=$(find ./build -name "*.bin" ! -name "*merged*" ! -name "*bootloader*" ! -name "*partitions*" | head -n 1)
+        fi
+        echo "💡 Wybrany właściwy, lekki plik binarny aplikacji: $BIN_FILE"
         cp "$BIN_FILE" "./lock_${{ github.ref_name }}.bin"
 
-    # 7. Create the official GitHub release and attach the freshly compiled .bin file
+    # 7. Automatyczne stworzenie wydania i podpięcie odchudzonego pliku aktualizacji
     - name: Broadcast Release to Proxmox Network
       uses: softprops/action-gh-release@v2
       with:
