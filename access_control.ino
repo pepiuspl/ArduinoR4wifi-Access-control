@@ -253,6 +253,9 @@ void forceHardwareRFIDReset() {
   digitalWrite(RST_PIN, HIGH); 
   delay(30); 
   rfid.PCD_Init();
+  Serial.println("RFID INIT");
+  byte v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  Serial.printf("MFRC522 version: 0x%02X\n", v);
 } 
 
 String getFormattedSystemTime() { 
@@ -1208,7 +1211,7 @@ void loop() {
 
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
-    digitalWrite(RELAY_PIN, HIGH); 
+    digitalWrite(RELAY_PIN, LOW); 
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
