@@ -1,9 +1,9 @@
-name: Automated Firmware Compiler & Release
+name: Compile on tag push ESP32 
 
 on:
   push:
     tags:
-      - 'v*' # Uruchamia się automatycznie po wypchnięciu tagu wersji (np. v2.9.7)
+      - 'v*' # Uruchamia się automatycznie po wypchnięciu tagu wersji (np. v2.9.8)
 
 jobs:
   build-and-release:
@@ -21,7 +21,7 @@ jobs:
     - name: Setup Arduino CLI
       uses: arduino/setup-arduino-cli@v2
 
-    # 3. 🌟 ZMIANA DLA ESP32: Dodanie zewnętrznego repozytorium i instalacja narzędzi Xtensa
+    # 3. Dodanie zewnętrznego repozytorium Espressif i instalacja narzędzi Xtensa dla ESP32
     - name: Install Board Cores and Platform Toolchains
       run: |
         arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
@@ -30,10 +30,7 @@ jobs:
     # 4. Pobranie bibliotek społecznościowych, od których zależy Twój kod zamka
     - name: Install Project Dependencies
       run: |
-        # Inicjalizacja globalnego cache rejestru bibliotek
         arduino-cli lib update-index
-        
-        # Instalacja wymaganych modułów peryferyjnych
         arduino-cli lib install "Adafruit GFX Library"
         arduino-cli lib install "Adafruit SH110X"
         arduino-cli lib install "Adafruit BusIO"
@@ -41,7 +38,7 @@ jobs:
         arduino-cli lib install "NTPClient"
         arduino-cli lib install "ArduinoOTA"
 
-    # 5. Budowanie środowiska i kompilacja (PANCERNA WERSJA ANTY-SYMLINK ZMODYFIKOWANA POD ESP32)
+    # 5. Budowanie środowiska i kompilacja kodu bezpośrednio pod ESP32
     - name: Compile Firmware to Binary
       run: |
         INO_FILE=$(find . -name "*.ino" | head -n 1)
@@ -61,10 +58,7 @@ jobs:
           COMPILE_TARGET="$SKETCH_DIR"
         else
           echo "⚙️ Plik znaleziony luzem. Czyszczenie konfliktów i tworzenie folderu roboczego: $SKETCH_NAME"
-          
-          # Usuwanie ewentualnych uszkodzonych dowiązań
           rm -rf "$SKETCH_NAME" 
-          
           mkdir -p "$SKETCH_NAME"
           cp "$INO_FILE" "$SKETCH_NAME/$SKETCH_NAME.ino"
           cp "$SKETCH_DIR"/*.h "$SKETCH_NAME"/ 2>/dev/null || true
@@ -73,21 +67,19 @@ jobs:
         fi
         
         mkdir -p build
-        
-        # 🌟 ZMIANA DLA ESP32: Podmiana FQBN z renesas_uno na generyczny moduł esp32
         arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build "$COMPILE_TARGET"
 
-    # 6. Dynamiczna zmiana nazwy pliku wynikowego, aby idealnie pasował do serwera Proxmox
-   - name: Package Update Asset
+    # 6. Filtrowanie i izolacja czystego pliku aplikacji (Odrzucamy 4-megabajtowy merged.bin)
+    - name: Package Update Asset
       run: |
         BIN_FILE=$(find ./build -name "*.ino.bin" ! -name "*.merged.bin" ! -name "*.bootloader.bin" ! -name "*.partitions.bin" | head -n 1)
         if [ -z "$BIN_FILE" ]; then
           BIN_FILE=$(find ./build -name "*.bin" ! -name "*merged*" ! -name "*bootloader*" ! -name "*partitions*" | head -n 1)
         fi
-        echo "💡 Wybrany czysty plik aplikacji do OTA: $BIN_FILE"
+        echo "💡 Wybrany właściwy, lekki plik binarny aplikacji: $BIN_FILE"
         cp "$BIN_FILE" "./lock_${{ github.ref_name }}.bin"
-        
-    # 7. Automatyczne stworzenie wydania (Release) na GitHubie i podpięcie pliku .bin ESP32
+
+    # 7. Automatyczne stworzenie wydania i podpięcie odchudzonego pliku aktualizacji
     - name: Broadcast Release to Proxmox Network
       uses: softprops/action-gh-release@v2
       with:
