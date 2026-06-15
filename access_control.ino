@@ -397,7 +397,7 @@ void openDoor(String source) {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW); 
   digitalWrite(LED_GREEN, LOW); 
-  digitalWrite(LED_RED, HIGHT); 
+  digitalWrite(LED_RED, HIGH); 
   tone(BUZZER_PIN, 1000, 200); 
   addLog("Otwarto: " + source);
 } 
