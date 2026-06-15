@@ -114,7 +114,7 @@ function getLatestFirmwareContext() {
     
     if (binFiles.length === 0) return { version: '0.0.0', filename: null };
 
-    // Bezpieczne wyciąganie cyfr wersji przy pomocy wyrażenia regularnego
+    // Wyciąganie cyfr wersji niezależnie od tego, czy jest kropka po 'v' czy nie
     const getVerArray = (filename) => {
       const match = filename.match(/lock_v\.?([\d.]+)\.bin/);
       if (!match) return [0];
@@ -191,15 +191,15 @@ const server = http.createServer(async (req, res) => {
         const welcomeMailManifest = {
           from: '"CTRLABLE Node System" <node@ctrlable.pl>',
           to: cleanEmail,
-          subject: 'Witamy w ekosystemie CTRLABLE! 🚀',
+          subject: 'Witamy w ekosystemie CTRLABLE!',
           html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-              <h2>Cześć! Twój inteligentny dom właśnie zyskał nową ochronę 🔒</h2>
-              <p>Dziękujemy za zarejestrowanie konta w systemie <strong>CTRLABLE Node</strong>. Twoja osobista przestrzeń chmurowa została pomyślnie utworzona.</p>
+              <h2>Cześć! Twój inteligentny dom właśnie zyskał nową ochronę!</h2>
+              <p>Dziękujemy za zarejestrowanie konta w systemie <strong>CTRLABLE Node</strong>. Twoja konto oraz centralka CTRLABLE Node zostały pomyślnie zarejestrowane.</p>
             <p><strong>Od czego zacząć?</strong></p>
             <ul>
             <li>Zaloguj się w aplikacji mobilnej używając swoich danych.</li>
-            <li>Przejdź do konfiguracji infrastruktury, aby sparować swoją pierwszą centralkę.</li>
-            <li>Dodaj profile lokatorów i przypisz im fizyczne klucze RFID.</li>
+            <li>Przejdź do listy użytkowników aby dodać nowe przepustki.</li>
+            <li>Nadaj imię użytkownika przeputski, włącz tryb uczenia oraz zbliż fizyczny klucz RFID do czytnika.</li>
             </ul>
             <br>
             <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
@@ -225,10 +225,18 @@ const server = http.createServer(async (req, res) => {
         const valid = await bcrypt.compare(body.password, result.rows[0].password_hash);
         if (!valid) {
           writeToLocalLogFile('Auth Rejection', `Failed login: ${cleanEmail} (Password hash mismatch)`);
+          
+          // PUSH ALARM: Powiadamiamy właściciela o próbie nieautoryzowanego logowania
+          if (result.rows[0].push_token && result.rows[0].push_alarms !== false) {
+            sendPushNotification(
+              result.rows[0].push_token,
+              "Próba autoryzacji konta",
+              `Zarejestrowano niepoprawną próbę logowania na Twój profil z adresu IP: ${cleanIp}`
+            );
+          }
+
           return sendJSON(res, 401, { error: "Invalid credentials" });
         }
-        writeToLocalLogFile('Authentication Panel', `Session authenticated: ${cleanEmail}`);
-        return sendJSON(res, 200, { auth: true, accountId: result.rows[0].id });
       }
 
       // =========================================================================
@@ -317,7 +325,7 @@ const server = http.createServer(async (req, res) => {
         const accountId = query.accountId;
         if (!accountId) return sendJSON(res, 401, { auth: false });
 
-        const accountsRes = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
+        const accountsRes = await dbPool.query('SELECT email, push_entries, push_alarms FROM accounts WHERE id = $1', [accountId]);
         if (accountsRes.rows.length === 0) return sendJSON(res, 404, { error: "Account invalid" });
         
         const appAccountContext = { email: accountsRes.rows[0].email };
@@ -334,7 +342,7 @@ const server = http.createServer(async (req, res) => {
         const logsRes = await dbPool.query('SELECT event_time, message FROM system_events WHERE mac_address = $1 ORDER BY event_time DESC LIMIT 30', [primaryMac]);
 
         const processedUsersList = usersRes.rows.map(row => ({
-          idx: row.hardware_slot_idx, // Zwraca realny slot z bazy/EEPROM
+          idx: row.hardware_slot_idx, 
           name: row.name,
           active: row.active,
           uid: row.uid
@@ -345,16 +353,20 @@ const server = http.createServer(async (req, res) => {
           return `[${timestamp}] ${r.message}`;
         });
 
+        //DANE Z BAZY WPROST DO SNACKA W JEDNYM OBIEKCIE JSON
         return sendJSON(res, 200, {
           auth: true,
           account: appAccountContext, 
           mode: primaryDevice.operational_mode,
-          lock: (actualLockStates[primaryMac] || false), // Zsynchronizowany, rzeczywisty stan rygla
+          lock: (actualLockStates[primaryMac] || false), 
           total: processedUsersList.length,
           users: processedUsersList, 
           logs: localizedLogsFeed,
           version: primaryDevice.firmware_version || latestFirmwareVersion,
           otaPending: otaUpdatePending,
+          pushEntries: accountsRes.rows[0].push_entries !== false,
+          pushAlarms: accountsRes.rows[0].push_alarms !== false,
+          otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0)
         });
       }
 
@@ -778,10 +790,23 @@ const server = http.createServer(async (req, res) => {
         });
 
         const readStream = fs.createReadStream(filePath);
+        let transmittedBytes = 0;
+
+        if (!actualLockStates[mac]) actualLockStates[mac] = {};
+        actualLockStates[mac].otaProgress = 0;
+
+        readStream.on('data', (chunk) => {
+          transmittedBytes += chunk.length;
+          const currentPercentage = Math.round((transmittedBytes / fileSize) * 100);
+          
+          actualLockStates[mac].otaProgress = currentPercentage;
+        });
+
         readStream.pipe(res);
 
         readStream.on('end', () => {
             otaUpdatePending = false;
+            if (actualLockStates[mac]) actualLockStates[mac].otaProgress = 100;
             forceLog(`Sukces! Strumieniowanie pliku ${latestFirmwareFile} do zamka zakończone pomyślnie.`);
         });
 
@@ -930,7 +955,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
-      // ZAKOŃCZENIE SKANOWANIA KARTY RFID
+      // SPRAWDZANIE WŁAŚCIWOŚCI PERYFERJÓW
       // =========================================================================
       if ((pathname === '/api/hardware/scan' || pathname === '/api/scan' || pathname === '/scan') && req.method === 'POST') {
         let mac = body.mac;
@@ -944,6 +969,20 @@ const server = http.createServer(async (req, res) => {
           unlockQueues[mac] = true;
           await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Otwarto: ${credentialRes.rows[0].holder_name}`]);
           writeToLocalLogFile('Access Granted', `[Node: ${mac}] Matched name description: ${credentialRes.rows[0].holder_name}`);
+
+          // SILNIK POWIADOMIEŃ PUSH: Sprawdzamy token i preferencje właściciela
+          const ownerRes = await dbPool.query('SELECT account_id FROM devices WHERE mac_address = $1 LIMIT 1', [mac]);
+          if (ownerRes.rows.length > 0) {
+            const tokenRes = await dbPool.query('SELECT push_token, push_entries FROM accounts WHERE id = $1', [ownerRes.rows[0].account_id]);
+            if (tokenRes.rows.length > 0 && tokenRes.rows[0].push_token && tokenRes.rows[0].push_entries !== false) {
+              sendPushNotification(
+                tokenRes.rows[0].push_token, 
+                "Ktoś wszedł do domu", 
+                `Użytkownik ${credentialRes.rows[0].holder_name} właśnie otworzył drzwi.`
+              );
+            }
+          }
+
           return sendJSON(res, 200, { access: "granted" });
         } else {
           const nameLabel = credentialRes.rows.length > 0 ? credentialRes.rows[0].holder_name : 'Nieznany';
@@ -977,6 +1016,15 @@ const server = http.createServer(async (req, res) => {
         delete learningQueues[mac];
         return sendJSON(res, 200, { status: "registered" });
       }
+      // OBSŁUGA PUSH TOKENÓW DLA APLIKACJI MOBILNEJ
+      if (pathname === '/api/auth/save_push_token' && req.method === 'POST') {
+        const { accountId, token } = body;
+        if (!accountId || !token) return sendJSON(res, 400, { error: "Missing identity maps" });
+        
+        await dbPool.query('UPDATE accounts SET push_token = $1 WHERE id = $2', [token, accountId]);
+        writeToLocalLogFile('Push System', `Zaktualizowano rejestr push_token dla konta ID: ${accountId}`);
+        return sendJSON(res, 200, { success: true });
+      }
 
       return sendJSON(res, 404, { error: "Endpoint route context invalid" });
 
@@ -987,6 +1035,17 @@ const server = http.createServer(async (req, res) => {
     }
   });
 });
+
+// POWIADOMIENIA PUSH PREFERENCJE
+
+if (pathname === '/api/settings/push_preferences' && req.method === 'POST') {
+  const { accountId, pushEntries, pushAlarms } = body;
+  if (!accountId) return sendJSON(res, 400, { error: "Missing identity scope" });
+        
+  await dbPool.query('UPDATE accounts SET push_entries = $1, push_alarms = $2 WHERE id = $3', [pushEntries, pushAlarms, accountId]);
+  writeToLocalLogFile('Push System', `Zaktualizowano preferencje push dla konta ID: ${accountId} (Entries: ${pushEntries}, Alarms: ${pushAlarms})`);
+    return sendJSON(res, 200, { success: true });
+}
 
 mailTransport.verify((error, success) => {
   if (error) {
@@ -1000,3 +1059,52 @@ server.listen(3000, () => {
   console.log('⚡ Multi-Tenant SmartLock Engine live on port 3000. Writing local filesystem archives at /var/log/smartlock/');
   writeToLocalLogFile('Core Daemon', 'Platform backend environment daemon spun up successfully.');
 });
+
+function sendPushNotification(token, title, body) {
+  if (!token) return;
+
+  // OBSŁUGA TOKENÓW SYMULUJĄCYCH PUSH W ŚRODOWISKU SNACK.EXPO
+
+  if (token.includes('SnackSimulated')) {
+    const logFile = '/var/log/smartlock/smartlock_system.log';
+    const timestamp = new Date().toISOString();
+    const mockLine = `[${timestamp}] [PUSH SIMULATOR] 📱 WYSŁANO PUSH -> Tytuł: "${title}" | Treść: "${body}" (Token: ${token})\n`;
+    
+    fs.appendFile(logFile, mockLine, (err) => {
+      if (err) console.error(`[Push Mock Error] ${err.message}`);
+    });
+    console.log(`[PUSH SIMULATOR] Pomyślnie przechwycono powiadomienie dla Snacka: ${title}`);
+    return;
+  }
+
+  const postData = JSON.stringify({
+    to: token,
+    sound: 'default',
+    title: title,
+    body: body,
+    badge: 1
+  });
+
+  const options = {
+    hostname: 'exp.host',
+    path: '/--/api/v2/push/send',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Accept-encoding': 'gzip, deflate',
+      'Content-Length': postData.length
+    }
+  };
+
+  const req = https.request(options, (res) => {
+    res.on('data', () => {});
+  });
+  
+  req.on('error', (e) => {
+    writeToLocalLogFile('Push Notification Error', e.message);
+  });
+  
+  req.write(postData);
+  req.end();
+}

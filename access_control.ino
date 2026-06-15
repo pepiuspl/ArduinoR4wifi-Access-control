@@ -420,22 +420,62 @@ void handleProvisioningServer() {
   if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) { 
     int sIdx = reqHeader.indexOf("s=") + 2;
     int pIdx = reqHeader.indexOf("&p=") + 3; 
-    int mIdx = reqHeader.indexOf("&m=") + 3; // Nowy indeks dla pola email
-    int spacePos = reqHeader.indexOf(" ", mIdx);
+    int mIdx = reqHeader.indexOf("&m=") + 3;
+    int offIdx = reqHeader.indexOf("&offline=");
 
-    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p=")); 
+    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
     String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&m=")); 
-    String rawEmail = reqHeader.substring(mIdx, spacePos); 
+    String rawEmail = reqHeader.substring(mIdx, reqHeader.indexOf("&reg_pass=")); 
+    
+    // Pobieramy opcjonalne hasło rejestracji konta z aplikacji
+    String rawRegPass = "";
+    if (reqHeader.indexOf("&reg_pass=") != -1) {
+      int regStart = reqHeader.indexOf("&reg_pass=") + 10;
+      rawRegPass = reqHeader.substring(regStart, reqHeader.indexOf("&offline="));
+    }
+    
+    String rawOffline = reqHeader.substring(offIdx + 9, offIdx + 10);
 
     String decodedSSID = urlDecode(rawSSID); 
-    String decodedPass = urlDecode(rawPass); 
+    String decodedPass = urlDecode(rawPass);
     String decodedEmail = urlDecode(rawEmail); 
+    String decodedRegPass = urlDecode(rawRegPass);
+
+    // Jeśli wybrano tryb offline, symulujemy pomyślny zapis bez sprawdzania połączenia sieciowego
+    if (rawOffline == "1" || decodedSSID == "OFFLINE") {
+      EEPROM.write(250, 0x55);  // Oznaczamy w pamięci jako skonfigurowany
+      saveConfiguration("OFFLINE_MODE", "NONE", decodedEmail);
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;text-align:center;padding:50px;'><h2>🔒 Zamek uruchomiony w trybie LOKALNYM (Offline)</h2></body></html>");
+      delay(100); client.stop();
+      ESP.restart();
+      return;
+    }
+
+    // Jeśli instalujemy przez aplikację (Mamy login i hasło), wysyłamy żądanie rejestracji konta na serwer chmurowy
+    if (decodedRegPass.length() > 0) {
+      WiFi.begin(decodedSSID.c_neutral_str(), decodedPass.c_neutral_str());
+      // Czekamy chwilę na połączenie z ruterem w celu przesłania paczki rejestracyjnej konta
+      int attempts = 0;
+      while (WiFi.status() != WL_CONNECTED && attempts < 10) { delay(500); attempts++; }
+      
+      if (WiFi.status() == WL_CONNECTED) {
+         WiFiClient registerClient;
+         if (registerClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
+           String postBody = "{\"email\":\"" + decodedEmail + "\",\"password\":\"" + decodedRegPass + "\"}";
+           registerClient.println("POST /api/auth/register HTTP/1.1");
+           registerClient.println("Host: " + String(PROXMOX_SERVER));
+           registerClient.println("Content-Type: application/json");
+           registerClient.print("Content-Length: "); registerClient.println(postBody.length());
+           registerClient.println("Connection: close\r\n");
+           registerClient.print(postBody);
+           delay(200); registerClient.stop();
+         }
+      }
+    }
 
     saveConfiguration(decodedSSID, decodedPass, decodedEmail);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;\'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>"); 
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>"); 
     delay(50); client.stop(); 
-    tone(BUZZER_PIN, 2000, 800); 
-    delay(1000); 
     ESP.restart();  
     return;
   } 
@@ -862,11 +902,14 @@ void performLocalFirmwareUpdate() {
       unsigned long receiveDeadline = millis() + 10000; 
       
       uint8_t buffer[256];
-      while (receivedBytes < contentLength && otaClient.connected()) {
+      
+      // PANCERNA PĘTLA: Czytamy dopóki nie zbierzemy wszystkich bajtów zadeklarowanych w Content-Length
+      while (receivedBytes < contentLength) { 
         if (!otaClient.connected() && !otaClient.available()) {
           sendRemoteLog("[OTA PULL ERR] Polaczenie zerwane przed pobraniem calosci.");
           break;
-        } 
+        }
+
         int availableBytes = otaClient.available();
         if (availableBytes > 0) {
           int toRead = min(availableBytes, (int)sizeof(buffer));
@@ -880,14 +923,14 @@ void performLocalFirmwareUpdate() {
               receivedBytes += readBytes;
               receiveDeadline = millis() + 10000; 
             } else {
-              sendRemoteLog("[OTA PULL ERR] Krytyczny blad zapisu w pamieci Flash.");
+              sendRemoteLog("[OTA PULL ERR] Blad zapisu w pamieci Flash.");
               break;
             }
           }
         } 
         
         if (millis() > receiveDeadline) {
-          sendRemoteLog("[OTA PULL ERR] Przekroczono limit czasu transmisji danych.");
+          sendRemoteLog("[OTA PULL ERR] Timeout transmisji.");
           break;
         }
         delay(1);

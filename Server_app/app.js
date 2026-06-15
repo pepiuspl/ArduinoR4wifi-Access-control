@@ -1,9 +1,38 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions, KeyboardAvoidingView, Platform, Switch} from 'react-native';
 import * as Haptics from 'expo-haptics';
+import * as Device from 'expo-device';
+import * as Notifications from 'expo-notifications';
 
 const { width } = Dimensions.get('window');
 
+// Powiadomienia Push
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+// DECYDOWANIE O POWIADOMIENIACH PUSH
+
+const [pushEntries, setPushEntries] = useState(true);
+const [pushAlarms, setPushAlarms] = useState(true);
+
+const savePushPreferences = (entries, alarms) => {
+  fetch(`${backendUrl}/api/settings/push_preferences`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId, pushEntries: entries, pushAlarms: alarms })
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.success) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    })
+    .catch((err) => console.log("Błąd zapisu preferencji push:", err));
+};
 
 let AsyncStorage;
 try {
@@ -43,6 +72,9 @@ export default function App() {
   const [secureSettingsApp, setSecureSettingsApp] = useState(true);
   const [secureSettingsWifi, setSecureSettingsWifi] = useState(true);
 
+  // INICJALIZACJA 
+  const [isOnboardingNewDevice, setIsOnboardingNewDevice] = useState(false);
+
   const [lockState, setLockState] = useState({ 
     auth: false, 
     account: { email: '-' },
@@ -52,7 +84,8 @@ export default function App() {
     users: [], 
     logs: [],
     ssid: 'Ecosystem LAN',
-    version: '2.9.4' 
+    version: '2.9.4',
+    otaProgress: 0 
   });
   
   const [newName, setNewName] = useState('');
@@ -172,6 +205,7 @@ export default function App() {
           resetUiToDefault();
           setIsConfigured(true);
           setErrorMessage('');
+          registerForPushNotificationsAsync(data.accountId);
         } else {
           throw new Error();
         }
@@ -312,11 +346,11 @@ export default function App() {
         return res.json();
       })
       .then((data) => {
-        // 🌟 Zapisujemy numer wersji z GitHuba do stanu, aby użyć go w tekście UI
+        // Zapisywanie numeru wersji z GitHuba do stanu, aby użyć go w tekście UI
         setLatestVersion(data.latestVersion);
 
-        const currentVer = (lockState.version || '0.0.0').replace('v', '').trim();
-        const latestVer = data.latestVersion.replace('v', '').trim();
+        const currentVer = (lockState.version || '0.0.0').replace(/v\.?/g, '').trim();
+        const latestVer = data.latestVersion.replace(/v\.?/g, '').trim();
         
         if (currentVer === latestVer) {
           setOtaState('up-to-date');
@@ -335,12 +369,11 @@ export default function App() {
       });
   };
 
-  // ⚡ 2. URUCHOMIENIE PROCESU AKTUALIZACJI NODE ORAZ ZAMKA
+  // URUCHOMIENIE PROCESU AKTUALIZACJI NODE ORAZ ZAMKA
   const handleExecuteUpdate = () => {
-    // Informujemy klienta, że serwer Proxmox zaczął pobierać paczkę z AWS S3 GitHuba
     setOtaState('downloading_server');
 
-    // Wysyłamy zapytanie GET, które widzieliśmy w logach serwera
+    // Wysłanie zapytania GET do serwera
     fetch(`${backendUrl}/api/ota/push`, { method: 'GET' })
       .then((res) => {
         if (!res.ok) throw new Error();
@@ -392,6 +425,8 @@ export default function App() {
         return res.json();
       })
       .then((data) => {
+        if (data.pushEntries !== undefined) setPushEntries(data.pushEntries);
+        if (data.pushAlarms !== undefined) setPushAlarms(data.pushAlarms);
         if (data.auth === false) {
           setIsConfigured(false);
         } else {
@@ -469,6 +504,57 @@ export default function App() {
     );
   };
 
+  // Powiadomienia Push
+
+  const registerForPushNotificationsAsync = async (targetAccountId) => {
+  // Na emulatorach webowych Snacka Device.isDevice może być false, 
+  // usuwamy twardą blokadę, abyś mógł przetestować to nawet w przeglądarce!
+  
+  const { status: existingStatus } = await Notifications.getPermissionsAsync();
+  let finalStatus = existingStatus;
+  
+  if (existingStatus !== 'granted') {
+    const { status } = await Notifications.requestPermissionsAsync();
+    finalStatus = status;
+  }
+  
+  if (finalStatus !== 'granted') {
+    console.log('Brak uprawnień do powiadomień push. Generuję token ratunkowy...');
+  }
+  
+  try {
+    let token = "";
+    
+    // Próba pobrania prawdziwego tokenu (zadziała na fizycznym telefonie w Expo Go)
+    if (finalStatus === 'granted' && Device.isDevice) {
+      try {
+        const tokenData = await Notifications.getExpoPushTokenAsync();
+        token = tokenData.data;
+      } catch (e) {
+        // Awaria piaskownicy Snack (brak projectId) -> przechodzimy do symulacji
+        token = `ExponentPushToken[SnackSimulated_${targetAccountId}]`;
+      }
+    } else {
+        // Brak uprawnień lub web/emulator -> wymuszamy token symulacyjny
+        token = `ExponentPushToken[SnackSimulated_${targetAccountId}]`;
+      }
+
+      // Wysyłamy token bezpośrednio na Twój serwer Proxmox
+      const response = await fetch(`${backendUrl}/api/auth/save_push_token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: targetAccountId, token })
+      });
+      
+      const resData = await response.json();
+      if (resData.success) {
+        console.log('Zsynchronizowano token push:', token);
+      }
+    } catch (error) {
+    console.log('Błąd krytyczny potoku rejestracji push:', error);
+    }
+  };
+
   useEffect(() => {
     const bootstrapAsyncState = async () => {
       const storedUrl = await AsyncStorage.getItem('@lock_backend_endpoint');
@@ -483,6 +569,7 @@ export default function App() {
         setAccountId(parseInt(storedAccountId, 10));
         resetUiToDefault();
         setIsConfigured(true);
+        registerForPushNotificationsAsync(parseInt(storedAccountId, 10));
       }
     };
     bootstrapAsyncState();
@@ -507,7 +594,7 @@ export default function App() {
             <Text style={styles.lockIconSymbol}>🔒</Text>
           </TouchableOpacity>
           <Text style={styles.titleText}>
-            {isForgotPasswordMode ? `Odzyskiwanie [Krok ${resetStep}/3]` : isRegisterMode ? 'Rejestracja CTRLABLE' : 'CTRLABLE Portal'}
+            {isOnboardingNewDevice ? 'Inicjalizacja Węzła' : isForgotPasswordMode ? `Odzyskiwanie [Krok ${resetStep}/3]` : isRegisterMode ? 'Rejestracja CTRLABLE' : 'CTRLABLE Portal'}
           </Text>
           
           {showInstallerMenu && (
@@ -521,12 +608,48 @@ export default function App() {
             </View>
           )}
 
-          {/* DYNAMICZNE RENDEROWANIE POLA RESETU LUB PANELU LOGOWANIA */}
-          {isForgotPasswordMode ? (
+          {/* DYNAMICZNE RENDEROWANIE KREATORA NOWEGO URZĄDZENIA, POLA RESETU LUB PANELU LOGOWANIA */}
+          {isOnboardingNewDevice ? (
+            <>
+              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center' }]}>
+                1. Wejdź w ustawienia Wi-Fi swojego telefonu.{"\n"}
+                2. Połącz się z siecią: CTRLABLE_SETUP{"\n"}
+                3. Wróć tutaj i uzupełnij konfigurację:
+              </Text>
+
+              <Text style={styles.inputLabelText}>Nazwa sieci Wi-Fi centralki (SSID):</Text>
+              <TextInput style={styles.inputField} placeholder="Wpisz nazwę sieci Wi-Fi" placeholderTextColor="#444" value={settingsSsid} onChangeText={setSettingsSsid} />
+              
+              <Text style={styles.inputLabelText}>Hasło do sieci Wi-Fi:</Text>
+              <TextInput style={styles.inputField} placeholder="Wpisz hasło Wi-Fi" placeholderTextColor="#444" secureTextEntry value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
+
+              <Text style={[styles.sectionHeader, { marginTop: 10 }]}>Tworzenie konta</Text>
+              <Text style={styles.inputLabelText}>Adres E-mail:</Text>
+              <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" value={email} onChangeText={setEmail} />
+              
+              <Text style={styles.inputLabelText}>Hasło:</Text>
+              <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry value={password} onChangeText={setPassword} />
+
+              <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32' }]} onPress={() => {
+                fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(email)}&reg_pass=${encodeURIComponent(password)}&offline=0`)
+                  .then(() => {
+                    Alert.alert("Sukces!", "Centralka odebrała dane i konfiguruje system. Zaloguj się teraz.");
+                    setIsOnboardingNewDevice(false);
+                  })
+                  .catch(() => Alert.alert("Błąd", "Nie można połączyć się z centralką. Czy na pewno jesteś w sieci CTRLABLE_SETUP?"));
+              }}>
+                <Text style={styles.btnText}>Zapisz i Utwórz Konto</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => setIsOnboardingNewDevice(false)}>
+                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>Powrót do ekranu logowania</Text>
+              </TouchableOpacity>
+            </>
+          ) : isForgotPasswordMode ? (
             <>
               {resetStep === 1 && (
                 <>
-                  <Text style={styles.inputLabelText}>Adres E-mail konta do zresetowania:</Text>
+                  <Text style={styles.inputLabelText}>Adres E-mail:</Text>
                   <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
                   <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleForgotPasswordSubmit} disabled={isAuthenticating}>
                     <Text style={styles.btnText}>Wyślij Kod Autoryzacyjny</Text>
@@ -535,20 +658,20 @@ export default function App() {
               )}
               {resetStep === 2 && (
                 <>
-                  <Text style={styles.inputLabelText}>Wprowadź 6-cyfrowy kod z wiadomości:</Text>
+                  <Text style={styles.inputLabelText}>Wprowadź 6-cyfrowy kod autoryzacyjny:</Text>
                   <TextInput style={styles.inputField} placeholder="np. 482910" keyboardType="number-pad" autoCapitalize="none" maxLength={6} placeholderTextColor="#444" editable={!isAuthenticating} value={resetCode} onChangeText={setResetCode} />
                   <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleVerifyResetCode} disabled={isAuthenticating}>
-                    <Text style={styles.btnText}>Zweryfikuj Token</Text>
+                    <Text style={styles.btnText}>Zweryfikuj</Text>
                   </TouchableOpacity>
                 </>
               )}
               {resetStep === 3 && (
                 <>
-                  <Text style={styles.inputLabelText}>Nowe Hasło Master:</Text>
+                  <Text style={styles.inputLabelText}>Nowe Hasło:</Text>
                   <View style={{ width: '100%', position: 'relative' }}>
                     <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureReset} editable={!isAuthenticating} value={newPassword} onChangeText={setNewPassword} />
                     <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureReset(!secureReset)}>
-                      <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureReset ? "👁️ Pokaż" : "🙈 Ukryj"}</Text>
+                      <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureReset ? "Pokaż" : "Ukryj"}</Text>
                     </TouchableOpacity>
                   </View>
 
@@ -558,7 +681,7 @@ export default function App() {
                   </View>
 
                   <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleConfirmPasswordReset} disabled={isAuthenticating}>
-                    <Text style={styles.btnText}>Zapisz Nowy Klucz i Zakończ</Text>
+                    <Text style={styles.btnText}>Zapisz Ustawienia i Zakończ</Text>
                   </TouchableOpacity>
                 </>
               )}
@@ -572,26 +695,33 @@ export default function App() {
               <View style={{ width: '100%', position: 'relative' }}>
                 <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureLogin} editable={!isAuthenticating} value={password} onChangeText={setPassword} />
                 <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureLogin(!secureLogin)}>
-                  <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureLogin ? "👁️ Pokaż" : "🙈 Ukryj"}</Text>
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureLogin ? "Pokaż" : "Ukryj"}</Text>
                 </TouchableOpacity>
               </View>
               
               <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={isRegisterMode ? handleAccountRegistration : handleSecurityLogin} disabled={isAuthenticating}>
                 <Text style={styles.btnText}>{isAuthenticating ? 'Przetwarzanie żądania...' : isRegisterMode ? 'Utwórz Przestrzeń Chmurową' : 'Zaloguj się'}</Text>
               </TouchableOpacity>
+
+              {/* RESTRYKCJA: PRZYCISK WIDOCZNY TYLKO W TRYBIE CZUWANIA/LOGOWANIA */}
+              {!isRegisterMode && (
+                <TouchableOpacity style={{ marginTop: 14, padding: 14, borderWidth: 1, borderColor: '#5c33cf', borderRadius: 10, width: '100%' }} onPress={() => setIsOnboardingNewDevice(true)}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 14, textAlign: 'center' }}>Skonfiguruj nową centralkę</Text>
+                </TouchableOpacity>
+              )}
             </>
           )}
 
-          <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setIsForgotPasswordMode(!isForgotPasswordMode); setResetStep(1); setIsRegisterMode(false); }}>
+          <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setIsForgotPasswordMode(!isForgotPasswordMode); setResetStep(1); setIsRegisterMode(false); setIsOnboardingNewDevice(false); }}>
             <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>
-              {isForgotPasswordMode ? 'Powrót do ekranu logowania' : 'Zapomniałeś hasła? Bezpieczny reset przez e-mail'}
+              {isForgotPasswordMode ? 'Powrót do ekranu logowania' : 'Zapomniałeś hasła? Zrestartuj je przez e-mail'}
             </Text>
           </TouchableOpacity>
 
-          {!isForgotPasswordMode && (
+          {!isForgotPasswordMode && !isOnboardingNewDevice && (
             <TouchableOpacity style={{ marginTop: 14 }} onPress={() => setIsRegisterMode(!isRegisterMode)}>
               <Text style={{ color: '#aaa', fontSize: 13, textAlign: 'center' }}>
-                {isRegisterMode ? 'Masz już profil? Zaloguj się' : 'Chcesz dodać przestrzeń? Zarejestruj się'}
+                {isRegisterMode ? 'Masz już profil? Zaloguj się' : 'Nie masz jeszcze konta? Zarejestruj się'}
               </Text>
             </TouchableOpacity>
           )}
@@ -609,7 +739,7 @@ export default function App() {
           <View style={styles.burgerStripeLine} />
           <View style={[styles.burgerStripeLine, { marginVertical: 5 }]} /><View style={styles.burgerStripeLine} />
         </TouchableOpacity>
-        <Text style={styles.headerTitleText}>CTRLABLE Gateway
+        <Text style={styles.headerTitleText}>CTRLABLE NODE
         </Text>
         <View style={{ width: 24 }} />
         </View>
@@ -747,10 +877,17 @@ export default function App() {
               {otaState === 'flashing_device' && (
                 <View style={{ marginTop: 8 }}>
                   <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#2563eb', marginTop: 0 }]} disabled>
-                    <Text style={styles.btnText}>⚡ Zamek aktualizuje system...</Text>
+                    <Text style={styles.btnText}>⚡ Pobieranie: {lockState.otaProgress || 0}%</Text>
                   </TouchableOpacity>
-                  <Text style={[styles.subLabel, { marginTop: 8, textAlign: 'center', color: '#aaa' }]}>
-                    Proszę nie odłączać zasilania urządzenia. Szacowany czas: 20s/30s.
+                  
+                  {/* TŁO PASKA POSTĘPU */}
+                  <View style={{ width: '100%', height: 8, backgroundColor: '#222', borderRadius: 4, overflow: 'hidden', marginTop: 4 }}>
+                    {/* DYNAMICZNY PASEK WYPEŁNIENIA */}
+                    <View style={{ width: `${lockState.otaProgress || 0}%`, height: '100%', backgroundColor: '#64b5f6' }} />
+                  </View>
+
+                  <Text style={[styles.subLabel, { marginTop: 12, textAlign: 'center', color: '#aaa' }]}>
+                    Trwa strumieniowanie oprogramowania układowego z serwera Proxmox do pamięci Flash centralki przez sieć lokalną.
                   </Text>
                 </View>
               )}
@@ -764,40 +901,114 @@ export default function App() {
           </ScrollView>
         )}
 
-        {currentScreen === 'settings' && (
+        {/* POWIADOMIENIA PUSH */}
+
+        {currentScreen === 'notifications' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
-            <Text style={styles.screenHeaderText}>⚙️ Konfiguracja konta i urządzenia</Text>
+            <Text style={styles.screenHeaderText}>🔔 Preferencje Powiadomień</Text>
             
             <View style={styles.card}>
-              <Text style={styles.sectionHeader}>👤 Dane Profilu</Text>
-              <Text style={[styles.inputLabelText, {color: '#81c784', fontSize: 15, fontWeight:'600'}]}>✓ {lockState.account ? lockState.account.email : email}</Text>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta</Text>
-              <Text style={styles.inputLabelText}>Nowe Hasło Logowania:</Text>
-              <TextInput 
-              style={styles.inputField} 
-              secureTextEntry 
-              placeholder="Wprowadź nowe hasło do aplikacji" 
-              placeholderTextColor="#555" 
-              value={settingsAppPass} 
-              onChangeText={settingsAppPass} 
-              />
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.sectionHeader}>📶 Zmiana Konfiguracji Sieci Wi-Fi Zamka</Text>
-              <Text style={styles.inputLabelText}>Identyfikator Sieci (SSID):</Text>
-              <TextInput style={styles.inputField} placeholder="Nazwa nowej sieci Wi-Fi" placeholderTextColor="#555" value={settingsSsid} onChangeText={setSettingsSsid} />
-              <Text style={styles.inputLabelText}>Hasło do Sieci:</Text>
-              <TextInput style={styles.inputField} secureTextEntry placeholder="Hasło nowej sieci Wi-Fi" placeholderTextColor="#555" value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
+              <Text style={styles.sectionHeader}>Zarządzanie Alertami Push</Text>
               
-              <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 12 }]} onPress={handleSaveSystemSettings}>
-                <Text style={styles.btnText}>💾 Zapisz Ustawienia i Zrestartuj Zamek</Text>
-              </TouchableOpacity>
+              {/* PRZEŁĄCZNIK 1: WEJŚCIA LOKATORÓW */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 10 }}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={{ color: '#fff', fontSize: 15, fontWeight: 'bold' }}>Powiadomienia o wejściach</Text>
+                  <Text style={{ color: '#666', fontSize: 12, marginTop: 2 }}>Wyślij alert, gdy lokator (np. Tomasz 2) pomyślnie otworzy drzwi kartą RFID.</Text>
+                </View>
+                <Switch
+                  trackColor={{ false: '#202024', true: '#5c33cf' }}
+                  thumbColor={pushEntries ? '#64b5f6' : '#f4f3f4'}
+                  value={pushEntries}
+                  onValueChange={(val) => {
+                    setPushEntries(val);
+                    savePushPreferences(val, pushAlarms);
+                  }}
+                />
+              </View>
+
+              <View style={{ width: '100%', height: 1, backgroundColor: '#222', marginVertical: 14 }} />
+
+              {/* PRZEŁĄCZNIK 2: ALERTY BEZPIECZEŃSTWA */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 10 }}>
+                <View style={{ flex: 1, paddingRight: 12 }}>
+                  <Text style={{ color: '#fff', fontSize: 15, fontWeight: 'bold' }}>Alerty bezpieczeństwa</Text>
+                  <Text style={{ color: '#666', fontSize: 12, marginTop: 2 }}>Natychmiastowy alarm w telefonie w przypadku wykrycia prób ataków BruteForce.</Text>
+                </View>
+                <Switch
+                  trackColor={{ false: '#202024', true: '#5c33cf' }}
+                  thumbColor={pushAlarms ? '#64b5f6' : '#f4f3f4'}
+                  value={pushAlarms}
+                  onValueChange={(val) => {
+                    setPushAlarms(val);
+                    savePushPreferences(pushEntries, val);
+                  }}
+                />
+              </View>
             </View>
           </ScrollView>
+        )}
+        
+        {currentScreen === 'settings' && (
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={{ flex: 1 }}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 100}
+          >
+            <ScrollView contentContainerStyle={styles.scrollWrapper} keyboardShouldPersistTaps="handled">
+              <Text style={styles.screenHeaderText}>⚙️ Konfiguracja Infrastruktury</Text>
+              
+              <View style={styles.card}>
+                <Text style={styles.sectionHeader}>👤 Dane Profilu</Text>
+                <Text style={[styles.inputLabelText, {color: '#81c784', fontSize: 15, fontWeight:'600'}]}>✓ {lockState.account ? lockState.account.email : email}</Text>
+              </View>
+
+              {/* FORMULARZ: ZMIANA HASŁA APLIKACJI */}
+              <View style={styles.card}>
+                <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta Aplikacji</Text>
+                <Text style={styles.inputLabelText}>Nowe Hasło Logowania:</Text>
+                <View style={{ width: '100%', position: 'relative' }}>
+                  <TextInput 
+                    style={styles.inputField} 
+                    secureTextEntry={secureSettingsApp} 
+                    placeholder="Wprowadź nowe hasło do aplikacji" 
+                    placeholderTextColor="#555" 
+                    value={settingsAppPass} 
+                    onChangeText={setSettingsAppPass} 
+                  />
+                  <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureSettingsApp(!secureSettingsApp)}>
+                    <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureSettingsApp ? "Pokaż" : "Ukryj"}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* FORMULARZ: ZMIANA HASŁA WI-FI ZAMKA */}
+              <View style={styles.card}>
+                <Text style={styles.sectionHeader}>📶 Zmiana Konfiguracji Sieci Wi-Fi Zamka</Text>
+                <Text style={styles.inputLabelText}>Identyfikator Sieci (SSID):</Text>
+                <TextInput style={styles.inputField} placeholder="Nazwa nowej sieci Wi-Fi" placeholderTextColor="#555" value={settingsSsid} onChangeText={setSettingsSsid} />
+                
+                <Text style={styles.inputLabelText}>Hasło do Sieci:</Text>
+                <View style={{ width: '100%', position: 'relative' }}>
+                  <TextInput 
+                    style={styles.inputField} 
+                    secureTextEntry={secureSettingsWifi} 
+                    placeholder="Hasło nowej sieci Wi-Fi" 
+                    placeholderTextColor="#555" 
+                    value={settingsWifiPass} 
+                    onChangeText={setSettingsWifiPass} 
+                  />
+                  <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureSettingsWifi(!secureSettingsWifi)}>
+                    <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureSettingsWifi ? "Pokaż" : "Ukryj"}</Text>
+                  </TouchableOpacity>
+                </View>
+                
+                <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 12 }]} onPress={handleSaveSystemSettings}>
+                  <Text style={styles.btnText}>💾 Zapisz Ustawienia i Zrestartuj Zamek</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </KeyboardAvoidingView>
         )}
         
 
@@ -806,6 +1017,7 @@ export default function App() {
           <View style={styles.sidebarBrandHeaderBox}><Text style={styles.sidebarBrandTitleText}>Nawigacja</Text></View>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Dashboard</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
+          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'notifications' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('notifications')}><Text style={styles.menuItemLabelText}>🔔 Powiadomienia Push</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'system' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('system')}><Text style={styles.menuItemLabelText}>📋 Logi Systemowe</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'ota' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('ota')}><Text style={styles.menuItemLabelText}>💾 Aktualizacja</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'settings' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('settings')}><Text style={styles.menuItemLabelText}>⚙️ Ustawienia</Text></TouchableOpacity>
