@@ -103,7 +103,7 @@ function syncMutationToHardware(ip, pathUrl) {
   });
 }
 
-// 🌟 DYNAMICZNA FUNKCJA PARSOWANIA I SORTOWANIA WERSJI SEMVER Z PLIKÓW LOKALNYCH
+// DYNAMICZNA FUNKCJA PARSOWANIA I SORTOWANIA WERSJI SEMVER Z PLIKÓW LOKALNYCH
 function getLatestFirmwareContext() {
   const updatesDir = '/opt/smartlock-server/updates';
   if (!fs.existsSync(updatesDir)) return { version: '0.0.0', filename: null };
@@ -1026,6 +1026,17 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { success: true });
       }
 
+      // POWIADOMIENIA PUSH PREFERENCJE
+
+      if (pathname === '/api/settings/push_preferences' && req.method === 'POST') {
+        const { accountId, pushEntries, pushAlarms } = body;
+        if (!accountId) return sendJSON(res, 400, { error: "Missing identity scope" });
+              
+        await dbPool.query('UPDATE accounts SET push_entries = $1, push_alarms = $2 WHERE id = $3', [pushEntries, pushAlarms, accountId]);
+        writeToLocalLogFile('Push System', `Zaktualizowano preferencje push dla konta ID: ${accountId} (Entries: ${pushEntries}, Alarms: ${pushAlarms})`);
+          return sendJSON(res, 200, { success: true });
+      }
+
       return sendJSON(res, 404, { error: "Endpoint route context invalid" });
 
     } catch (dbError) {
@@ -1035,17 +1046,6 @@ const server = http.createServer(async (req, res) => {
     }
   });
 });
-
-// POWIADOMIENIA PUSH PREFERENCJE
-
-if (pathname === '/api/settings/push_preferences' && req.method === 'POST') {
-  const { accountId, pushEntries, pushAlarms } = body;
-  if (!accountId) return sendJSON(res, 400, { error: "Missing identity scope" });
-        
-  await dbPool.query('UPDATE accounts SET push_entries = $1, push_alarms = $2 WHERE id = $3', [pushEntries, pushAlarms, accountId]);
-  writeToLocalLogFile('Push System', `Zaktualizowano preferencje push dla konta ID: ${accountId} (Entries: ${pushEntries}, Alarms: ${pushAlarms})`);
-    return sendJSON(res, 200, { success: true });
-}
 
 mailTransport.verify((error, success) => {
   if (error) {

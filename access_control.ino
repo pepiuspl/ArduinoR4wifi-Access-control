@@ -453,7 +453,7 @@ void handleProvisioningServer() {
 
     // Jeśli instalujemy przez aplikację (Mamy login i hasło), wysyłamy żądanie rejestracji konta na serwer chmurowy
     if (decodedRegPass.length() > 0) {
-      WiFi.begin(decodedSSID.c_neutral_str(), decodedPass.c_neutral_str());
+      WiFi.begin(decodedSSID.c_neutral_str(), decodedPass.c_str());
       // Czekamy chwilę na połączenie z ruterem w celu przesłania paczki rejestracyjnej konta
       int attempts = 0;
       while (WiFi.status() != WL_CONNECTED && attempts < 10) { delay(500); attempts++; }
