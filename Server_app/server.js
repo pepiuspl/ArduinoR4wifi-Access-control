@@ -970,17 +970,44 @@ const server = http.createServer(async (req, res) => {
           await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Otwarto: ${credentialRes.rows[0].holder_name}`]);
           writeToLocalLogFile('Access Granted', `[Node: ${mac}] Matched name description: ${credentialRes.rows[0].holder_name}`);
 
-          // SILNIK POWIADOMIEŃ PUSH: Sprawdzamy token i preferencje właściciela
-          const ownerRes = await dbPool.query('SELECT account_id FROM devices WHERE mac_address = $1 LIMIT 1', [mac]);
-          if (ownerRes.rows.length > 0) {
-            const tokenRes = await dbPool.query('SELECT push_token, push_entries FROM accounts WHERE id = $1', [ownerRes.rows[0].account_id]);
-            if (tokenRes.rows.length > 0 && tokenRes.rows[0].push_token && tokenRes.rows[0].push_entries !== false) {
-              sendPushNotification(
-                tokenRes.rows[0].push_token, 
-                "Ktoś wszedł do domu", 
-                `Użytkownik ${credentialRes.rows[0].holder_name} właśnie otworzył drzwi.`
-              );
+          // SILNIK POWIADOMIEŃ PUSH: Sprawdzanie tokenu push i ustawień powiadomień dla właściciela konta
+          let targetMacForOwner = mac;
+          let ownerRes = await dbPool.query('SELECT account_id FROM devices WHERE mac_address = $1 LIMIT 1', [targetMacForOwner]);
+          
+          // Jeśli nie znaleziono urządzenia, próbujemy odwrócić bajty MAC (tak jak w poll)
+          if (ownerRes.rows.length === 0 && mac.includes(':')) {
+            const reversedMac = mac.split(':').reverse().join(':');
+            const ownerResRev = await dbPool.query('SELECT account_id FROM devices WHERE mac_address = $1 LIMIT 1', [reversedMac]);
+            if (ownerResRev.rows.length > 0) {
+              targetMacForOwner = reversedMac;
+              ownerRes = ownerResRev;
             }
+          }
+
+          if (ownerRes.rows.length > 0) {
+            const ownerId = ownerRes.rows[0].account_id;
+            const tokenRes = await dbPool.query('SELECT push_token, push_entries FROM accounts WHERE id = $1', [ownerId]);
+            
+            if (tokenRes.rows.length === 0) {
+              writeToLocalLogFile('Push Diagnostic', `Błąd: Urządzenie istnieje, ale konto właściciela ID: ${ownerId} nie istnieje w tabeli accounts.`);
+            } else {
+              const accountData = tokenRes.rows[0];
+              
+              if (!accountData.push_token) {
+                writeToLocalLogFile('Push Diagnostic', `⚠️ Brak zapisanego tokenu push dla konta ID: ${ownerId}. Zaloguj się ponownie w aplikacji.`);
+              } else if (accountData.push_entries === false) {
+                writeToLocalLogFile('Push Diagnostic', `🔇 Powiadomienia o wejściach są wyłączone suwakiem dla konta ID: ${ownerId}.`);
+              } else {
+                // Wszystkie warunki spełnione -> Wywołujemy wysyłkę
+                sendPushNotification(
+                  accountData.push_token, 
+                  "Ktoś wszedł do domu", 
+                  `Użytkownik ${credentialRes.rows[0].holder_name} właśnie otworzył drzwi.`
+                );
+              }
+            }
+          } else {
+            writeToLocalLogFile('Push Diagnostic', `⚠️ Pomięto push: Adres MAC ${mac} nie jest przypisany do żadnego konta w tabeli devices.`);
           }
 
           return sendJSON(res, 200, { access: "granted" });

@@ -7,7 +7,6 @@ import * as Notifications from 'expo-notifications';
 const { width } = Dimensions.get('window');
 
 // Powiadomienia Push
-
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -15,24 +14,6 @@ Notifications.setNotificationHandler({
     shouldSetBadge: false,
   }),
 });
-
-// DECYDOWANIE O POWIADOMIENIACH PUSH
-
-const [pushEntries, setPushEntries] = useState(true);
-const [pushAlarms, setPushAlarms] = useState(true);
-
-const savePushPreferences = (entries, alarms) => {
-  fetch(`${backendUrl}/api/settings/push_preferences`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ accountId, pushEntries: entries, pushAlarms: alarms })
-  })
-    .then((res) => res.json())
-    .then((data) => {
-      if (data.success) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    })
-    .catch((err) => console.log("Błąd zapisu preferencji push:", err));
-};
 
 let AsyncStorage;
 try {
@@ -56,8 +37,25 @@ export default function App() {
   const [isRegisterMode, setIsRegisterMode] = useState(false); 
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
   
+  // 🟢 TUTAJ ZOSTAŁY PRZENIESIONE TWOJE STANY I FUNKCJA PUSH (Wewnątrz App)
+  const [pushEntries, setPushEntries] = useState(true);
+  const [pushAlarms, setPushAlarms] = useState(true);
+
+  const savePushPreferences = (entries, alarms) => {
+    fetch(`${backendUrl}/api/settings/push_preferences`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId, pushEntries: entries, pushAlarms: alarms })
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      })
+      .catch((err) => console.log("Błąd zapisu preferencji push:", err));
+  };
+  
   // STANY OBSŁUGI BEZPIECZNEGO RESETU HASŁA (OPCJA B)
-  const [resetStep, setResetStep] = useState(1); // 1: Email, 2: Kod, 3: Nowe Hasło
+  const [resetStep, setResetStep] = useState(1); 
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
@@ -600,7 +598,7 @@ export default function App() {
           {showInstallerMenu && (
             <View style={styles.installerBoxContainer}>
               <Text style={styles.installerTitleText}>🛠️ Core Infrastructure Router Configuration</Text>
-              <TextInput style={[styles.inputField, { borderColor: '#e11d48' }]} placeholder="e.g. 192.168.0.200:3000" placeholderTextColor="#666" value={installerUrlInput} onChangeText={setInstallerUrlInput} />
+              <TextInput style={[styles.inputField, { borderColor: '#e11d48' }]} placeholder="e.g. 192.168.0.199:3000" placeholderTextColor="#666" value={installerUrlInput} onChangeText={setInstallerUrlInput} />
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%' }}>
                 <TouchableOpacity style={[styles.inlineBtn, { backgroundColor: '#333' }]} onPress={() => setShowInstallerMenu(false)}><Text style={styles.btnText}>Close</Text></TouchableOpacity>
                 <TouchableOpacity style={[styles.inlineBtn, { backgroundColor: '#e11d48' }]} onPress={saveInstallerConfig}><Text style={styles.btnText}>Apply Node</Text></TouchableOpacity>

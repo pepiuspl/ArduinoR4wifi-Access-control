@@ -12,7 +12,7 @@
 #include <time.h> 
 
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
-#define PROXMOX_SERVER "192.168.0.200"
+#define PROXMOX_SERVER "192.168.0.199"
 #define PROXMOX_PORT   3000
 
 unsigned long lastOtaCheck = 0;
