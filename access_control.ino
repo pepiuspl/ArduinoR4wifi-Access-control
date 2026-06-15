@@ -11,7 +11,7 @@
 #include <Update.h>
 #include <time.h> 
 
-// 🌟 STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
+// STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
 #define PROXMOX_SERVER "192.168.0.200"
 #define PROXMOX_PORT   3000
 
@@ -76,13 +76,13 @@ char ssid[32] = "";
 char pass[32] = "";
 char owner_email[64] = "";
 
-#define RELAY_PIN   16   // Na płytce oznaczone jako RX2
-#define BUTTON_PIN  17   // Na płytce oznaczone jako TX2
-#define LED_GREEN   25   // Na płytce oznaczone jako D25
-#define LED_RED     26   // Na płytce oznaczone jako D26
-#define BUZZER_PIN  27   // Na płytce oznaczone jako D27
-#define RST_PIN     4    // Na płytce oznaczone jako D4
-#define SS_PIN      5    // Na płytce oznaczone jako D5
+#define RELAY_PIN   32   
+#define BUTTON_PIN  33   
+#define LED_GREEN   25   
+#define LED_RED     26   
+#define BUZZER_PIN  27   
+#define RST_PIN     4    
+#define SS_PIN      5   
 
 #define MAX_LOGS 30  
 #define OLED_RESET -1  
