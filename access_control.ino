@@ -940,17 +940,13 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   httpPost.stop(); 
 } 
 
-void setup() { 
+void setup() {
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); 
   Serial.begin(9600); 
   delay(1500);
-
-  // 1. Otwieramy emulację pamięci EEPROM we Flashu ESP32
   EEPROM.begin(512);
-
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-  // 2. 🌟 KRYTYCZNE: Inicjalizacja ekranu NA SAMYM POCZĄTKU
-  // Dzięki temu funkcje rysujące nie wywołają crashu pamięci ESP32
   Wire.begin();
   Wire.beginTransmission(0x3C);
   if (Wire.endTransmission() == 0) {
