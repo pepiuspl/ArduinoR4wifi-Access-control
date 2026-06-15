@@ -942,21 +942,18 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 void setup() { 
   Serial.begin(9600); 
   delay(1500);
-  
-  // 🌟 Otwieramy emulację pamięci EEPROM we Flashu ESP32
+
+  // 1. Otwieramy emulację pamięci EEPROM we Flashu ESP32
   EEPROM.begin(512);
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  loadConfiguration(); 
-  loadCards();
-  if (digitalRead(BUTTON_PIN) == LOW) { 
-    delay(2000);
-    if (digitalRead(BUTTON_PIN) == LOW) { 
-      factoryResetSettings(); 
-      Serial.println("[FACTORY RESET COMPLETE]");
-    } 
-  } 
+  // 2. 🌟 KRYTYCZNE: Inicjalizacja ekranu NA SAMYM POCZĄTKU
+  // Dzięki temu funkcje rysujące nie wywołają crashu pamięci ESP32
+  display.begin(0x3C, true); 
+  display.clearDisplay();
+
+  // 3. 🌟 BEZPIECZEŃSTWO: Przekaźnik jako INPUT odcina wyciek prądu 5V/3.3V
   pinMode(RELAY_PIN, INPUT); 
   
   pinMode(LED_GREEN, OUTPUT); 
@@ -965,22 +962,38 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT); 
   digitalWrite(RST_PIN, HIGH); 
   delay(50);
+  
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, LOW); 
+
+  // 4. 🌟 NAPRAWA RFID: Czyste uruchomienie SPI i natychmiastowy start czytnika
   SPI.begin(); 
+  rfid.PCD_Init();
+
+  // 5. Ładowanie konfiguracji z pamięci
+  loadConfiguration(); 
+  loadCards();
+
+  // Obsługa przycisku Factory Reset przy starcie
+  if (digitalRead(BUTTON_PIN) == LOW) { 
+    delay(2000);
+    if (digitalRead(BUTTON_PIN) == LOW) { 
+      factoryResetSettings(); 
+      Serial.println("[FACTORY RESET COMPLETE]");
+    } 
+  } 
   
   randomSeed(analogRead(0)); 
   delay(300); 
-  display.begin(0x3C, true); 
-  display.clearDisplay(); 
 
+  // 6. Bezpieczne wejście w tryb konfiguracji (ekran i RFID już działają)
   if (provisioningMode) { 
     displayProvisioningInstructions(""); 
     WiFi.softAP("CTRLABLE_SETUP");
     server.begin(); 
     tone(BUZZER_PIN, 600, 250); 
     delay(300); 
-    tone(BUZZER_PIN, 600, 250); 
+    tone(BUZZER_PIN, 600, 250);
     unsigned long lastSetupTick = 0; 
     bool alternateState = false;
     while (true) { 
@@ -997,6 +1010,7 @@ void setup() {
     } 
   } 
 
+  // Konfiguracja połączenia z Twoją siecią docelową
   updateDisplay("Wi-Fi: Laczenie...", "Proba: 1/3 [....]");
   WiFi.begin(ssid, pass); 
   unsigned long startAttempt = millis(); 
