@@ -180,36 +180,60 @@ const server = http.createServer(async (req, res) => {
 
     try {
       // =========================================================================
-      // REJESTRACJA KONTA + EMAIL POWITALNY
+      // REJESTRACJA KONTA + EMAIL POWITALNY + AUDYT RODO
       // =========================================================================
       if (pathname === '/api/auth/register' && req.method === 'POST') {
         if (!body.email || !body.password) return sendJSON(res, 400, { error: "Missing identity payloads" });
+        
+        // 🛡️ Strażnik RODO - sprawdzenie akceptacji z aplikacji mobilnej
+        if (!body.privacy_policy_accepted) {
+          return sendJSON(res, 400, { error: "Rejestracja odrzucona. Wymagany akcept polityki prywatności." });
+        }
+
         const cleanEmail = body.email.trim().toLowerCase();
         const hash = await bcrypt.hash(body.password, 10);
-        await dbPool.query('INSERT INTO accounts (email, password_hash) VALUES ($1, $2)', [cleanEmail, hash]);
-        
-        const welcomeMailManifest = {
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
-          to: cleanEmail,
-          subject: 'Witamy w ekosystemie CTRLABLE!',
-          html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-              <h2>Cześć! Twój inteligentny dom właśnie zyskał nową ochronę!</h2>
-              <p>Dziękujemy za zarejestrowanie konta w systemie <strong>CTRLABLE Node</strong>. Twoja konto oraz centralka CTRLABLE Node zostały pomyślnie zarejestrowane.</p>
-            <p><strong>Od czego zacząć?</strong></p>
-            <ul>
-            <li>Zaloguj się w aplikacji mobilnej używając swoich danych.</li>
-            <li>Przejdź do listy użytkowników aby dodać nowe przepustki.</li>
-            <li>Nadaj imię użytkownika przeputski, włącz tryb uczenia oraz zbliż fizyczny klucz RFID do czytnika.</li>
-            </ul>
-            <br>
-            <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
-            </div>`
-        };
-        mailTransport.sendMail(welcomeMailManifest, (err, info) => {
-          if (err) writeToLocalLogFile('Welcome SMTP Fail', err.message);
-        });
-        writeToLocalLogFile('Authentication Panel', `Registered account for: ${cleanEmail}`);
-        return sendJSON(res, 200, { status: "registered" });
+        const acceptedTimestamp = new Date(); // Generowanie czasu TIMESTAMP dla Postgresa
+
+        try {
+          // Wstrzyknięcie danych do tabeli accounts (uwzględniając password_hash oraz privacy_policy_accepted_at)
+          await dbPool.query(
+            'INSERT INTO accounts (email, password_hash, privacy_policy_accepted_at) VALUES ($1, $2, $3)', 
+            [cleanEmail, hash, acceptedTimestamp]
+          );
+          
+          const welcomeMailManifest = {
+            from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+            to: cleanEmail,
+            subject: 'Witamy w ekosystemie CTRLABLE!',
+            html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+                <h2>Cześć! Twój inteligentny dom właśnie zyskał nową ochronę!</h2>
+                <p>Dziękujemy za zarejestrowanie konta w systemie <strong>CTRLABLE Node</strong>. Twoja konto oraz centralka CTRLABLE Node zostały pomyślnie zarejestrowane.</p>
+              <p><strong>Od czego zacząć?</strong></p>
+              <ul>
+              <li>Zaloguj się w aplikacji mobilnej używając swoich danych.</li>
+              <li>Przejdź do listy użytkowników aby dodać nowe przepustki.</li>
+              <li>Nadaj imię użytkownika przeputski, włącz tryb uczenia oraz zbliż fizyczny klucz RFID do czytnika.</li>
+              </ul>
+              <br>
+              <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
+              </div>`
+          };
+
+          mailTransport.sendMail(welcomeMailManifest, (err, info) => {
+            if (err) writeToLocalLogFile('Welcome SMTP Fail', err.message);
+          });
+
+          writeToLocalLogFile('Authentication Panel', `Registered account for: ${cleanEmail}. Zgoda RODO zarejestrowana: ${acceptedTimestamp}`);
+          return sendJSON(res, 200, { status: "registered" });
+
+        } catch (err) {
+          console.error("Błąd zapisu konta w Postgresie:", err);
+          // Kod błędu '23505' w PostgreSQL oznacza próbe zdublowania unikalnego pola (Unique Violation - ten sam e-mail)
+          if (err.code === '23505') {
+            return sendJSON(res, 400, { error: 'Ten adres e-mail jest już zarejestrowany w systemie.' });
+          }
+          return sendJSON(res, 500, { error: 'Wewnętrzny błąd bazy danych przy rejestracji.' });
+        }
       }
 
       // =========================================================================
@@ -488,35 +512,35 @@ const server = http.createServer(async (req, res) => {
       // ZDALNE WYWOŁANIE OTWARCIA Z APLIKACJI
       // =========================================================================
       if (pathname === '/api/unlock' && req.method === 'GET') {
-  const accountId = query.accountId;
-  const devRes = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
-  if (devRes.rows.length > 0) {
-    const targetMac = devRes.rows[0].mac_address;
-    
-    unlockQueues[targetMac] = true; 
-    unlockQueues['00:00:00:00:00:00'] = true;
+        const accountId = query.accountId;
+        const devRes = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        if (devRes.rows.length > 0) {
+          const targetMac = devRes.rows[0].mac_address;
+          
+          unlockQueues[targetMac] = true; 
+          unlockQueues['00:00:00:00:00:00'] = true;
 
-    // 🌟 POPRAWKA: Ustawiamy stan rygla na TRUE natychmiast na poziomie serwera!
-    // Dzięki temu aplikacja przy najbliższym zapytaniu od razu zobaczy status OTWARTY.
-    if (typeof actualLockStates === 'object') {
-      actualLockStates[targetMac] = true;
-    }
+          // 🌟 POPRAWKA: Ustawiamy stan rygla na TRUE natychmiast na poziomie serwera!
+          // Dzięki temu aplikacja przy najbliższym zapytaniu od razu zobaczy status OTWARTY.
+          if (typeof actualLockStates === 'object') {
+            actualLockStates[targetMac] = true;
+          }
 
-    await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
-    writeToLocalLogFile('API Control Command', `Dispatched remote unlock trigger down to: ${targetMac}`);
-    
-    setTimeout(() => { 
-      unlockQueues[targetMac] = false; 
-      unlockQueues['00:00:00:00:00:00'] = false;
-      
-      // Po 5 sekundach (gdy zamek się zablokuje), serwer bezpiecznie przywróci false
-      if (typeof actualLockStates === 'object') {
-        actualLockStates[targetMac] = false;
+          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
+          writeToLocalLogFile('API Control Command', `Dispatched remote unlock trigger down to: ${targetMac}`);
+          
+          setTimeout(() => { 
+            unlockQueues[targetMac] = false; 
+            unlockQueues['00:00:00:00:00:00'] = false;
+            
+            // Po 5 sekundach (gdy zamek się zablokuje), serwer bezpiecznie przywróci false
+            if (typeof actualLockStates === 'object') {
+              actualLockStates[targetMac] = false;
+            }
+          }, 5000); 
+        }
+        return sendJSON(res, 200, { status: "ok" });
       }
-    }, 5000); 
-  }
-  return sendJSON(res, 200, { status: "ok" });
-}
 
       // =========================================================================
       // WŁĄCZENIE TRYBU UCZENIA CZYTNIKA RFID

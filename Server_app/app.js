@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions, KeyboardAvoidingView, Platform, Switch} from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions, KeyboardAvoidingView, Platform, Switch, Linking} from 'react-native';
 import * as Haptics from 'expo-haptics';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
@@ -37,7 +37,7 @@ export default function App() {
   const [isRegisterMode, setIsRegisterMode] = useState(false); 
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
   
-  // 🟢 TUTAJ ZOSTAŁY PRZENIESIONE TWOJE STANY I FUNKCJA PUSH (Wewnątrz App)
+  // STANY I FUNKCJA PUSH
   const [pushEntries, setPushEntries] = useState(true);
   const [pushAlarms, setPushAlarms] = useState(true);
 
@@ -74,6 +74,9 @@ export default function App() {
   const [authStep, setAuthStep] = useState('connect');
   const [isScanning, setIsScanning] = useState(false);
   const [detectedDevice, setDetectedDevice] = useState(false);
+
+  // ZGODY REGULAMINU I POLITYKI PRYWATNOŚCI
+  const [isPrivacyAccepted, setIsPrivacyAccepted] = useState(false);
 
   const [lockState, setLockState] = useState({ 
     auth: false, 
@@ -152,34 +155,47 @@ export default function App() {
   };
 
   const handleAccountRegistration = () => {
-    if (!email || !password) return;
-    setIsAuthenticating(true);
-    setErrorMessage('Registering structural access credentials...');
+    // ZGODA RODO
+    if (!isPrivacyAccepted) {
+      Haptics.notificationAsync(Haptics.ImpactFeedbackStyle.Error);
+      Alert.alert(
+        "Wymagana akceptacja", 
+        "Musisz zaakceptować Regulamin oraz Politykę Prywatności, aby utworzyć konto Master."
+      );
+      return;
+    }
 
+    setIsAuthenticating(true);
+
+    // 🌐 Strzał do Twojego oficjalnego endpointu
     fetch(`${backendUrl}/api/auth/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: email.trim(), password: password.trim() })
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: email,
+        password: password,
+        privacy_policy_accepted: true // Przekazanie zgody do backendu
+      }),
     })
-      .then((res) => {
-        if (!res.ok) throw new Error();
-        return res.json();
-      })
-      .then((data) => {
-        setLatestVersion(data.latestVersion);
-        setIsAuthenticating(false);
-        if (data.status === 'registered') {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          Alert.alert('Account Provisioned', 'Registration successful!');
-          setIsRegisterMode(false);
-          setErrorMessage('');
-        }
-      })
-      .catch(() => {
-        setIsAuthenticating(false);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        setErrorMessage('Registration Interrupted: Email conflicts or offline backend.');
-      });
+    .then(response => response.json())
+    .then(data => {
+      setIsAuthenticating(false);
+      
+      // Dopasowanie do Twojego formatu odpowiedzi: data.status === "registered"
+      if (data.status === "registered") {
+        Alert.alert("Sukces", "Konto Master zostało pomyślnie utworzone! Sprawdź swoją skrzynkę e-mail.");
+        setAuthStep('login'); // Przełączenie widoku na panel logowania
+      } else {
+        setErrorMessage(data.error || "Błąd podczas tworzenia konta.");
+      }
+    })
+    .catch(error => {
+      setIsAuthenticating(false);
+      setErrorMessage("Błąd połączenia z węzłem backendu.");
+      console.error(error);
+    });
   };
 
   const handleSecurityLogin = async () => {
@@ -716,7 +732,7 @@ export default function App() {
           {authStep === 'onboarding' && (
             <>
               <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center', color: '#ffb300' }]}>
-                Aplikacja przygotowuje spięcie mostka sieciowego. Połącz się w ustawieniach telefonu z Wi-Fi: CTRLABLE_SETUP i uzupełnij poniższy profil:
+                Aplikacja przygotowuje połączenie sieciowe. Połącz się w ustawieniach telefonu z Wi-Fi: CTRLABLE_SETUP i uzupełnij poniższy profil:
               </Text>
 
               <Text style={styles.inputLabelText}>Nazwa domowej sieci Wi-Fi (SSID):</Text>
@@ -798,7 +814,34 @@ export default function App() {
                 handleAccountRegistration();
                 setAuthStep('login');
               }} disabled={isAuthenticating}>
-                <Text style={styles.btnText}>Utwórz Przestrzeń Chmurową</Text>
+                <View style={styles.checkboxContainer}>
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  style={[styles.checkboxSquare, isPrivacyAccepted && styles.checkboxSquareChecked]}
+                  onPress={() => setIsPrivacyAccepted(!isPrivacyAccepted)}
+                >
+                  {isPrivacyAccepted && <Text style={styles.checkboxCheckmark}>✓</Text>}
+                </TouchableOpacity>
+                
+                <Text style={styles.checkboxLabel}>
+                  Oświadczam, że zapoznałem się i akceptuję{' '}
+                  <Text 
+                    style={styles.hyperlinkText} 
+                    onPress={() => Alert.alert("Placeholder", "Przekierowanie do: https://ctrlable.node/terms (Strona w budowie)")}
+                  >
+                    Regulamin Serwisu
+                  </Text>
+                  {' '}oraz{' '}
+                  <Text 
+                    style={styles.hyperlinkText} 
+                    onPress={() => Alert.alert("Placeholder", "Przekierowanie do: https://ctrlable.node/privacy (Strona w budowie)")}
+                  >
+                    Politykę Prywatności
+                  </Text>
+                  , w tym wyrażam zgodę na przetwarzanie moich danych osobowych (takich jak adres e-mail oraz historia zdarzeń otwarcia rygla) w celu realizacji usług systemu CTRLABLE Node.
+                </Text>
+              </View>
+              <Text style={styles.btnText}>Utwórz Przestrzeń Chmurową</Text>
               </TouchableOpacity>
 
               <TouchableOpacity style={{ marginTop: 20 }} onPress={() => setAuthStep('login')}>
@@ -1203,5 +1246,11 @@ const styles = StyleSheet.create({
   menuItemRow: { paddingVertical: 16, paddingHorizontal: 12, borderRadius: 8, marginBottom: 8 },
   menuItemRowActive: { backgroundColor: '#202026' },
   menuItemLabelText: { color: '#ccc', fontSize: 16, fontWeight: '600' },
-  sidebarDisconnectBtn: { backgroundColor: '#1e1b1b', padding: 14, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: '#3f1a1a' }
+  sidebarDisconnectBtn: { backgroundColor: '#1e1b1b', padding: 14, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: '#3f1a1a' },
+  checkboxContainer: { flexDirection: 'row', alignItems: 'flex-start', marginVertical: 16, paddingHorizontal: 4, width: '100%'},
+  checkboxSquare: { width: 22, height: 22, borderWidth: 2, borderColor: '#64b5f6', borderRadius: 4, justifyContent: 'center', alignItems: 'center', marginRight: 12, marginTop: 2},
+  checkboxSquareChecked: { backgroundColor: '#5c33cf', borderColor: '#5c33cf' },
+  checkboxCheckmark: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 },
+  checkboxLabel: { color: '#aaa', fontSize: 12, lineHeight: 18, flex: 1 },
+  hyperlinkText: { color: '#64b5f6', fontWeight: 'bold', textDecorationLine: 'underline' },
 });
