@@ -156,6 +156,7 @@ export default function App() {
 
   const handleAccountRegistration = () => {
     // ZGODA RODO
+    console.log("=== FRONTEND SENDING ===", { email, password });
     if (!isPrivacyAccepted) {
       Haptics.notificationAsync(Haptics.ImpactFeedbackStyle.Error);
       Alert.alert(
