@@ -273,7 +273,8 @@ const server = http.createServer(async (req, res) => {
 
         // Zielone światło
         writeToLocalLogFile('Authentication Panel', `User logged in successfully: ${cleanEmail}`);
-        return sendJSON(res, 200, { 
+        return sendJSON(res, 200, {
+          auth: true, 
           status: "logged_in", 
           accountId: result.rows[0].id 
         });
