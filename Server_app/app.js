@@ -626,7 +626,7 @@ export default function App() {
           )}
 
           {/* =========================================================================
-              KROK 1: RENDEROWANIE RYGROWISTEGO EKRANU STARTOWEGO (TYLKO "POŁĄCZ")
+              KROK 1: RYGORYSTYCZNY EKRAN STARTOWY Z INTEGRACJĄ SYSTEMOWĄ WI-FI
               ========================================================================= */}
           {authStep === 'connect' && (
             <>
@@ -636,32 +636,72 @@ export default function App() {
               
               {isScanning ? (
                 <View style={{ alignItems: 'center', marginVertical: 24, width: '100%' }}>
-                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 16, marginBottom: 6 }}>🔍 Skanowanie przestrzeni radiowej...</Text>
-                  <Text style={{ color: '#555', fontSize: 12 }}>Szukam aktywnych punktów dostępowych CTRLABLE_SETUP...</Text>
-                </View>
-              ) : detectedDevice ? (
-                <View style={{ width: '100%', backgroundColor: '#142718', padding: 18, borderRadius: 12, borderWidth: 1, borderColor: '#2e7d32', marginBottom: 20, alignItems: 'center' }}>
-                  <Text style={{ color: '#81c784', fontWeight: 'bold', fontSize: 15, marginBottom: 4 }}>✨ Wykryto aktywne urządzenie!</Text>
-                  <Text style={{ color: '#aaa', fontSize: 13, marginBottom: 16 }}>Rozpoznano SSID sygnatury: CTRLABLE_SETUP</Text>
-                  <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32', marginTop: 0 }]} onPress={() => setAuthStep('onboarding')}>
-                    <Text style={styles.btnText}>🔗 Połącz i konfiguruj system</Text>
-                  </TouchableOpacity>
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 16, marginBottom: 6 }}>🔍 Inicjalizacja magistrali radiowej...</Text>
+                  <Text style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>
+                    Wywoływanie uprawnień sieciowych i próba spięcia z węzłem CTRLABLE_SETUP...
+                  </Text>
                 </View>
               ) : (
                 <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#5c33cf', marginVertical: 10 }]} onPress={() => {
-                  setIsScanning(true);
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                  setTimeout(() => {
-                    setIsScanning(false);
-                    setDetectedDevice(true);
-                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                  }, 2200); // 2.2 sekundy realistycznego skanowania sieci
+                  
+                  // 1. Zgoda na sieć lokalną (Local Network Privacy)
+                  Alert.alert(
+                    "Uprawnienia sieciowe",
+                    "Aplikacja CTRLABLE wymaga dostępu do sieci lokalnej, aby wykrywać i zarządzać węzłami zabezpieczeń w Twoim otoczeniu.",
+                    [
+                      { text: "Odmów", style: "cancel", onPress: () => {
+                        setErrorMessage("Błąd: Brak uprawnień do sieci lokalnej. Konfiguracja zablokowana.");
+                      }},
+                      { text: "Zezwól", onPress: () => {
+                        setErrorMessage(null); // Czyszczenie starych błędów
+                        setIsScanning(true);
+
+                        // 2. Wywołanie systemowego monitu o dołączenie do konkretnego SSID (Symulacja NEHotspotConfiguration dla Expo Go)
+                        setTimeout(() => {
+                          Alert.alert(
+                            "Połączenie Wi-Fi",
+                            "Aplikacja CTRLABLE chce dołączyć do sieci Wi-Fi „CTRLABLE_SETUP” nadawanej przez bliską centralkę. Czy wyrażasz zgodę?",
+                            [
+                              { text: "Anuluj", style: "cancel", onPress: () => {
+                                setIsScanning(false);
+                                setErrorMessage("Połączenie przerwane przez użytkownika.");
+                              }},
+                              { text: "Połącz", onPress: () => {
+                                // Telefon "przełącza" się na sieć centralki i zaczyna pukać do jej bramy (192.168.4.1)
+                                const controller = new AbortController();
+                                const timeoutId = setTimeout(() => controller.abort(), 3500); // Rygorystyczne 3.5 sekundy na odpowiedź
+
+                                fetch('http://192.168.4.1/', { signal: controller.signal })
+                                  .then(() => {
+                                    clearTimeout(timeoutId);
+                                    setIsScanning(false);
+                                    setDetectedDevice(true);
+                                    setAuthStep('onboarding'); // Sukces! Przechodzimy do karty konfiguracji
+                                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                                  })
+                                  .catch(() => {
+                                    clearTimeout(timeoutId);
+                                    setIsScanning(false);
+                                    setDetectedDevice(false);
+                                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                                    
+                                    // ZWROT BŁĘDU ZGODNIE Z WYMAGANIAMI: Powrót do ekranu z jasnym komunikatem
+                                    setErrorMessage("Nie znaleziono w zasięgu centralki. Proszę się upewnić, że jest podłączona do zasilania i nadaje sygnał.");
+                                  });
+                              }}
+                            ]
+                          );
+                        }, 1200); // Opóźnienie dla płynności animacji UX
+                      }}
+                    ]
+                  );
                 }}>
                   <Text style={styles.btnText}>⚡ Połącz z centralką</Text>
                 </TouchableOpacity>
               )}
 
-              {/* Ukryta furtka dla instalatora/użytkownika, którego centralka jest już w LAN i chce tylko zalogować nowy telefon */}
+              {/* Ukryta furtka dla dewelopera / powracającego klienta */}
               <TouchableOpacity style={{ marginTop: 24 }} onPress={() => setAuthStep('login')}>
                 <Text style={{ color: '#444', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>
                   Moje urządzenie jest już podłączone do sieci domowej ➔
