@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions, KeyboardAvoidingView, Platform, Switch, Linking} from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions, KeyboardAvoidingView, Platform, Switch, Linking, ActivityIndicator} from 'react-native';
 import * as Haptics from 'expo-haptics';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
@@ -77,6 +77,9 @@ export default function App() {
 
   // ZGODY REGULAMINU I POLITYKI PRYWATNOŚCI
   const [isPrivacyAccepted, setIsPrivacyAccepted] = useState(false);
+
+  // PODTRZYMANIE SESJI PO WYŁĄCZENIU APLIKACJI
+  const [isLoading, setIsLoading] = useState(true);
 
   const [lockState, setLockState] = useState({ 
     auth: false, 
@@ -234,7 +237,39 @@ export default function App() {
       });
   };
 
-  // 🔐 PIPELINE ODZYSKIWANIA HASŁA (3 KROKI)
+  // WYLOGOWANY UŻYTKOWNIK
+
+  const handleLogout = async () => {
+    try {
+      // 1. Informujemy backend na Proxmoxie, żeby wyłączył pushe dla tego konta
+      if (accountId) {
+        await fetch(`${backendUrl}/api/auth/save_push_token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            accountId: accountId, 
+            token: 'LOGGED_OUT' // Bezpieczne nadpisanie tokenu w Postgresie
+          })
+        });
+      }
+
+      // 2. Czyścimy pamięć lokalną sesji w telefonie
+      await AsyncStorage.removeItem('@lock_account_id');
+      
+      // 3. 🛠️ TWOJE RESETOWANIE INTERFEJSU (UI):
+      menuAnimation.setValue(-width * 0.75); 
+      setIsMenuOpen(false);                  
+      setCurrentScreen('dashboard');          
+      setAccountId(null);                    
+      setIsConfigured(false);                
+      
+      console.log('🔒 Pełne bezpieczne wylogowanie wykonane pomyślnie.');
+    } catch (error) {
+      console.error("Błąd podczas potoku wylogowywania:", error);
+    }
+  };
+
+  // PIPELINE ODZYSKIWANIA HASŁA (3 KROKI)
   const handleForgotPasswordSubmit = () => {
     if (!email) return Alert.alert('Błąd', 'Wprowadź swój adres email!');
     setIsAuthenticating(true);
@@ -581,23 +616,39 @@ export default function App() {
 
   useEffect(() => {
     const bootstrapAsyncState = async () => {
-      const storedUrl = await AsyncStorage.getItem('@lock_backend_endpoint');
-      if (storedUrl) {
-        setBackendUrl(storedUrl);
-        setInstallerUrlInput(storedUrl);
-      } else {
-        setInstallerUrlInput(backendUrl);
-      }
-      const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
-      if (storedAccountId) {
-        setAccountId(parseInt(storedAccountId, 10));
-        resetUiToDefault();
-        setIsConfigured(true);
-        registerForPushNotificationsAsync(parseInt(storedAccountId, 10));
+      try {
+        // KROK A: Pobieramy adres URL centralki
+        const storedUrl = await AsyncStorage.getItem('@lock_backend_endpoint');
+        
+        if (storedUrl) {
+          setBackendUrl(storedUrl);
+          setInstallerUrlInput(storedUrl);
+          setCurrentScreen('login'); 
+        } else {
+          setInstallerUrlInput(backendUrl);
+          // Brak adresu -> interfejs naturalnie zostanie na ekranie parowania
+        }
+
+        // KROK B: Pobieramy ID konta (czy jest zalogowany)
+        const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
+        
+        if (storedAccountId) {
+          setAccountId(parseInt(storedAccountId, 10));
+          resetUiToDefault();
+          setIsConfigured(true); // Wpuszczamy do Dashboardu
+          registerForPushNotificationsAsync(parseInt(storedAccountId, 10));
+        }
+      } catch (e) {
+        console.error("Błąd odczytu pamięci podręcznej:", e);
+      } finally {
+        // Zamykamy ekran ładowania - AsyncStorage zakończył pracę
+        setIsLoading(false);
       }
     };
+    
     bootstrapAsyncState();
-  }, [backendUrl, resetUiToDefault]); 
+    
+  }, [resetUiToDefault]); 
 
   useEffect(() => {
   if (!isConfigured || !accountId) return;
@@ -620,6 +671,21 @@ export default function App() {
       return 'Autoryzacja CTRLABLE';
     };
 
+    // BLOKADA RENDEROWANIA
+    if (isLoading) {
+      return (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0f0f11' }}>
+          <ActivityIndicator size="large" color="#00ffcc" />
+        </View>
+      );
+    }
+
+    /* Dopiero pod spodem leci Twój obecny return z widokami aplikacji
+    return (
+      <View style={styles.container}>
+      </View>
+    ); */
+
     return (
       <SafeAreaView style={styles.darkContainer}>
         <View style={styles.authCard}>
@@ -628,7 +694,7 @@ export default function App() {
             onPress={handleLogoTap}
             onLongPress={() => {
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-              // 🕵️‍♂️ DEV BACKDOOR: Przeskakujemy konfigurację prosto do głównego Dashboardu!
+              // DEV BACKDOOR: Przeskakujemy konfigurację prosto do głównego Dashboardu!
               setIsConfigured(true); 
               Alert.alert("Tryb Deweloperski", "Uruchomiono tryb bypass sieciowego. Witamy w Dashboardzie!");
             }}
@@ -1198,14 +1264,9 @@ export default function App() {
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'ota' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('ota')}><Text style={styles.menuItemLabelText}>💾 Aktualizacja</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'settings' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('settings')}><Text style={styles.menuItemLabelText}>⚙️ Ustawienia</Text></TouchableOpacity>
           <View style={{flex: 1}} />
-          <TouchableOpacity style={styles.sidebarDisconnectBtn} onPress={async () => {
-            await AsyncStorage.removeItem('@lock_account_id');
-            menuAnimation.setValue(-width * 0.75);
-            setIsMenuOpen(false);
-            setCurrentScreen('dashboard');
-            setIsConfigured(false);
-            setCurrentScreen('dashboard');
-          }}><Text style={styles.btnText}>Wyloguj się</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.sidebarDisconnectBtn} onPress={handleLogout}>
+            <Text style={styles.btnText}>Wyloguj się</Text>
+          </TouchableOpacity>
         </Animated.View>
       </View>
     </SafeAreaView>
