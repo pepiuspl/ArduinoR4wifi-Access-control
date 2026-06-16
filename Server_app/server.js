@@ -237,9 +237,16 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
-      // LOGOWANIE DO APLIKACJI
+      // LOGOWANIE DO APLIKACJI (WERSJA BEZPIECZNA)
       // =========================================================================
       if (pathname === '/api/auth/login' && req.method === 'POST') {
+        
+        //Tarcza anty-crash: Jeśli body jest puste lub brakuje pól, kończymy bez wywalenia serwera
+        if (!body || !body.email || !body.password) {
+          writeToLocalLogFile('Auth Rejection', `Malformed login payload received`);
+          return sendJSON(res, 400, { error: "Missing email or password in payload" });
+        }
+
         const cleanEmail = body.email.trim().toLowerCase();
         const result = await dbPool.query('SELECT * FROM accounts WHERE email = $1', [cleanEmail]);
         
@@ -253,7 +260,6 @@ const server = http.createServer(async (req, res) => {
         if (!valid) {
           writeToLocalLogFile('Auth Rejection', `Failed login: ${cleanEmail} (Password hash mismatch)`);
           
-          // PUSH ALARM: Powiadamiamy właściciela o próbie nieautoryzowanego logowania
           if (result.rows[0].push_token && result.rows[0].push_alarms !== false) {
             sendPushNotification(
               result.rows[0].push_token,
@@ -265,7 +271,7 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, 401, { error: "Invalid credentials" });
         }
 
-        // TUTAJ BYŁA CZARNA DZIURA! DODAJEMY ODPOWIEDŹ DLA UDANEGO LOGOWANIA:
+        // Zielone światło
         writeToLocalLogFile('Authentication Panel', `User logged in successfully: ${cleanEmail}`);
         return sendJSON(res, 200, { 
           status: "logged_in", 
