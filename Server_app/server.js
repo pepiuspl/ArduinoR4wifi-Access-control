@@ -1132,7 +1132,6 @@ function sendPushNotification(token, title, body) {
   if (!token) return;
 
   // OBSŁUGA TOKENÓW SYMULUJĄCYCH PUSH W ŚRODOWISKU SNACK.EXPO
-
   if (token.includes('SnackSimulated')) {
     const logFile = '/var/log/smartlock/smartlock_system.log';
     const timestamp = new Date().toISOString();
@@ -1153,6 +1152,9 @@ function sendPushNotification(token, title, body) {
     badge: 1
   });
 
+  // 🛡️ Bezpieczne obliczenie długości w bajtach (odporne na polskie znaki!)
+  const byteLength = Buffer.byteLength(postData, 'utf8');
+
   const options = {
     hostname: 'exp.host',
     path: '/--/api/v2/push/send',
@@ -1161,12 +1163,19 @@ function sendPushNotification(token, title, body) {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       'Accept-encoding': 'gzip, deflate',
-      'Content-Length': postData.length
+      'Content-Length': byteLength // ⬅️ Zmiana na bezpieczną długość bajtową
     }
   };
 
   const req = https.request(options, (res) => {
-    res.on('data', () => {});
+    // Expo zwraca odpowiedź w formacie JSON - warto ją chociaż zalogować w razie problemów
+    let responseData = '';
+    res.on('data', (chunk) => { responseData += chunk; });
+    res.on('end', () => {
+      if (res.statusCode !== 200) {
+        writeToLocalLogFile('Push System Warning', `Bramka Expo zwróciła kod ${res.statusCode}: ${responseData}`);
+      }
+    });
   });
   
   req.on('error', (e) => {
