@@ -524,8 +524,6 @@ export default function App() {
   // Powiadomienia Push
 
   const registerForPushNotificationsAsync = async (targetAccountId) => {
-  // Na emulatorach webowych Snacka Device.isDevice może być false, 
-  // usuwamy twardą blokadę, abyś mógł przetestować to nawet w przeglądarce!
   
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   let finalStatus = existingStatus;
@@ -545,10 +543,19 @@ export default function App() {
     // Próba pobrania prawdziwego tokenu (zadziała na fizycznym telefonie w Expo Go)
     if (finalStatus === 'granted' && Device.isDevice) {
       try {
+        console.log('--- Rozpoczynam fizyczne żądanie tokenu z chmury Expo ---');
+        
+        // Wywołanie z jawnie podanym projectId (jeśli go posiadasz)
+        // Jeśli nie masz skonfigurowanego konta Expo EAS, ta funkcja rzuci błędem.
         const tokenData = await Notifications.getExpoPushTokenAsync();
+        
         token = tokenData.data;
+        console.log('✅ Sukces! Pobrano sprzętowy token:', token);
       } catch (e) {
-        // Awaria piaskownicy Snack (brak projectId) -> przechodzimy do symulacji
+        // 🚨 WYCIĄGAMY BŁĄD NA WIERZCH:
+        console.error('❌ Krytyczny błąd wewnątrz getExpoPushTokenAsync:', e.message);
+        console.log('⚠️ Uruchamiam tryb awaryjny (Fallback do SnackSimulated)');
+        
         token = `ExponentPushToken[SnackSimulated_${targetAccountId}]`;
       }
     } else {
