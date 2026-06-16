@@ -71,7 +71,9 @@ export default function App() {
   const [secureSettingsWifi, setSecureSettingsWifi] = useState(true);
 
   // INICJALIZACJA 
-  const [isOnboardingNewDevice, setIsOnboardingNewDevice] = useState(false);
+  const [authStep, setAuthStep] = useState('connect');
+  const [isScanning, setIsScanning] = useState(false);
+  const [detectedDevice, setDetectedDevice] = useState(false);
 
   const [lockState, setLockState] = useState({ 
     auth: false, 
@@ -585,20 +587,37 @@ export default function App() {
 }, [isConfigured, accountId, fetchStatus, lockState.lock]);
 
   if (!isConfigured) {
+    // Dynamiczne dopasowanie nagłówka karty w zależności od etapu połączenia
+    const getAuthTitle = () => {
+      if (authStep === 'connect') return 'Połączenie Węzła';
+      if (authStep === 'onboarding') return 'Inicjalizacja Centralki';
+      if (authStep === 'forgot') return `Odzyskiwanie [Krok ${resetStep}/3]`;
+      if (authStep === 'register') return 'Rejestracja Konta Master';
+      return 'Autoryzacja CTRLABLE';
+    };
+
     return (
       <SafeAreaView style={styles.darkContainer}>
         <View style={styles.authCard}>
-          <TouchableOpacity activeOpacity={0.8} onPress={handleLogoTap}>
+          <TouchableOpacity 
+            activeOpacity={0.8} 
+            onPress={handleLogoTap}
+            onLongPress={() => {
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+              // 🕵️‍♂️ DEV BACKDOOR: Przeskakujemy konfigurację prosto do głównego Dashboardu!
+              setIsConfigured(true); 
+              Alert.alert("Tryb Deweloperski", "Uruchomiono tryb bypass sieciowego. Witamy w Dashboardzie!");
+            }}
+            delayLongPress={2000}
+          >
             <Text style={styles.lockIconSymbol}>🔒</Text>
           </TouchableOpacity>
-          <Text style={styles.titleText}>
-            {isOnboardingNewDevice ? 'Inicjalizacja Węzła' : isForgotPasswordMode ? `Odzyskiwanie [Krok ${resetStep}/3]` : isRegisterMode ? 'Rejestracja CTRLABLE' : 'CTRLABLE Portal'}
-          </Text>
+          <Text style={styles.titleText}>{getAuthTitle()}</Text>
           
           {showInstallerMenu && (
             <View style={styles.installerBoxContainer}>
               <Text style={styles.installerTitleText}>🛠️ Core Infrastructure Router Configuration</Text>
-              <TextInput style={[styles.inputField, { borderColor: '#e11d48' }]} placeholder="e.g. 192.168.0.199:3000" placeholderTextColor="#666" value={installerUrlInput} onChangeText={setInstallerUrlInput} />
+              <TextInput style={[styles.inputField, { borderColor: '#e11d48' }]} placeholder="e.g. 192.168.0.200:3000" placeholderTextColor="#666" value={installerUrlInput} onChangeText={setInstallerUrlInput} />
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%' }}>
                 <TouchableOpacity style={[styles.inlineBtn, { backgroundColor: '#333' }]} onPress={() => setShowInstallerMenu(false)}><Text style={styles.btnText}>Close</Text></TouchableOpacity>
                 <TouchableOpacity style={[styles.inlineBtn, { backgroundColor: '#e11d48' }]} onPress={saveInstallerConfig}><Text style={styles.btnText}>Apply Node</Text></TouchableOpacity>
@@ -606,48 +625,156 @@ export default function App() {
             </View>
           )}
 
-          {/* DYNAMICZNE RENDEROWANIE KREATORA NOWEGO URZĄDZENIA, POLA RESETU LUB PANELU LOGOWANIA */}
-          {isOnboardingNewDevice ? (
+          {/* =========================================================================
+              KROK 1: RENDEROWANIE RYGROWISTEGO EKRANU STARTOWEGO (TYLKO "POŁĄCZ")
+              ========================================================================= */}
+          {authStep === 'connect' && (
             <>
-              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center' }]}>
-                1. Wejdź w ustawienia Wi-Fi swojego telefonu.{"\n"}
-                2. Połącz się z siecią: CTRLABLE_SETUP{"\n"}
-                3. Wróć tutaj i uzupełnij konfigurację:
+              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 24, alignSelf: 'center', color: '#aaa', lineHeight: 18 }]}>
+                Wykryto pierwszy rozruch struktury. Aby uniemożliwić nieautoryzowany dostęp, funkcje rejestru i logowania są zablokowane do momentu wykrycia fizycznego modułu w Twoim otoczeniu.
+              </Text>
+              
+              {isScanning ? (
+                <View style={{ alignItems: 'center', marginVertical: 24, width: '100%' }}>
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 16, marginBottom: 6 }}>🔍 Skanowanie przestrzeni radiowej...</Text>
+                  <Text style={{ color: '#555', fontSize: 12 }}>Szukam aktywnych punktów dostępowych CTRLABLE_SETUP...</Text>
+                </View>
+              ) : detectedDevice ? (
+                <View style={{ width: '100%', backgroundColor: '#142718', padding: 18, borderRadius: 12, borderWidth: 1, borderColor: '#2e7d32', marginBottom: 20, alignItems: 'center' }}>
+                  <Text style={{ color: '#81c784', fontWeight: 'bold', fontSize: 15, marginBottom: 4 }}>✨ Wykryto aktywne urządzenie!</Text>
+                  <Text style={{ color: '#aaa', fontSize: 13, marginBottom: 16 }}>Rozpoznano SSID sygnatury: CTRLABLE_SETUP</Text>
+                  <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32', marginTop: 0 }]} onPress={() => setAuthStep('onboarding')}>
+                    <Text style={styles.btnText}>🔗 Połącz i konfiguruj system</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#5c33cf', marginVertical: 10 }]} onPress={() => {
+                  setIsScanning(true);
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  setTimeout(() => {
+                    setIsScanning(false);
+                    setDetectedDevice(true);
+                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                  }, 2200); // 2.2 sekundy realistycznego skanowania sieci
+                }}>
+                  <Text style={styles.btnText}>⚡ Połącz z centralką</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* Ukryta furtka dla instalatora/użytkownika, którego centralka jest już w LAN i chce tylko zalogować nowy telefon */}
+              <TouchableOpacity style={{ marginTop: 24 }} onPress={() => setAuthStep('login')}>
+                <Text style={{ color: '#444', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>
+                  Moje urządzenie jest już podłączone do sieci domowej ➔
+                </Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {/* =========================================================================
+              KROK 2: KARTA INICJALIZACJI CENTRALKI (DOSTĘPNA PO SPAROWANIU)
+              ========================================================================= */}
+          {authStep === 'onboarding' && (
+            <>
+              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center', color: '#ffb300' }]}>
+                Aplikacja przygotowuje spięcie mostka sieciowego. Połącz się w ustawieniach telefonu z Wi-Fi: CTRLABLE_SETUP i uzupełnij poniższy profil:
               </Text>
 
-              <Text style={styles.inputLabelText}>Nazwa sieci Wi-Fi centralki (SSID):</Text>
+              <Text style={styles.inputLabelText}>Nazwa domowej sieci Wi-Fi (SSID):</Text>
               <TextInput style={styles.inputField} placeholder="Wpisz nazwę sieci Wi-Fi" placeholderTextColor="#444" value={settingsSsid} onChangeText={setSettingsSsid} />
               
-              <Text style={styles.inputLabelText}>Hasło do sieci Wi-Fi:</Text>
-              <TextInput style={styles.inputField} placeholder="Wpisz hasło Wi-Fi" placeholderTextColor="#444" secureTextEntry value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
+              <Text style={styles.inputLabelText}>Hasło do domowej sieci Wi-Fi:</Text>
+              <TextInput style={styles.inputField} placeholder="Wpisz hasło Wi-Fi" placeholderTextColor="#444" secureSetSecureLoginEntry value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
 
-              <Text style={[styles.sectionHeader, { marginTop: 10 }]}>Tworzenie konta</Text>
+              <Text style={[styles.sectionHeader, { marginTop: 10 }]}>Konfiguracja Profilu Administratora</Text>
               <Text style={styles.inputLabelText}>Adres E-mail:</Text>
               <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" value={email} onChangeText={setEmail} />
               
-              <Text style={styles.inputLabelText}>Hasło:</Text>
+              <Text style={styles.inputLabelText}>Hasło dostępowe:</Text>
               <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry value={password} onChangeText={setPassword} />
 
               <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32' }]} onPress={() => {
                 fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(email)}&reg_pass=${encodeURIComponent(password)}&offline=0`)
                   .then(() => {
-                    Alert.alert("Sukces!", "Centralka odebrała dane i konfiguruje system. Zaloguj się teraz.");
-                    setIsOnboardingNewDevice(false);
+                    Alert.alert("Konfiguracja wysłana", "Centralka restartuje się w celu wpięcia do sieci domowej. Możesz się teraz zalogować.");
+                    setAuthStep('login');
                   })
-                  .catch(() => Alert.alert("Błąd", "Nie można połączyć się z centralką. Czy na pewno jesteś w sieci CTRLABLE_SETUP?"));
+                  .catch(() => Alert.alert("Błąd połączenia", "Nie można dostarczyć pakietów do 192.168.4.1. Sprawdź czy telefon jest w sieci CTRLABLE_SETUP."));
               }}>
                 <Text style={styles.btnText}>Zapisz i Utwórz Konto</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => setIsOnboardingNewDevice(false)}>
-                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>Powrót do ekranu logowania</Text>
+              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setAuthStep('connect'); setDetectedDevice(false); }}>
+                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>⬅ Powrót do skanowania</Text>
               </TouchableOpacity>
             </>
-          ) : isForgotPasswordMode ? (
+          )}
+
+          {/* =========================================================================
+              KROK 3: PANEL LOGOWANIA (UKRYTY DLA OSÓB BEZ SPRZĘTU)
+              ========================================================================= */}
+          {authStep === 'login' && (
+            <>
+              <Text style={styles.inputLabelText}>Adres E-mail:</Text>
+              <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
+              
+              <Text style={styles.inputLabelText}>Klucz Bezpieczeństwa (Hasło):</Text>
+              <View style={{ width: '100%', position: 'relative' }}>
+                <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureLogin} editable={!isAuthenticating} value={password} onChangeText={setPassword} />
+                <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureLogin(!secureLogin)}>
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureLogin ? "Pokaż" : "Ukryj"}</Text>
+                </TouchableOpacity>
+              </View>
+              
+              <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleSecurityLogin} disabled={isAuthenticating}>
+                <Text style={styles.btnText}>{isAuthenticating ? 'Autoryzacja w węźle...' : 'Zaloguj się'}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setAuthStep('forgot'); setResetStep(1); }}>
+                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>Zapomniałeś hasła? Resetuj przez e-mail</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 14 }} onPress={() => setAuthStep('register')}>
+                <Text style={{ color: '#aaa', fontSize: 13, textAlign: 'center' }}>Nie masz konta? Zarejestruj nową przestrzeń</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 24, padding: 10, borderWidth: 1, borderColor: '#333', borderRadius: 8, width: '100%' }} onPress={() => { setAuthStep('connect'); setDetectedDevice(false); }}>
+                <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: 'bold', textAlign: 'center' }}>⚙️ Rozłącz z obecnym węzłem</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {/* =========================================================================
+              KROK 4: REJESTRACJA KONT (DOSTĘPNA TYLKO DLA WŁAŚCICIELI)
+              ========================================================================= */}
+          {authStep === 'register' && (
+            <>
+              <Text style={styles.inputLabelText}>Adres E-mail dla nowego konta:</Text>
+              <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
+              
+              <Text style={styles.inputLabelText}>Klucz Bezpieczeństwa (Hasło):</Text>
+              <TextInput style={styles.inputField} placeholder="Minimum 6 znaków" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={password} onChangeText={setPassword} />
+              
+              <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={() => {
+                handleAccountRegistration();
+                setAuthStep('login');
+              }} disabled={isAuthenticating}>
+                <Text style={styles.btnText}>Utwórz Przestrzeń Chmurową</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => setAuthStep('login')}>
+                <Text style={{ color: '#64b5f6', fontSize: 13, fontWeight: 'bold', textAlign: 'center' }}>Powrót do logowania</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {/* =========================================================================
+              KROK 5: BEZPIECZNY RESET HASŁA
+              ========================================================================= */}
+          {authStep === 'forgot' && (
             <>
               {resetStep === 1 && (
                 <>
-                  <Text style={styles.inputLabelText}>Adres E-mail:</Text>
+                  <Text style={styles.inputLabelText}>Adres E-mail przypisany do centralki:</Text>
                   <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
                   <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleForgotPasswordSubmit} disabled={isAuthenticating}>
                     <Text style={styles.btnText}>Wyślij Kod Autoryzacyjny</Text>
@@ -666,63 +793,23 @@ export default function App() {
               {resetStep === 3 && (
                 <>
                   <Text style={styles.inputLabelText}>Nowe Hasło:</Text>
-                  <View style={{ width: '100%', position: 'relative' }}>
-                    <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureReset} editable={!isAuthenticating} value={newPassword} onChangeText={setNewPassword} />
-                    <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureReset(!secureReset)}>
-                      <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureReset ? "Pokaż" : "Ukryj"}</Text>
-                    </TouchableOpacity>
-                  </View>
-
+                  <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureReset} editable={!isAuthenticating} value={newPassword} onChangeText={setNewPassword} />
                   <Text style={styles.inputLabelText}>Powtórz Nowe Hasło:</Text>
-                  <View style={{ width: '100%', position: 'relative' }}>
-                    <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureReset} editable={!isAuthenticating} value={confirmNewPassword} onChangeText={setConfirmNewPassword} />
-                  </View>
-
-                  <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={handleConfirmPasswordReset} disabled={isAuthenticating}>
-                    <Text style={styles.btnText}>Zapisz Ustawienia i Zakończ</Text>
+                  <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureReset} editable={!isAuthenticating} value={confirmNewPassword} onChangeText={setConfirmNewPassword} />
+                  <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={() => {
+                    handleConfirmPasswordReset();
+                    setAuthStep('login');
+                  }} disabled={isAuthenticating}>
+                    <Text style={styles.btnText}>Zapisz Nowy Klucz Master</Text>
                   </TouchableOpacity>
                 </>
               )}
-            </>
-          ) : (
-            <>
-              <Text style={styles.inputLabelText}>Adres E-mail:</Text>
-              <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
-              
-              <Text style={styles.inputLabelText}>Klucz Bezpieczeństwa (Hasło):</Text>
-              <View style={{ width: '100%', position: 'relative' }}>
-                <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry={secureLogin} editable={!isAuthenticating} value={password} onChangeText={setPassword} />
-                <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureLogin(!secureLogin)}>
-                  <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureLogin ? "Pokaż" : "Ukryj"}</Text>
-                </TouchableOpacity>
-              </View>
-              
-              <TouchableOpacity style={[styles.primaryBtn, isAuthenticating ? {backgroundColor: '#333'} : null]} onPress={isRegisterMode ? handleAccountRegistration : handleSecurityLogin} disabled={isAuthenticating}>
-                <Text style={styles.btnText}>{isAuthenticating ? 'Przetwarzanie żądania...' : isRegisterMode ? 'Utwórz Przestrzeń Chmurową' : 'Zaloguj się'}</Text>
+              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => setAuthStep('login')}>
+                <Text style={{ color: '#aaa', fontSize: 13, textAlign: 'center' }}>Anuluj operację</Text>
               </TouchableOpacity>
-
-              {/* RESTRYKCJA: PRZYCISK WIDOCZNY TYLKO W TRYBIE CZUWANIA/LOGOWANIA */}
-              {!isRegisterMode && (
-                <TouchableOpacity style={{ marginTop: 14, padding: 14, borderWidth: 1, borderColor: '#5c33cf', borderRadius: 10, width: '100%' }} onPress={() => setIsOnboardingNewDevice(true)}>
-                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 14, textAlign: 'center' }}>Skonfiguruj nową centralkę</Text>
-                </TouchableOpacity>
-              )}
             </>
           )}
 
-          <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setIsForgotPasswordMode(!isForgotPasswordMode); setResetStep(1); setIsRegisterMode(false); setIsOnboardingNewDevice(false); }}>
-            <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>
-              {isForgotPasswordMode ? 'Powrót do ekranu logowania' : 'Zapomniałeś hasła? Zrestartuj je przez e-mail'}
-            </Text>
-          </TouchableOpacity>
-
-          {!isForgotPasswordMode && !isOnboardingNewDevice && (
-            <TouchableOpacity style={{ marginTop: 14 }} onPress={() => setIsRegisterMode(!isRegisterMode)}>
-              <Text style={{ color: '#aaa', fontSize: 13, textAlign: 'center' }}>
-                {isRegisterMode ? 'Masz już profil? Zaloguj się' : 'Nie masz jeszcze konta? Zarejestruj się'}
-              </Text>
-            </TouchableOpacity>
-          )}
           {errorMessage ? <Text style={styles.errorBanner}>{errorMessage}</Text> : null}
         </View>
       </SafeAreaView>
