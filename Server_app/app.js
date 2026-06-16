@@ -168,7 +168,7 @@ export default function App() {
 
     setIsAuthenticating(true);
 
-    // 🌐 Strzał do Twojego oficjalnego endpointu
+    // Strzał do Twojego oficjalnego endpointu
     fetch(`${backendUrl}/api/auth/register`, {
       method: 'POST',
       headers: {

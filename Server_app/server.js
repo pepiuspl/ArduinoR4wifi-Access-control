@@ -242,11 +242,14 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/auth/login' && req.method === 'POST') {
         const cleanEmail = body.email.trim().toLowerCase();
         const result = await dbPool.query('SELECT * FROM accounts WHERE email = $1', [cleanEmail]);
+        
         if (result.rows.length === 0) {
           writeToLocalLogFile('Auth Rejection', `Failed login attempt: ${cleanEmail}`);
           return sendJSON(res, 401, { error: "Invalid credentials" });
         }
+        
         const valid = await bcrypt.compare(body.password, result.rows[0].password_hash);
+        
         if (!valid) {
           writeToLocalLogFile('Auth Rejection', `Failed login: ${cleanEmail} (Password hash mismatch)`);
           
@@ -261,6 +264,13 @@ const server = http.createServer(async (req, res) => {
 
           return sendJSON(res, 401, { error: "Invalid credentials" });
         }
+
+        // TUTAJ BYŁA CZARNA DZIURA! DODAJEMY ODPOWIEDŹ DLA UDANEGO LOGOWANIA:
+        writeToLocalLogFile('Authentication Panel', `User logged in successfully: ${cleanEmail}`);
+        return sendJSON(res, 200, { 
+          status: "logged_in", 
+          accountId: result.rows[0].id 
+        });
       }
 
       // =========================================================================
