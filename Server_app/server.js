@@ -71,8 +71,16 @@ function getFactoryAdminPassword(mac) {
 }
 
 const unlockQueues = {};
+// actualLockStates[mac] = { state: boolean, timestamp: number, otaProgress: number }
+// `state` is GROUND TRUTH reported by the hardware itself (the "opened" flag sent
+// on every /api/hardware/poll request) - it must never be set optimistically from
+// the app side, or the app ends up showing "open" before the relay has fired.
 const actualLockStates = {};
-const learningQueues = {}; 
+const learningQueues = {};
+// pendingUnlocks[mac] = timestamp of the most recent /api/unlock request that the
+// hardware has not yet confirmed. Lets ANY connected client show a "pending"
+// state until the lock reports back that it has actually opened.
+const pendingUnlocks = {};
 
 function sendJSON(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -395,18 +403,28 @@ const server = http.createServer(async (req, res) => {
         });
         const lastState = actualLockStates[primaryMac];
         const isOffline = !lastState || (Date.now() - lastState.timestamp) > 10000;
-        
+
+        // Stan rygla widziany przez aplikację - ZAWSZE pochodzi z faktycznego
+        // zgłoszenia sprzętu (lastState.state), nigdy nie jest zgadywany.
+        // Jeśli komenda /api/unlock czeka jeszcze na potwierdzenie ze sprzętu,
+        // pokazujemy 'pending', żeby UI nie skakało od razu do "zamknięte".
+        let lockValue = 'offline';
+        if (!isOffline) {
+          if (lastState.state === true) {
+            lockValue = true;
+          } else {
+            const pendingSince = pendingUnlocks[primaryMac];
+            const stillPending = pendingSince && (Date.now() - pendingSince) < 6000;
+            lockValue = stillPending ? 'pending' : false;
+          }
+        }
 
         //DANE Z BAZY W POSTACI JSON
         return sendJSON(res, 200, {
           auth: true,
           account: appAccountContext, 
           mode: isOffline ? 'Offline' : primaryDevice.operational_mode,
-          lock: (() => {
-            const lastState = actualLockStates[primaryMac];
-            if (!lastState || (Date.now() - lastState.timestamp) > 10000) {return 'offline';}
-            return lastState.state;
-          })(), 
+          lock: lockValue, 
           total: processedUsersList.length,
           users: processedUsersList, 
           logs: localizedLogsFeed,
@@ -544,24 +562,22 @@ const server = http.createServer(async (req, res) => {
           unlockQueues[targetMac] = true; 
           unlockQueues['00:00:00:00:00:00'] = true;
 
-          // 🌟 POPRAWKA: Ustawiamy stan rygla na TRUE natychmiast na poziomie serwera!
-          // Dzięki temu aplikacja przy najbliższym zapytaniu od razu zobaczy status OTWARTY.
-          if (typeof actualLockStates === 'object') {
-            actualLockStates[targetMac] = true;
-          }
+          // 🌟 Zapisujemy TYLKO czas zgłoszenia komendy. Realny stan rygla
+          // (`actualLockStates`) zostanie zaktualizowany wyłącznie wtedy, gdy
+          // sprzęt sam potwierdzi otwarcie na kolejnym pollu (pole "opened").
+          // Dzięki temu aplikacja nigdy nie pokaże "OTWARTY" zanim zamek
+          // faktycznie się fizycznie odblokuje.
+          pendingUnlocks[targetMac] = Date.now();
 
           await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
           writeToLocalLogFile('API Control Command', `Dispatched remote unlock trigger down to: ${targetMac}`);
           
+          // Bezpiecznik: jeśli sprzęt jest offline i nigdy nie odpowie, kolejka
+          // nie powinna zostać aktywna w nieskończoność.
           setTimeout(() => { 
             unlockQueues[targetMac] = false; 
             unlockQueues['00:00:00:00:00:00'] = false;
-            
-            // Po 5 sekundach (gdy zamek się zablokuje), serwer bezpiecznie przywróci false
-            if (typeof actualLockStates === 'object') {
-              actualLockStates[targetMac] = false;
-            }
-          }, 5000); 
+          }, 8000); 
         }
         return sendJSON(res, 200, { status: "ok" });
       }
@@ -820,6 +836,17 @@ const server = http.createServer(async (req, res) => {
         try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
     };
 
+    // 🌟 Identyfikujemy urządzenie. Wcześniej ten handler odwoływał się do
+    // niezadeklarowanej zmiennej "mac", co rzucało ReferenceError DOKŁADNIE
+    // po wysłaniu nagłówków 200 - urządzenie dostawało Content-Length, ale
+    // nigdy nie dostawało body, i wyrzucało timeout po 10s. Cała ścieżka
+    // "pull" OTA była przez to całkowicie niesprawna.
+    let mac = query.mac ? query.mac.toUpperCase() : null;
+    if (!mac) {
+      const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
+      mac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
+    }
+
     if (!latestFirmwareFile) {
         forceLog("Zamek próbował pobrać soft, ale brak zdefiniowanego pliku w pamięci serwera.");
         res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -830,7 +857,7 @@ const server = http.createServer(async (req, res) => {
 
     if (fs.existsSync(filePath)) {
         const fileSize = fs.statSync(filePath).size;
-        forceLog(`Zamek podłączył się. Rozpoczynam strumieniowanie pliku: ${latestFirmwareFile} (${fileSize} bajtów) do Arduino...`);
+        forceLog(`Zamek [${mac}] podłączył się. Rozpoczynam strumieniowanie pliku: ${latestFirmwareFile} (${fileSize} bajtów) do Arduino...`);
 
         res.writeHead(200, { 
             'Content-Type': 'application/octet-stream',
@@ -840,27 +867,29 @@ const server = http.createServer(async (req, res) => {
         const readStream = fs.createReadStream(filePath);
         let transmittedBytes = 0;
 
-        if (!actualLockStates[mac]) actualLockStates[mac] = {};
-        actualLockStates[mac].otaProgress = 0;
+        // Scalamy z istniejącym rekordem (stan rygla) - nigdy nie nadpisujemy całości.
+        actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, timestamp: Date.now() };
 
         readStream.on('data', (chunk) => {
           transmittedBytes += chunk.length;
           const currentPercentage = Math.round((transmittedBytes / fileSize) * 100);
-          
-          actualLockStates[mac].otaProgress = currentPercentage;
+
+          // Odświeżamy też "timestamp", żeby urządzenie nie pokazało się jako
+          // offline w trakcie długiego transferu (w tym czasie nie pollinguje).
+          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: currentPercentage, timestamp: Date.now() };
         });
 
         readStream.pipe(res);
 
         readStream.on('end', () => {
             otaUpdatePending = false;
-            if (actualLockStates[mac]) actualLockStates[mac].otaProgress = 100;
-            forceLog(`Sukces! Strumieniowanie pliku ${latestFirmwareFile} do zamka zakończone pomyślnie.`);
+            actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100, timestamp: Date.now() };
+            forceLog(`Sukces! Strumieniowanie pliku ${latestFirmwareFile} do zamka [${mac}] zakończone pomyślnie.`);
         });
 
         readStream.on('error', (err) => {
           otaUpdatePending = false;
-          forceLog(`Błąd podczas przesyłania pliku do zamka: ${err.message}`);
+          forceLog(`Błąd podczas przesyłania pliku do zamka [${mac}]: ${err.message}`);
         });
 
     } else {
@@ -951,19 +980,35 @@ const server = http.createServer(async (req, res) => {
 
     const devLookup = await dbPool.query(queryText, queryParams);
     if (devLookup.rows.length > 0) {
-      actualLockStates[mac] = {
-      state: actualLockStates[mac]?.state || false,
-      timestamp: Date.now()};
       currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
     }
   }
 
+  // 🌟 PRAWDA SPRZĘTOWA: centralka w KAŻDYM pollu zgłasza realny stan
+  // przekaźnika w parametrze "opened" (1 = drzwi fizycznie otwarte, 0 = zamknięte).
+  // To jest JEDYNE miejsce w całym serwerze, gdzie ustawiamy actualLockStates[mac].state -
+  // nigdy nie zgadujemy stanu na podstawie samego wysłania komendy z aplikacji,
+  // bo wtedy UI pokazywałoby "OTWARTY" zanim zamek faktycznie się odblokuje.
+  if (query.opened !== undefined) {
+    const reportedOpen = query.opened === '1';
+    actualLockStates[mac] = {
+      ...(actualLockStates[mac] || {}),
+      state: reportedOpen,
+      timestamp: Date.now()
+    };
+    if (reportedOpen) delete pendingUnlocks[mac];
+  } else {
+    // Starszy firmware bez pola "opened" - podtrzymujemy tylko heartbeat,
+    // nie zmieniamy ostatniego znanego stanu rygla.
+    actualLockStates[mac] = { state: false, ...(actualLockStates[mac] || {}), timestamp: Date.now() };
+  }
+
   // PRZYWRÓCENIE DZIAŁANIA PRZEKAŹNIKA (Konsumpcja tokenu otwierania z kolejki)
+  // Zerujemy TYLKO kolejkę komend - realny stan rygla (powyżej) pochodzi
+  // wyłącznie z potwierdzenia sprzętu, nigdy z samego faktu wysłania komendy.
   if (unlockAction) {
     unlockQueues[mac] = false;
     unlockQueues['00:00:00:00:00:00'] = false;
-    actualLockStates[mac] = true;
-    setTimeout(() => { actualLockStates[mac] = false; }, 2000); 
   }
 
   // PANCERNA LOGIKA OTA (Odporna na pętle i sterowana z aplikacji)

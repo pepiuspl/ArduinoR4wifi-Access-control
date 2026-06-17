@@ -27,6 +27,40 @@ try {
   };
 }
 
+// TRYB LOKALNY: gdy centralka jest skonfigurowana jako w pełni offline,
+// ZAWSZE nadaje swój własny punkt dostępu pod tym stałym adresem - więc nie
+// trzeba żadnego wykrywania urządzenia w sieci domowej.
+const LOCAL_BASE_URL = 'http://192.168.4.1';
+
+// Niektóre akcje mają inną nazwę ścieżki w lokalnym API wbudowanym w firmware
+// niż w API serwera chmurowego (np. "/api/user/delete" -> "/api/delete_user").
+const LOCAL_ENDPOINT_MAP = {
+  '/api/unlock': '/api/unlock',
+  '/api/toggle_learn': '/api/toggle_learn',
+  '/api/user/rename': '/api/rename_user',
+  '/api/user/toggle_active': '/api/toggle_user_active',
+  '/api/user/delete': '/api/delete_user',
+};
+
+// Buduje pełny URL do lokalnego API centralki, dopisując parametry z payloadu
+// (firmware lokalnie przyjmuje wszystko jako parametry GET, nie jako JSON body)
+// oraz hasło administratora wymagane przez zapisujące endpointy.
+function buildLocalRequestUrl(endpoint, payload, adminPass) {
+  const qIdx = endpoint.indexOf('?');
+  const basePath = qIdx === -1 ? endpoint : endpoint.substring(0, qIdx);
+  const existingQuery = qIdx === -1 ? '' : endpoint.substring(qIdx + 1);
+  const localPath = LOCAL_ENDPOINT_MAP[basePath] || basePath;
+
+  const parts = existingQuery ? [existingQuery] : [];
+  if (payload) {
+    Object.keys(payload).forEach((key) => {
+      parts.push(`${key}=${encodeURIComponent(payload[key])}`);
+    });
+  }
+  parts.push(`pass=${encodeURIComponent(adminPass || '')}`);
+  return `${LOCAL_BASE_URL}${localPath}?${parts.join('&')}`;
+}
+
 export default function App() {
   let [backendUrl, setBackendUrl] = useState('http://185.101.191.76:3000'); 
   const [email, setEmail] = useState('');
@@ -36,6 +70,12 @@ export default function App() {
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isRegisterMode, setIsRegisterMode] = useState(false); 
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
+
+  // TRYB LOKALNY / OFFLINE: brak konta w chmurze, aplikacja rozmawia
+  // bezpośrednio z centralką po jej własnym AP (http://192.168.4.1),
+  // autoryzując zapisy algorytmicznym "fabrycznym" hasłem urządzenia.
+  const [isLocalMode, setIsLocalMode] = useState(false);
+  const [localAdminPass, setLocalAdminPass] = useState('');
   
   // STANY I FUNKCJA PUSH
   const [pushEntries, setPushEntries] = useState(true);
@@ -99,6 +139,9 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState('dashboard'); 
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuAnimation = useRef(new Animated.Value(-width * 0.75)).current;
+  // Znacznik czasu ostatniego /api/unlock - chroni stan 'pending' przed
+  // nadpisaniem przez chwilowo nieaktualny odczyt z serwera (patrz fetchStatus).
+  const pendingUnlockSinceRef = useRef(0);
 
   const [logoTapCount, setLogoTapCount] = useState(0);
   const [showInstallerMenu, setShowInstallerMenu] = useState(false);
@@ -155,6 +198,37 @@ export default function App() {
     } catch (e) {
       Alert.alert('Storage Error', 'Failed to save configuration profile.');
     }
+  };
+
+  // INICJALIZACJA W TRYBIE LOKALNYM (BEZ INTERNETU): centralka nigdy nie
+  // próbuje połączyć się z żadną siecią domową i nigdy nie wymaga konta w
+  // chmurze - aplikacja rozmawia z nią wyłącznie po jej własnym punkcie
+  // dostępu (CTRLABLE_SETUP / 192.168.4.1), autoryzując zapisy algorytmicznym
+  // hasłem fabrycznym, które centralka oddaje od razu po konfiguracji.
+  const handleOfflineSetup = () => {
+    setIsAuthenticating(true);
+    fetch(`http://192.168.4.1/save_setup?s=OFFLINE&p=NONE&m=${encodeURIComponent(email)}&reg_pass=&offline=1`)
+      .then((res) => res.json())
+      .then(async (data) => {
+        setIsAuthenticating(false);
+        if (!data || !data.admin_pass) throw new Error('missing admin_pass');
+
+        await AsyncStorage.setItem('@lock_local_mode', '1');
+        await AsyncStorage.setItem('@lock_local_admin_pass', data.admin_pass);
+        setLocalAdminPass(data.admin_pass);
+        setIsLocalMode(true);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        Alert.alert(
+          "Tryb Lokalny Aktywny",
+          "Centralka działa teraz całkowicie bez internetu - karty RFID i przycisk fizyczny pracują od razu. Zarządzanie z aplikacji odbywa się przez sieć Wi-Fi centralki (CTRLABLE_SETUP), więc telefon musi pozostać w tej sieci."
+        );
+        resetUiToDefault();
+        setIsConfigured(true);
+      })
+      .catch(() => {
+        setIsAuthenticating(false);
+        Alert.alert('Błąd połączenia', 'Nie można dostarczyć pakietów do 192.168.4.1. Sprawdź czy telefon jest w sieci CTRLABLE_SETUP.');
+      });
   };
 
   const handleAccountRegistration = () => {
@@ -253,14 +327,18 @@ export default function App() {
         });
       }
 
-      // 2. Czyścimy pamięć lokalną sesji w telefonie
+      // 2. Czyścimy pamięć lokalną sesji w telefonie (konto w chmurze i/lub Tryb Lokalny)
       await AsyncStorage.removeItem('@lock_account_id');
+      await AsyncStorage.removeItem('@lock_local_mode');
+      await AsyncStorage.removeItem('@lock_local_admin_pass');
       
-      // 3. 🛠️ TWOJE RESETOWANIE INTERFEJSU (UI):
+      // 3. TWOJE RESETOWANIE INTERFEJSU (UI):
       menuAnimation.setValue(-width * 0.75); 
       setIsMenuOpen(false);                  
       setCurrentScreen('dashboard');          
       setAccountId(null);                    
+      setIsLocalMode(false);
+      setLocalAdminPass('');
       setIsConfigured(false);                
       
       console.log('🔒 Pełne bezpieczne wylogowanie wykonane pomyślnie.');
@@ -469,8 +547,59 @@ export default function App() {
       });
   };
 
+  // Scala nową odpowiedź z poprzednim stanem, chroniąc optymistyczny stan
+  // 'pending' przed nadpisaniem przez chwilowo nieaktualne 'false' - serwer
+  // / centralka mogły jeszcze nie zdążyć przetworzyć komendy odblokowania.
+  // Bez tego UI potrafiło pokazać "zamknięty" na chwilę i nigdy nie złapać
+  // momentu, w którym zamek faktycznie się otwiera.
+  const mergeLockState = (prevState, data) => {
+    let nextLock = data.lock;
+    if (
+      prevState.lock === 'pending' &&
+      data.lock === false &&
+      Date.now() - pendingUnlockSinceRef.current < 4000
+    ) {
+      nextLock = 'pending';
+    }
+    return {
+      ...prevState,
+      ...data,
+      lock: nextLock,
+      version: data.version || prevState.version || '2.9.4',
+    };
+  };
+
   const fetchStatus = useCallback(() => {
-  if (!isConfigured || !accountId) return;
+  if (!isConfigured) return;
+
+  if (isLocalMode) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+
+    fetch(`${LOCAL_BASE_URL}/api/data?pass=${encodeURIComponent(localAdminPass)}`, { signal: controller.signal })
+      .then((res) => {
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error('Network response was not ok');
+        return res.json();
+      })
+      .then((data) => {
+        if (data.auth === false) {
+          setErrorMessage('Lokalne hasło administratora jest nieprawidłowe.');
+          return;
+        }
+        setErrorMessage('');
+        setLockState(prevState => mergeLockState(prevState, data));
+      })
+      .catch((err) => {
+        clearTimeout(timeoutId);
+        setLockState(prevState => ({ ...prevState, lock: 'offline' }));
+        setErrorMessage('Brak połączenia z centralką (Offline)');
+        console.error('Fetch status error (local):', err.message);
+      });
+    return;
+  }
+
+  if (!accountId) return;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
@@ -490,10 +619,7 @@ export default function App() {
       if (data.auth === false) {
         setIsConfigured(false);
       } else {
-        setLockState(prevState => ({
-          ...data,
-          version: data.version || prevState.version || '2.9.4'
-        }));
+        setLockState(prevState => mergeLockState(prevState, data));
       }
     })
     .catch((err) => {
@@ -507,14 +633,31 @@ export default function App() {
       setErrorMessage(`Brak połączenia z centralką (Offline)`);
       console.error("Fetch status error:", err.message);
     });
-}, [isConfigured, accountId, backendUrl]);
+}, [isConfigured, accountId, backendUrl, isLocalMode, localAdminPass]);
 
   const executeCommand = (endpoint, payload = null) => {
   // Wywołujemy Twoją haptykę (wibrację) natychmiast po dotknięciu
   Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
   if (endpoint === '/api/unlock') {
+    pendingUnlockSinceRef.current = Date.now();
     setLockState(prevState => ({ ...prevState, lock: 'pending' }));
+  }
+
+  if (isLocalMode) {
+    const localUrl = buildLocalRequestUrl(endpoint, payload, localAdminPass);
+    fetch(localUrl)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+        fetchStatus();
+      })
+      .catch((error) => {
+        if (endpoint === '/api/unlock') {
+          setLockState(prevState => ({ ...prevState, lock: false }));
+        }
+        setErrorMessage(`Transaction failure: ${error.message}`);
+      });
+    return;
   }
 
   const method = payload ? 'POST' : 'GET';
@@ -540,6 +683,7 @@ export default function App() {
       setErrorMessage(`Transaction failure: ${error.message}`);
     });
 };
+
 
   const handleToggleLearn = () => {
     if (lockState.mode === 'Uczenie') {
@@ -644,14 +788,25 @@ export default function App() {
           // Brak adresu -> interfejs naturalnie zostanie na ekranie parowania
         }
 
-        // KROK B: Pobieramy ID konta (czy jest zalogowany)
-        const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
-        
-        if (storedAccountId) {
-          setAccountId(parseInt(storedAccountId, 10));
+        // KROK A.2: Czy urządzenie zostało skonfigurowane w Trybie Lokalnym (Offline)?
+        const storedLocalMode = await AsyncStorage.getItem('@lock_local_mode');
+        const storedLocalPass = await AsyncStorage.getItem('@lock_local_admin_pass');
+
+        if (storedLocalMode === '1' && storedLocalPass) {
+          setIsLocalMode(true);
+          setLocalAdminPass(storedLocalPass);
           resetUiToDefault();
-          setIsConfigured(true); // Wpuszczamy do Dashboardu
-          registerForPushNotificationsAsync(parseInt(storedAccountId, 10));
+          setIsConfigured(true); // Wpuszczamy do Dashboardu - bez konta w chmurze
+        } else {
+          // KROK B: Pobieramy ID konta (czy jest zalogowany) - tylko w trybie chmury
+          const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
+
+          if (storedAccountId) {
+            setAccountId(parseInt(storedAccountId, 10));
+            resetUiToDefault();
+            setIsConfigured(true); // Wpuszczamy do Dashboardu
+            registerForPushNotificationsAsync(parseInt(storedAccountId, 10));
+          }
         }
       } catch (e) {
         console.error("Błąd odczytu pamięci podręcznej:", e);
@@ -666,7 +821,7 @@ export default function App() {
   }, [resetUiToDefault]); 
 
   useEffect(() => {
-  if (!isConfigured || !accountId) return;
+  if (!isConfigured || (!accountId && !isLocalMode)) return;
 
   fetchStatus(); // Pobierz stan od razu
   
@@ -674,7 +829,7 @@ export default function App() {
   
   const interval = setInterval(fetchStatus, dynamicIntervalTime);
   return () => clearInterval(interval);
-}, [isConfigured, accountId, fetchStatus, lockState.lock]);
+}, [isConfigured, accountId, isLocalMode, fetchStatus, lockState.lock]);
 
   if (!isConfigured) {
     // Dynamiczne dopasowanie nagłówka karty w zależności od etapu połączenia
@@ -837,7 +992,7 @@ export default function App() {
               <Text style={styles.inputLabelText}>Hasło dostępowe:</Text>
               <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry value={password} onChangeText={setPassword} />
 
-              <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32' }]} onPress={() => {
+              <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32' }, isAuthenticating ? { opacity: 0.6 } : null]} disabled={isAuthenticating} onPress={() => {
                 fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(email)}&reg_pass=${encodeURIComponent(password)}&offline=0`)
                   .then(() => {
                     Alert.alert("Konfiguracja wysłana", "Centralka restartuje się w celu wpięcia do sieci domowej. Możesz się teraz zalogować.");
@@ -846,6 +1001,29 @@ export default function App() {
                   .catch(() => Alert.alert("Błąd połączenia", "Nie można dostarczyć pakietów do 192.168.4.1. Sprawdź czy telefon jest w sieci CTRLABLE_SETUP."));
               }}>
                 <Text style={styles.btnText}>Zapisz i Utwórz Konto</Text>
+              </TouchableOpacity>
+
+              <View style={{ flexDirection: 'row', alignItems: 'center', width: '100%', marginVertical: 18 }}>
+                <View style={{ flex: 1, height: 1, backgroundColor: '#222' }} />
+                <Text style={{ color: '#555', fontSize: 12, marginHorizontal: 10 }}>ALBO</Text>
+                <View style={{ flex: 1, height: 1, backgroundColor: '#222' }} />
+              </View>
+
+              <TouchableOpacity
+                style={[styles.primaryBtn, { backgroundColor: '#1c1917', borderWidth: 1, borderColor: '#444' }, isAuthenticating ? { opacity: 0.6 } : null]}
+                disabled={isAuthenticating}
+                onPress={() => {
+                  Alert.alert(
+                    "Tryb Lokalny (bez internetu)",
+                    "Centralka nigdy nie połączy się z internetem ani z chmurą. Karty RFID i przycisk fizyczny będą działać od razu, a zarządzanie z aplikacji odbędzie się przez sieć Wi-Fi samej centralki. Nie potrzebujesz konta e-mail. Kontynuować?",
+                    [
+                      { text: "Anuluj", style: "cancel" },
+                      { text: "Tak, ustaw lokalnie", onPress: handleOfflineSetup }
+                    ]
+                  );
+                }}
+              >
+                <Text style={styles.btnText}>🔌 Skonfiguruj bez internetu (Tryb Lokalny)</Text>
               </TouchableOpacity>
 
               <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setAuthStep('connect'); setDetectedDevice(false); }}>
@@ -1006,6 +1184,11 @@ export default function App() {
           {currentScreen === 'dashboard' && (
             <ScrollView contentContainerStyle={styles.scrollWrapper}>
               <Text style={styles.screenHeaderText}>📱 Dashboard</Text>
+              {isLocalMode && (
+                <View style={{ backgroundColor: '#1c1917', borderWidth: 1, borderColor: '#444', borderRadius: 10, padding: 10, marginBottom: 14 }}>
+                  <Text style={{ color: '#aaa', fontSize: 12, textAlign: 'center', fontWeight: 'bold' }}>🔌 TRYB LOKALNY - bez internetu, bez konta w chmurze</Text>
+                </View>
+              )}
               {errorMessage ? <View style={styles.errorCard}><Text style={styles.errorTextInsideCard}>⚠️ {errorMessage}</Text></View> : null}
               <View style={styles.statusBox}>
                 <Text style={styles.label}>Stan Zamka:</Text>
@@ -1220,55 +1403,68 @@ export default function App() {
             <ScrollView contentContainerStyle={styles.scrollWrapper} keyboardShouldPersistTaps="handled">
               <Text style={styles.screenHeaderText}>⚙️ Konfiguracja Infrastruktury</Text>
               
-              <View style={styles.card}>
-                <Text style={styles.sectionHeader}>👤 Dane Profilu</Text>
-                <Text style={[styles.inputLabelText, {color: '#81c784', fontSize: 15, fontWeight:'600'}]}>✓ {lockState.account ? lockState.account.email : email}</Text>
-              </View>
+              {!isLocalMode && (
+                <View style={styles.card}>
+                  <Text style={styles.sectionHeader}>👤 Dane Profilu</Text>
+                  <Text style={[styles.inputLabelText, {color: '#81c784', fontSize: 15, fontWeight:'600'}]}>✓ {lockState.account ? lockState.account.email : email}</Text>
+                </View>
+              )}
 
-              {/* FORMULARZ: ZMIANA HASŁA APLIKACJI */}
-              <View style={styles.card}>
-                <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta Aplikacji</Text>
-                <Text style={styles.inputLabelText}>Nowe Hasło Logowania:</Text>
-                <View style={{ width: '100%', position: 'relative' }}>
-                  <TextInput 
-                    style={styles.inputField} 
-                    secureTextEntry={secureSettingsApp} 
-                    placeholder="Wprowadź nowe hasło do aplikacji" 
-                    placeholderTextColor="#555" 
-                    value={settingsAppPass} 
-                    onChangeText={setSettingsAppPass} 
-                  />
-                  <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureSettingsApp(!secureSettingsApp)}>
-                    <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureSettingsApp ? "Pokaż" : "Ukryj"}</Text>
+              {/* FORMULARZ: ZMIANA HASŁA APLIKACJI (niedostępne w Trybie Lokalnym - brak konta) */}
+              {!isLocalMode && (
+                <View style={styles.card}>
+                  <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta Aplikacji</Text>
+                  <Text style={styles.inputLabelText}>Nowe Hasło Logowania:</Text>
+                  <View style={{ width: '100%', position: 'relative' }}>
+                    <TextInput 
+                      style={styles.inputField} 
+                      secureTextEntry={secureSettingsApp} 
+                      placeholder="Wprowadź nowe hasło do aplikacji" 
+                      placeholderTextColor="#555" 
+                      value={settingsAppPass} 
+                      onChangeText={setSettingsAppPass} 
+                    />
+                    <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureSettingsApp(!secureSettingsApp)}>
+                      <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureSettingsApp ? "Pokaż" : "Ukryj"}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+
+              {/* FORMULARZ: ZMIANA HASŁA WI-FI ZAMKA (niedostępne w Trybie Lokalnym) */}
+              {isLocalMode ? (
+                <View style={styles.card}>
+                  <Text style={styles.sectionHeader}>📶 Sieć Wi-Fi Centralki</Text>
+                  <Text style={styles.inputLabelText}>
+                    Centralka działa w Trybie Lokalnym i nie łączy się z żadną siecią domową - aplikacja rozmawia z nią przez jej własny punkt dostępu CTRLABLE_SETUP. Aby przejść do trybu online z kontem w chmurze, przywróć ustawienia fabryczne centralki i skonfiguruj ją ponownie.
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.card}>
+                  <Text style={styles.sectionHeader}>📶 Zmiana Konfiguracji Sieci Wi-Fi Zamka</Text>
+                  <Text style={styles.inputLabelText}>Identyfikator Sieci (SSID):</Text>
+                  <TextInput style={styles.inputField} placeholder="Nazwa nowej sieci Wi-Fi" placeholderTextColor="#555" value={settingsSsid} onChangeText={setSettingsSsid} />
+                  
+                  <Text style={styles.inputLabelText}>Hasło do Sieci:</Text>
+                  <View style={{ width: '100%', position: 'relative' }}>
+                    <TextInput 
+                      style={styles.inputField} 
+                      secureTextEntry={secureSettingsWifi} 
+                      placeholder="Hasło nowej sieci Wi-Fi" 
+                      placeholderTextColor="#555" 
+                      value={settingsWifiPass} 
+                      onChangeText={setSettingsWifiPass} 
+                    />
+                    <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureSettingsWifi(!secureSettingsWifi)}>
+                      <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureSettingsWifi ? "Pokaż" : "Ukryj"}</Text>
+                    </TouchableOpacity>
+                  </View>
+                  
+                  <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 12 }]} onPress={handleSaveSystemSettings}>
+                    <Text style={styles.btnText}>💾 Zapisz Ustawienia i Zrestartuj Zamek</Text>
                   </TouchableOpacity>
                 </View>
-              </View>
-
-              {/* FORMULARZ: ZMIANA HASŁA WI-FI ZAMKA */}
-              <View style={styles.card}>
-                <Text style={styles.sectionHeader}>📶 Zmiana Konfiguracji Sieci Wi-Fi Zamka</Text>
-                <Text style={styles.inputLabelText}>Identyfikator Sieci (SSID):</Text>
-                <TextInput style={styles.inputField} placeholder="Nazwa nowej sieci Wi-Fi" placeholderTextColor="#555" value={settingsSsid} onChangeText={setSettingsSsid} />
-                
-                <Text style={styles.inputLabelText}>Hasło do Sieci:</Text>
-                <View style={{ width: '100%', position: 'relative' }}>
-                  <TextInput 
-                    style={styles.inputField} 
-                    secureTextEntry={secureSettingsWifi} 
-                    placeholder="Hasło nowej sieci Wi-Fi" 
-                    placeholderTextColor="#555" 
-                    value={settingsWifiPass} 
-                    onChangeText={setSettingsWifiPass} 
-                  />
-                  <TouchableOpacity style={{ position: 'absolute', right: 14, top: 16 }} onPress={() => setSecureSettingsWifi(!secureSettingsWifi)}>
-                    <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureSettingsWifi ? "Pokaż" : "Ukryj"}</Text>
-                  </TouchableOpacity>
-                </View>
-                
-                <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 12 }]} onPress={handleSaveSystemSettings}>
-                  <Text style={styles.btnText}>💾 Zapisz Ustawienia i Zrestartuj Zamek</Text>
-                </TouchableOpacity>
-              </View>
+              )}
             </ScrollView>
           </KeyboardAvoidingView>
         )}
@@ -1279,9 +1475,13 @@ export default function App() {
           <View style={styles.sidebarBrandHeaderBox}><Text style={styles.sidebarBrandTitleText}>Nawigacja</Text></View>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Dashboard</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
-          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'notifications' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('notifications')}><Text style={styles.menuItemLabelText}>🔔 Powiadomienia Push</Text></TouchableOpacity>
+          {!isLocalMode && (
+            <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'notifications' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('notifications')}><Text style={styles.menuItemLabelText}>🔔 Powiadomienia Push</Text></TouchableOpacity>
+          )}
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'system' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('system')}><Text style={styles.menuItemLabelText}>📋 Logi Systemowe</Text></TouchableOpacity>
-          <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'ota' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('ota')}><Text style={styles.menuItemLabelText}>💾 Aktualizacja</Text></TouchableOpacity>
+          {!isLocalMode && (
+            <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'ota' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('ota')}><Text style={styles.menuItemLabelText}>💾 Aktualizacja</Text></TouchableOpacity>
+          )}
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'settings' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('settings')}><Text style={styles.menuItemLabelText}>⚙️ Ustawienia</Text></TouchableOpacity>
           <View style={{flex: 1}} />
           <TouchableOpacity style={styles.sidebarDisconnectBtn} onPress={handleLogout}>

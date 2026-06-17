@@ -123,6 +123,10 @@ unsigned long lastFrameTick = 0;
 
 bool blockTelemetry = false;
 bool systemWasOnline = false;
+// Gdy true, najbliższa iteracja loop() wykona executeCloudSynchronization()
+// OD RAZU (poza normalnym 1s cyklem), żeby serwer/aplikacja jak najszybciej
+// zobaczyły prawdziwy, potwierdzony przez sprzęt stan rygla.
+bool forceSyncNow = false;
 
 String urlDecode(String str) { 
   String decoded = ""; 
@@ -389,6 +393,111 @@ void addLog(String msg) {
   } 
 }
 
+// =========================================================================
+// 🔊 NIEBLOKUJĄCY SILNIK DŹWIĘKÓW BRZĘCZYKA
+// Każdy sygnał to kilka nut (różne częstotliwości + krótkie przerwy), więc
+// brzmi żywo, a nie jak jeden płaski ton. Sterowanie odbywa się wyłącznie
+// przez millis() - bez ŻADNEGO delay() - dzięki czemu odtwarzanie melodii
+// nigdy nie zamraża skanowania RFID, przycisku czy obsługi sieci w loop().
+// =========================================================================
+struct SoundNote { int freq; int dur; int gap; }; // freq=0 -> cisza; gap = przerwa po nucie (ms)
+
+enum SoundId {
+  SND_NONE = 0,
+  SND_ACCESS_GRANTED,
+  SND_ACCESS_DENIED,
+  SND_CARD_ENROLLED,
+  SND_LEARN_ENTER,
+  SND_LEARN_EXIT,
+  SND_WIFI_CONNECTED,
+  SND_WIFI_FAILED,
+  SND_WIFI_RESTORED,
+  SND_PROVISION_START,
+  SND_OTA_START,
+  SND_OTA_SUCCESS,
+  SND_DELETE,
+  SND_CLICK_CONFIRM
+};
+
+const SoundNote SND_DATA_ACCESS_GRANTED[]  = { {988, 70, 25}, {1318, 70, 25}, {1760, 130, 0} };           // wesoły arpeggio "wejdź"
+const SoundNote SND_DATA_ACCESS_DENIED[]   = { {320, 110, 70}, {220, 110, 70}, {160, 220, 0} };           // schodzące "nie"
+const SoundNote SND_DATA_CARD_ENROLLED[]   = { {988, 80, 35}, {1318, 80, 35}, {1760, 80, 35}, {2200, 220, 0} }; // 4-nutowy fanfar
+const SoundNote SND_DATA_LEARN_ENTER[]     = { {1100, 90, 40}, {1500, 90, 40}, {1900, 160, 0} };
+const SoundNote SND_DATA_LEARN_EXIT[]      = { {1200, 110, 55}, {800, 200, 0} };
+const SoundNote SND_DATA_WIFI_CONNECTED[]  = { {784, 80, 30}, {988, 80, 30}, {1318, 90, 30}, {1568, 240, 0} };
+const SoundNote SND_DATA_WIFI_FAILED[]     = { {350, 140, 60}, {260, 320, 0} };
+const SoundNote SND_DATA_WIFI_RESTORED[]   = { {1100, 100, 45}, {1500, 160, 0} };
+const SoundNote SND_DATA_PROVISION_START[] = { {600, 130, 90}, {760, 150, 0} };
+const SoundNote SND_DATA_OTA_START[]       = { {1100, 70, 35}, {1600, 110, 0} };
+const SoundNote SND_DATA_OTA_SUCCESS[]     = { {1568, 130, 50}, {1976, 130, 50}, {2349, 260, 0} };
+const SoundNote SND_DATA_DELETE[]          = { {500, 80, 45}, {340, 160, 0} };
+const SoundNote SND_DATA_CLICK_CONFIRM[]   = { {1200, 55, 35}, {1600, 70, 0} };
+
+const SoundNote* activeMelody = nullptr;
+int activeMelodyLen = 0;
+int activeNoteIdx = -1;
+unsigned long noteTimerStart = 0;
+bool inNoteGapPhase = false;
+
+void buzzerAdvanceNote() {
+  activeNoteIdx++;
+  if (!activeMelody || activeNoteIdx >= activeMelodyLen) {
+    activeMelody = nullptr;
+    noTone(BUZZER_PIN);
+    return;
+  }
+  const SoundNote& n = activeMelody[activeNoteIdx];
+  if (n.freq > 0) tone(BUZZER_PIN, n.freq, n.dur);
+  else noTone(BUZZER_PIN);
+  noteTimerStart = millis();
+  inNoteGapPhase = false;
+}
+
+// Rozpoczyna odtwarzanie nazwanej melodii. Przerywa poprzednią, jeśli trwała.
+void playSound(SoundId id) {
+  switch (id) {
+    case SND_ACCESS_GRANTED:  activeMelody = SND_DATA_ACCESS_GRANTED;  activeMelodyLen = sizeof(SND_DATA_ACCESS_GRANTED)/sizeof(SoundNote); break;
+    case SND_ACCESS_DENIED:   activeMelody = SND_DATA_ACCESS_DENIED;   activeMelodyLen = sizeof(SND_DATA_ACCESS_DENIED)/sizeof(SoundNote); break;
+    case SND_CARD_ENROLLED:   activeMelody = SND_DATA_CARD_ENROLLED;   activeMelodyLen = sizeof(SND_DATA_CARD_ENROLLED)/sizeof(SoundNote); break;
+    case SND_LEARN_ENTER:     activeMelody = SND_DATA_LEARN_ENTER;     activeMelodyLen = sizeof(SND_DATA_LEARN_ENTER)/sizeof(SoundNote); break;
+    case SND_LEARN_EXIT:      activeMelody = SND_DATA_LEARN_EXIT;      activeMelodyLen = sizeof(SND_DATA_LEARN_EXIT)/sizeof(SoundNote); break;
+    case SND_WIFI_CONNECTED:  activeMelody = SND_DATA_WIFI_CONNECTED;  activeMelodyLen = sizeof(SND_DATA_WIFI_CONNECTED)/sizeof(SoundNote); break;
+    case SND_WIFI_FAILED:     activeMelody = SND_DATA_WIFI_FAILED;     activeMelodyLen = sizeof(SND_DATA_WIFI_FAILED)/sizeof(SoundNote); break;
+    case SND_WIFI_RESTORED:   activeMelody = SND_DATA_WIFI_RESTORED;   activeMelodyLen = sizeof(SND_DATA_WIFI_RESTORED)/sizeof(SoundNote); break;
+    case SND_PROVISION_START: activeMelody = SND_DATA_PROVISION_START; activeMelodyLen = sizeof(SND_DATA_PROVISION_START)/sizeof(SoundNote); break;
+    case SND_OTA_START:       activeMelody = SND_DATA_OTA_START;       activeMelodyLen = sizeof(SND_DATA_OTA_START)/sizeof(SoundNote); break;
+    case SND_OTA_SUCCESS:     activeMelody = SND_DATA_OTA_SUCCESS;     activeMelodyLen = sizeof(SND_DATA_OTA_SUCCESS)/sizeof(SoundNote); break;
+    case SND_DELETE:          activeMelody = SND_DATA_DELETE;          activeMelodyLen = sizeof(SND_DATA_DELETE)/sizeof(SoundNote); break;
+    case SND_CLICK_CONFIRM:   activeMelody = SND_DATA_CLICK_CONFIRM;   activeMelodyLen = sizeof(SND_DATA_CLICK_CONFIRM)/sizeof(SoundNote); break;
+    default: activeMelody = nullptr; activeMelodyLen = 0; break;
+  }
+  activeNoteIdx = -1;
+  buzzerAdvanceNote();
+}
+
+// Musi być wywoływane w KAŻDEJ iteracji loop() - zero delay(). To jest to,
+// co odlicza czas trwania nuty/przerwy i przechodzi do kolejnej nuty w tle,
+// bez blokowania RFID, przycisku ani obsługi sieci.
+void updateBuzzer() {
+  if (!activeMelody) return;
+  const SoundNote& n = activeMelody[activeNoteIdx];
+  if (!inNoteGapPhase) {
+    if (millis() - noteTimerStart >= (unsigned long)n.dur) {
+      if (n.gap > 0) {
+        noTone(BUZZER_PIN);
+        inNoteGapPhase = true;
+        noteTimerStart = millis();
+      } else {
+        buzzerAdvanceNote();
+      }
+    }
+  } else {
+    if (millis() - noteTimerStart >= (unsigned long)n.gap) {
+      buzzerAdvanceNote();
+    }
+  }
+}
+
 void openDoor(String source) { 
   doorOpen = true;  
   globalAnimFrame = 0;  
@@ -398,7 +507,8 @@ void openDoor(String source) {
   digitalWrite(RELAY_PIN, LOW); 
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
-  tone(BUZZER_PIN, 1000, 200); 
+  playSound(SND_ACCESS_GRANTED); 
+  forceSyncNow = true; // nie czekamy do następnego cyklu pollingu - zgłoś "opened" natychmiast
   addLog("Otwarto: " + source);
 } 
 
@@ -445,7 +555,13 @@ void handleProvisioningServer() {
     if (rawOffline == "1" || decodedSSID == "OFFLINE") {
       EEPROM.write(250, 0x55);  // Oznaczamy w pamięci jako skonfigurowany
       saveConfiguration("OFFLINE_MODE", "NONE", decodedEmail);
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;text-align:center;padding:50px;'><h2>🔒 Zamek uruchomiony w trybie LOKALNYM (Offline)</h2></body></html>");
+      // 🌟 Zwracamy MAC + lokalne hasło administratora jako JSON (zamiast samej
+      // strony HTML), żeby aplikacja mogła zapisać je u siebie i odtąd rozmawiać
+      // z centralką WYŁĄCZNIE lokalnie (http://192.168.4.1), bez konta w chmurze.
+      String localPass = getFactoryAdminPassword();
+      String macStr = getMacAddressString();
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
+      client.println("{\"status\":\"offline_ready\",\"admin_pass\":\"" + localPass + "\",\"mac\":\"" + macStr + "\"}");
       delay(100); client.stop();
       ESP.restart();
       return;
@@ -552,7 +668,7 @@ void handleWebServer() {
       return;
     } 
     updateDisplay("OTA UPDATE", "Receiving firmware..."); 
-    tone(BUZZER_PIN, 1500, 100); 
+    playSound(SND_OTA_START); 
     String fullHeader = reqHeader;
     unsigned long headerDeadline = millis() + 5000; 
     while (millis() < headerDeadline) { 
@@ -617,8 +733,9 @@ HEADER_COMPLETE:
     client.stop(); 
     
     addLog("OTA COMPLETE. REBOOTING..."); 
-    tone(BUZZER_PIN, 1800, 300); delay(100); tone(BUZZER_PIN, 2200, 500); 
-    delay(1000); 
+    playSound(SND_OTA_SUCCESS);
+    unsigned long fanfareDeadline = millis() + 1000;
+    while (millis() < fanfareDeadline) { updateBuzzer(); delay(5); } 
     ESP.restart();
     blockTelemetry = false; 
     return; 
@@ -687,10 +804,10 @@ HEADER_COMPLETE:
         forceHardwareRFIDReset(); 
         globalAnimFrame = 0;
         addLog("Tryb Ucz. [" + pendingUsername + "]"); 
-        tone(BUZZER_PIN, 1500, 300);
+        playSound(SND_LEARN_ENTER);
       } else { 
         addLog("Stop Ucz: Panel API"); 
-        tone(BUZZER_PIN, 800, 300);
+        playSound(SND_LEARN_EXIT);
       } 
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
       delay(1); client.stop(); blockTelemetry = false; return;
@@ -703,7 +820,7 @@ HEADER_COMPLETE:
           String deletedName = String(users[targetIdx].name);
           deleteUser(targetIdx); 
           addLog("Usunieto: " + deletedName); 
-          tone(BUZZER_PIN, 600, 400); 
+          playSound(SND_DELETE); 
         } 
       } 
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
@@ -721,7 +838,7 @@ HEADER_COMPLETE:
           newName.toCharArray(users[targetIdx].name, 16); 
           EEPROM.put(10 + (targetIdx * sizeof(User)), users[targetIdx]);  
           addLog("Zmiana nazwy slot [" + String(targetIdx) + "]"); 
-          tone(BUZZER_PIN, 1200, 150);
+          playSound(SND_CLICK_CONFIRM);
         } 
       } 
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
@@ -736,7 +853,7 @@ HEADER_COMPLETE:
           isCardActive[targetIdx] = !isCardActive[targetIdx];
           EEPROM.write(220 + targetIdx, isCardActive[targetIdx] ? 0x01 : 0x00);  
           addLog(isCardActive[targetIdx] ? "Aktywowano: " + String(users[targetIdx].name) : "Zablokowano: " + String(users[targetIdx].name));
-          tone(BUZZER_PIN, 1100, 150); 
+          playSound(SND_CLICK_CONFIRM); 
         } 
       } 
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
@@ -770,7 +887,7 @@ HEADER_COMPLETE:
           } 
           addLog("Usunieto logi starsze niz " + cutoffVal);
         } 
-        tone(BUZZER_PIN, 900, 150);
+        playSound(SND_CLICK_CONFIRM);
       } 
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
       delay(1); client.stop(); blockTelemetry = false; return;
@@ -872,7 +989,8 @@ void performLocalFirmwareUpdate() {
   
   if (otaClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     otaClient.setTimeout(5000);
-    otaClient.print("GET /api/lock/download-firmware HTTP/1.1\r\n");
+    String macStr = getMacAddressString();
+    otaClient.print("GET /api/lock/download-firmware?mac=" + urlEncode(macStr) + " HTTP/1.1\r\n");
     otaClient.print("Host: " + String(PROXMOX_SERVER) + "\r\n");
     otaClient.print("Connection: close\r\n\r\n");
 
@@ -1047,13 +1165,12 @@ void setup() {
     displayProvisioningInstructions(""); 
     WiFi.softAP("CTRLABLE_SETUP");
     server.begin(); 
-    tone(BUZZER_PIN, 600, 250); 
-    delay(300); 
-    tone(BUZZER_PIN, 600, 250);
+    playSound(SND_PROVISION_START); 
     unsigned long lastSetupTick = 0; 
     bool alternateState = false;
     while (true) { 
       handleProvisioningServer();
+      updateBuzzer();
       if (millis() - lastSetupTick > 400) { 
         lastSetupTick = millis(); 
         globalAnimFrame++; 
@@ -1067,49 +1184,61 @@ void setup() {
   } 
 
   // Konfiguracja połączenia z Twoją siecią docelową
-  updateDisplay("Wi-Fi: Laczenie...", "Proba: 1/3 [....]");
-  WiFi.begin(ssid, pass); 
-  unsigned long startAttempt = millis(); 
-  int counter = 0;
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) { 
-    delay(500); 
-    counter++;
-    if (counter == 8) updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [======]"); 
-    if (counter == 16) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
-  } 
-
-  if (WiFi.status() == WL_CONNECTED) { 
-    timeClient.begin(); 
-    timeClient.update(); 
-    unsigned long epochTime = timeClient.getEpochTime();
-    struct timeval tv = { .tv_sec = (time_t)epochTime, .tv_usec = 0 };
-    settimeofday(&tv, NULL); 
-    forceHardwareRFIDReset(); 
-    lastSuccessfulPollTime = millis(); 
-    server.begin();
-    updateDisplay("Gotowy", WiFi.localIP().toString()); 
-    addLog("System online"); 
-    tone(BUZZER_PIN, 800, 100);  delay(120); 
-    tone(BUZZER_PIN, 1000, 100); delay(120);
-    tone(BUZZER_PIN, 1300, 120); 
-    delay(140); 
-    tone(BUZZER_PIN, 1600, 300);
-  } else { 
-    isOfflineStandby = true; 
+  if (String(ssid) == "OFFLINE_MODE") {
+    // 🌟 Urządzenie zostało jawnie skonfigurowane jako w pełni lokalne/offline -
+    // próba WiFi.begin() do tego SSID z definicji nigdy się nie powiedzie, więc
+    // nie czekamy bezsensownie 12 sekund przy KAŻDYM uruchomieniu. Przechodzimy
+    // od razu do trybu lokalnego (RFID + przycisk + panel lokalny na AP).
+    isOfflineStandby = true;
     forceHardwareRFIDReset();
-    displayProvisioningInstructions("ERR: CONN TIMEOUT"); 
-    WiFi.disconnect(); 
-    delay(500); 
-    WiFi.softAP("CTRLABLE_SETUP"); 
+    displayProvisioningInstructions("TRYB OFFLINE AKTYWNY");
+    WiFi.softAP("CTRLABLE_SETUP");
     server.begin();
-    tone(BUZZER_PIN, 300, 600); 
-    lastWifiRetryTime = millis(); 
-  } 
+    playSound(SND_PROVISION_START);
+    lastWifiRetryTime = millis();
+  } else {
+    updateDisplay("Wi-Fi: Laczenie...", "Proba: 1/3 [....]");
+    WiFi.begin(ssid, pass); 
+    unsigned long startAttempt = millis(); 
+    int counter = 0;
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 12000) { 
+      delay(500); 
+      counter++;
+      if (counter == 8) updateDisplay("Wi-Fi: Laczenie...", "Proba: 2/3 [======]"); 
+      if (counter == 16) updateDisplay("Wi-Fi: Laczenie...", "Proba: 3/3 [........]");
+    } 
+
+    if (WiFi.status() == WL_CONNECTED) { 
+      timeClient.begin(); 
+      timeClient.update(); 
+      unsigned long epochTime = timeClient.getEpochTime();
+      struct timeval tv = { .tv_sec = (time_t)epochTime, .tv_usec = 0 };
+      settimeofday(&tv, NULL); 
+      forceHardwareRFIDReset(); 
+      lastSuccessfulPollTime = millis(); 
+      server.begin();
+      updateDisplay("Gotowy", WiFi.localIP().toString()); 
+      addLog("System online"); 
+      playSound(SND_WIFI_CONNECTED);
+    } else { 
+      isOfflineStandby = true; 
+      forceHardwareRFIDReset();
+      displayProvisioningInstructions("ERR: CONN TIMEOUT"); 
+      WiFi.disconnect(); 
+      delay(500); 
+      WiFi.softAP("CTRLABLE_SETUP"); 
+      server.begin();
+      playSound(SND_WIFI_FAILED);
+      lastWifiRetryTime = millis(); 
+    } 
+  }
   lastRfidWatchdogTime = millis();
   lastFrameTick = millis();
 }
 
 void loop() {
+  updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
+
   if (millis() - lastFrameTick > 80) { 
     lastFrameTick = millis();
     globalAnimFrame++; 
@@ -1143,7 +1272,7 @@ void loop() {
         updateDisplay("Gotowy", WiFi.localIP().toString()); 
         addLog("Polaczenie Wi-Fi przywrocone"); 
         lastSuccessfulPollTime = millis();
-        tone(BUZZER_PIN, 1200, 150); delay(100); tone(BUZZER_PIN, 1500, 150);
+        playSound(SND_WIFI_RESTORED);
       } else { 
         WiFi.disconnect(); 
         delay(1000);
@@ -1198,7 +1327,11 @@ void loop() {
         if (i < rfid.uid.size - 1) uidStr += " ";
       } 
       uidStr.toUpperCase(); 
-      transmitCardPayloadToCloud(uidStr, rfid.uid.uidByte, learningMode);
+      // Nie ma sensu próbować łączyć się z chmurą, gdy nie mamy Wi-Fi - to
+      // tylko zbędne opóźnienie (do 400ms) na każdym skanie w trybie offline.
+      if (WiFi.status() == WL_CONNECTED) {
+        transmitCardPayloadToCloud(uidStr, rfid.uid.uidByte, learningMode);
+      }
       if (learningMode) { 
         saveNewCard(rfid.uid.uidByte, pendingUsername);
         addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
@@ -1206,9 +1339,7 @@ void loop() {
         globalDisplayInfo = "DODANO KARTE"; 
         digitalWrite(LED_RED, LOW);
         digitalWrite(LED_GREEN, HIGH); 
-        tone(BUZZER_PIN, 1000, 150); delay(150); 
-        tone(BUZZER_PIN, 1500, 150); delay(150); 
-        tone(BUZZER_PIN, 2000, 400);
+        playSound(SND_CARD_ENROLLED);
         if (autoExitLearn) { 
           learningMode = false; 
           autoExitLearn = false;
@@ -1228,11 +1359,11 @@ void loop() {
             openDoor(String(users[matchedIndex].name));
           } else { 
             addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
-            tone(BUZZER_PIN, 200, 600); 
+            playSound(SND_ACCESS_DENIED); 
           } 
         } else { 
           addLog("Odmowa: Nieznany [" + uidStr + "]");
-          tone(BUZZER_PIN, 200, 500); 
+          playSound(SND_ACCESS_DENIED); 
         } 
       } 
       rfid.PICC_HaltA();
@@ -1254,10 +1385,10 @@ void loop() {
           forceHardwareRFIDReset(); 
           lastRfidWatchdogTime = millis(); 
           globalAnimFrame = 0; 
-          tone(BUZZER_PIN, 1500, 400);
+          playSound(SND_LEARN_ENTER);
         } else { 
           globalDisplayInfo = ""; 
-          tone(BUZZER_PIN, 800, 400);
+          playSound(SND_LEARN_EXIT);
         } 
         while(digitalRead(BUTTON_PIN) == LOW); break;
       } 
@@ -1268,14 +1399,18 @@ void loop() {
       lockoutEndTime = 0; 
       lastRfidWatchdogTime = millis(); 
 
-      WiFiClient buttonLogClient; 
-      buttonLogClient.setTimeout(150); 
-      if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
-        buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1");
-        buttonLogClient.print("Host: "); buttonLogClient.println(PROXMOX_SERVER); 
-        buttonLogClient.println("Connection: close\r\n"); 
-        buttonLogClient.stop(); 
-      } 
+      // Logowanie naciśnięcia przycisku do chmury jest "nice to have", nie
+      // krytyczne - pomijamy je całkowicie offline, by nie czekać na nic.
+      if (WiFi.status() == WL_CONNECTED) {
+        WiFiClient buttonLogClient; 
+        buttonLogClient.setTimeout(150); 
+        if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
+          buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1");
+          buttonLogClient.print("Host: "); buttonLogClient.println(PROXMOX_SERVER); 
+          buttonLogClient.println("Connection: close\r\n"); 
+          buttonLogClient.stop(); 
+        } 
+      }
 
       openDoor("PRZYCISK");
     } 
@@ -1291,12 +1426,17 @@ void loop() {
     globalDisplayInfo = ""; 
     digitalWrite(LED_GREEN, LOW); 
     digitalWrite(LED_RED, LOW);
+    forceSyncNow = true; // zgłoś zamknięcie od razu, nie czekaj do następnego cyklu
   }
   else { 
     handleWebServer(); 
-    if (WiFi.status() == WL_CONNECTED && millis() - lastPollTime > 3000) { 
+    // 🌟 Skrócone z 3000ms na 1000ms + natychmiastowy sync po openDoor()/zamknięciu
+    // (forceSyncNow), żeby aplikacja zawsze zdążyła zobaczyć potwierdzone przez
+    // sprzęt "otwarte", zanim 3-sekundowe okno otwarcia drzwi się skończy.
+    if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 1000)) { 
       executeCloudSynchronization();
       lastPollTime = millis();
+      forceSyncNow = false;
     } 
   }
 }
@@ -1305,7 +1445,9 @@ void sendRemoteLog(String message) {
   WiFiClient logClient;
   message.replace(" ", "%20");
   if (logClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
-    logClient.print("GET /api/hardware/log?mac=64:E8:33:5F:2B:84&msg=" + message + " HTTP/1.1\r\n");
+    // 🌟 POPRAWKA: to było zahardkodowane na MAC jednego konkretnego zamka
+    // testowego, więc logi WSZYSTKICH urządzeń trafiały pod ten sam adres.
+    logClient.print("GET /api/hardware/log?mac=" + urlEncode(getMacAddressString()) + "&msg=" + message + " HTTP/1.1\r\n");
     logClient.print("Host: " + String(PROXMOX_SERVER) + "\r\n");
     logClient.print("Connection: close\r\n\r\n");
     logClient.stop();
