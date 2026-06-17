@@ -454,7 +454,14 @@ void buzzerAdvanceNote() {
 }
 
 // Rozpoczyna odtwarzanie nazwanej melodii. Przerywa poprzednią, jeśli trwała.
-void playSound(SoundId id) {
+// 🌟 UWAGA: parametr jest typu "int", nie "SoundId" - Arduino automatycznie
+// generuje deklaracje (prototypy) wszystkich funkcji z .ino i wstawia je na
+// samym początku pliku, ZANIM zdąży zobaczyć definicję enuma SoundId. Gdyby
+// sygnatura użyła tu "SoundId", auto-wygenerowany prototyp odwoływałby się do
+// typu, który w tym miejscu pliku jeszcze nie istnieje -> błąd kompilacji.
+// Wartości SND_* są zwykłymi int-ami, więc wywołania (np. playSound(SND_ACCESS_GRANTED))
+// działają bez zmian.
+void playSound(int id) {
   switch (id) {
     case SND_ACCESS_GRANTED:  activeMelody = SND_DATA_ACCESS_GRANTED;  activeMelodyLen = sizeof(SND_DATA_ACCESS_GRANTED)/sizeof(SoundNote); break;
     case SND_ACCESS_DENIED:   activeMelody = SND_DATA_ACCESS_DENIED;   activeMelodyLen = sizeof(SND_DATA_ACCESS_DENIED)/sizeof(SoundNote); break;
@@ -1445,7 +1452,7 @@ void sendRemoteLog(String message) {
   WiFiClient logClient;
   message.replace(" ", "%20");
   if (logClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
-    // 🌟 POPRAWKA: to było zahardkodowane na MAC jednego konkretnego zamka
+    // POPRAWKA: to było zahardkodowane na MAC jednego konkretnego zamka
     // testowego, więc logi WSZYSTKICH urządzeń trafiały pod ten sam adres.
     logClient.print("GET /api/hardware/log?mac=" + urlEncode(getMacAddressString()) + "&msg=" + message + " HTTP/1.1\r\n");
     logClient.print("Host: " + String(PROXMOX_SERVER) + "\r\n");
