@@ -1023,7 +1023,8 @@ export default function App() {
                 {lockState.lock === false && '🔒 ZABEZPIECZONY / RYGIEL ZABLOKOWANY'}
                 </Text>
       
-                <Text style={styles.subLabel}>Bieżący tryb operacyjny: {lockState.mode}</Text>
+                <Text style={styles.subLabel}>Bieżący tryb operacyjny: 
+                  {lockState.lock === 'offline' ? 'Offline' : ` ${lockState.mode || 'Brak danych'}`}</Text>
               </View>
 
               {/*Dynamiczny przycisk */}

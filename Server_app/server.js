@@ -72,9 +72,6 @@ function getFactoryAdminPassword(mac) {
 
 const unlockQueues = {};
 const actualLockStates = {};
-const lastUpdate = actualLockStates[primaryMac]?.timestamp || 0;
-const isStale = (Date.now() - lastUpdate) > 5000
-; 
 const learningQueues = {}; 
 
 function sendJSON(res, statusCode, data) {
@@ -396,13 +393,20 @@ const server = http.createServer(async (req, res) => {
           const timestamp = new Date(r.event_time).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           return `[${timestamp}] ${r.message}`;
         });
+        const lastState = actualLockStates[primaryMac];
+        const isOffline = !lastState || (Date.now() - lastState.timestamp) > 10000;
+        
 
         //DANE Z BAZY W POSTACI JSON
         return sendJSON(res, 200, {
           auth: true,
           account: appAccountContext, 
-          mode: primaryDevice.operational_mode,
-          lock: (actualLockStates[primaryMac] || false), 
+          mode: isOffline ? 'Offline' : primaryDevice.operational_mode,
+          lock: (() => {
+            const lastState = actualLockStates[primaryMac];
+            if (!lastState || (Date.now() - lastState.timestamp) > 10000) {return 'offline';}
+            return lastState.state;
+          })(), 
           total: processedUsersList.length,
           users: processedUsersList, 
           logs: localizedLogsFeed,
@@ -885,38 +889,38 @@ const server = http.createServer(async (req, res) => {
       // LOOP POLL ZAMKA 
       // =========================================================================
       if ((pathname === '/api/hardware/poll' || pathname === '/api/poll' || pathname === '/poll') && req.method === 'GET') {
-  const logFile = '/var/log/smartlock/smartlock_system.log';
-  const forceLog = (msg) => {
-    try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG HARDWARE POLL] ${msg}\n`); } catch (e) {}
-  };
+        const logFile = '/var/log/smartlock/smartlock_system.log';
+        const forceLog = (msg) => {
+          try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG HARDWARE POLL] ${msg}\n`); } catch (e) {}
+        };
 
-  let mac = query.mac;
-  if (mac) mac = mac.toUpperCase();
+        let mac = query.mac;
+        if (mac) mac = mac.toUpperCase();
 
-  // Jeśli system nie znajdzie takiego adresu MAC w bazie, automatycznie odwracamy bajty,
-  // aby zapytania SQL idealnie trafiły w zarejestrowane urządzenie.
-  if (mac && mac.includes(':')) {
-    let checkDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [mac]);
-    if (checkDev.rows.length === 0) {
-      const reversedMac = mac.split(':').reverse().join(':');
-      const checkDevRev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [reversedMac]);
-      
-      if (checkDevRev.rows.length > 0) {
-        mac = reversedMac;
-      } else if (query.email) {
-        // PROVISIONING: Automatyczne dodanie nowej centralki do bazy danych
-        const accountRes = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [query.email.trim().toLowerCase()]);
-        if (accountRes.rows.length > 0) {
-          await dbPool.query(
-            `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
-             VALUES ($1, $2, $3, $4, 'Czuwanie')`,
-            [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
-          );
-          writeToLocalLogFile('Provisioning', `Pomyślnie utworzono i przypisano centralkę ${mac} do konta: ${query.email}`);
+        // Jeśli system nie znajdzie takiego adresu MAC w bazie, automatycznie odwracamy bajty,
+        // aby zapytania SQL idealnie trafiły w zarejestrowane urządzenie.
+        if (mac && mac.includes(':')) {
+          let checkDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [mac]);
+          if (checkDev.rows.length === 0) {
+            const reversedMac = mac.split(':').reverse().join(':');
+            const checkDevRev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [reversedMac]);
+            
+            if (checkDevRev.rows.length > 0) {
+              mac = reversedMac;
+            } else if (query.email) {
+              // PROVISIONING: Automatyczne dodanie nowej centralki do bazy danych
+              const accountRes = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [query.email.trim().toLowerCase()]);
+              if (accountRes.rows.length > 0) {
+                await dbPool.query(
+                  `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
+                  VALUES ($1, $2, $3, $4, 'Czuwanie')`,
+                  [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
+                );
+                writeToLocalLogFile('Provisioning', `Pomyślnie utworzono i przypisano centralkę ${mac} do konta: ${query.email}`);
+              }
+            }
+          }
         }
-      }
-    }
-  }
 
   // Definiujemy stany na podstawie Twoich globalnych kolejek rygla, zapobiegając ReferenceError
   const unlockAction = !!(unlockQueues[mac] || unlockQueues['00:00:00:00:00:00']);
@@ -925,7 +929,7 @@ const server = http.createServer(async (req, res) => {
   let clientReportedVersion = query.version || null; 
   let currentHardwareVersion = '0.0.0';
 
-  // 🤫 WYCISZONE: Usunięto stąd forceLog ("=== NOWE ZAPYTANIE POLL ==="), całkowicie żegnając sekundowy spam!
+  // WYCISZONE: Usunięto stąd forceLog ("=== NOWE ZAPYTANIE POLL ==="), całkowicie żegnając sekundowy spam!
 
   if (!mac) {
     const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
@@ -947,11 +951,14 @@ const server = http.createServer(async (req, res) => {
 
     const devLookup = await dbPool.query(queryText, queryParams);
     if (devLookup.rows.length > 0) {
+      actualLockStates[mac] = {
+      state: actualLockStates[mac]?.state || false,
+      timestamp: Date.now()};
       currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
     }
   }
 
-  // 🌟 PRZYWRÓCENIE DZIAŁANIA PRZEKAŹNIKA (Konsumpcja tokenu otwierania z kolejki)
+  // PRZYWRÓCENIE DZIAŁANIA PRZEKAŹNIKA (Konsumpcja tokenu otwierania z kolejki)
   if (unlockAction) {
     unlockQueues[mac] = false;
     unlockQueues['00:00:00:00:00:00'] = false;
@@ -959,7 +966,7 @@ const server = http.createServer(async (req, res) => {
     setTimeout(() => { actualLockStates[mac] = false; }, 2000); 
   }
 
-  // 🌟 PANCERNA LOGIKA OTA (Odporna na pętle i sterowana z aplikacji)
+  // PANCERNA LOGIKA OTA (Odporna na pętle i sterowana z aplikacji)
   const latestFw = getLatestFirmwareContext();
   const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
   const cleanLatest = latestFw.version.replace('v', '').trim();
