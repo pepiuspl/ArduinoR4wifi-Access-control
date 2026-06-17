@@ -27,7 +27,7 @@ try {
   };
 }
 
-// TRYB LOKALNY: gdy centralka jest skonfigurowana jako w pełni offline,
+// 🌟 TRYB LOKALNY: gdy centralka jest skonfigurowana jako w pełni offline,
 // ZAWSZE nadaje swój własny punkt dostępu pod tym stałym adresem - więc nie
 // trzeba żadnego wykrywania urządzenia w sieci domowej.
 const LOCAL_BASE_URL = 'http://192.168.4.1';
@@ -71,7 +71,7 @@ export default function App() {
   const [isRegisterMode, setIsRegisterMode] = useState(false); 
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
 
-  // TRYB LOKALNY / OFFLINE: brak konta w chmurze, aplikacja rozmawia
+  // 🌟 TRYB LOKALNY / OFFLINE: brak konta w chmurze, aplikacja rozmawia
   // bezpośrednio z centralką po jej własnym AP (http://192.168.4.1),
   // autoryzując zapisy algorytmicznym "fabrycznym" hasłem urządzenia.
   const [isLocalMode, setIsLocalMode] = useState(false);
@@ -142,6 +142,15 @@ export default function App() {
   // Znacznik czasu ostatniego /api/unlock - chroni stan 'pending' przed
   // nadpisaniem przez chwilowo nieaktualny odczyt z serwera (patrz fetchStatus).
   const pendingUnlockSinceRef = useRef(0);
+  // 🌟 Zawsze aktualne "zwierciadło" lockState. setInterval() w handleExecuteUpdate
+  // przechwytuje zmienne z chwili swojego utworzenia (stale closure) - bez tego refa
+  // sprawdzałby tam już nieaktualną wersję na zawsze, nawet gdy fetchStatus()
+  // faktycznie odświeża prawdziwy stan w tle. Stąd zgłaszany "timeout", mimo że
+  // aktualizacja w rzeczywistości się powiodła.
+  const lockStateRef = useRef(lockState);
+  useEffect(() => {
+    lockStateRef.current = lockState;
+  }, [lockState]);
 
   const [logoTapCount, setLogoTapCount] = useState(0);
   const [showInstallerMenu, setShowInstallerMenu] = useState(false);
@@ -200,7 +209,7 @@ export default function App() {
     }
   };
 
-  // INICJALIZACJA W TRYBIE LOKALNYM (BEZ INTERNETU): centralka nigdy nie
+  // 🌟 INICJALIZACJA W TRYBIE LOKALNYM (BEZ INTERNETU): centralka nigdy nie
   // próbuje połączyć się z żadną siecią domową i nigdy nie wymaga konta w
   // chmurze - aplikacja rozmawia z nią wyłącznie po jej własnym punkcie
   // dostępu (CTRLABLE_SETUP / 192.168.4.1), autoryzując zapisy algorytmicznym
@@ -332,7 +341,7 @@ export default function App() {
       await AsyncStorage.removeItem('@lock_local_mode');
       await AsyncStorage.removeItem('@lock_local_admin_pass');
       
-      // 3. TWOJE RESETOWANIE INTERFEJSU (UI):
+      // 3. 🛠️ TWOJE RESETOWANIE INTERFEJSU (UI):
       menuAnimation.setValue(-width * 0.75); 
       setIsMenuOpen(false);                  
       setCurrentScreen('dashboard');          
@@ -521,8 +530,13 @@ export default function App() {
             // Pobieramy świeży stan z serwera (on odpytuje bazę SQL)
             fetchStatus(); 
 
-            // Jeśli wersja w lockState zmieniła się na oczekiwaną - mamy sukces!
-            if (lockState.version === latestVersion) {
+            // 🌟 Czytamy z REFA, nie z domknięcia "lockState" złapanego w chwili
+            // kliknięcia "Aktualizuj" - inaczej ten warunek nigdy nie zauważy
+            // zmiany wersji, choćby aktualizacja faktycznie się powiodła.
+            // Normalizujemy obie strony (usuwamy ewentualny prefiks "v"), żeby
+            // drobna niezgodność formatu też nie generowała fałszywego timeoutu.
+            const normalizeVer = (v) => (v || '').replace(/v\.?/g, '').trim();
+            if (normalizeVer(lockStateRef.current.version) === normalizeVer(latestVersion)) {
               clearInterval(checkInterval);
               setOtaState('success');
               setTimeout(() => setOtaState('idle'), 5000);
