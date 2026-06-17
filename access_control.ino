@@ -17,7 +17,7 @@
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-const char* app_version = "v2.9.8";
+const char* app_version = "v2.9.9";
 
 struct User { 
   byte uid[4]; 
