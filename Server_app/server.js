@@ -22,7 +22,7 @@ let latestFirmwareVersion = "2.9.7";
 let latestFirmwareFile = "";
 const updatesDir = '/opt/smartlock-server/updates';
 
-// 🗄️ CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
+// CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
 const dbPool = new Pool({
   user: 'admin',
   host: 'localhost',
@@ -411,7 +411,6 @@ const server = http.createServer(async (req, res) => {
           pushEntries: accountsRes.rows[0].push_entries !== false,
           pushAlarms: accountsRes.rows[0].push_alarms !== false,
           otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0),
-          lock: (actualLockStates[primaryMac] || false)
         });
       }
 
