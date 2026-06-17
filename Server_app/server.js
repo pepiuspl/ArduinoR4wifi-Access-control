@@ -71,7 +71,15 @@ function getFactoryAdminPassword(mac) {
 }
 
 const unlockQueues = {};
-const actualLockStates = {}; // Przechowuje fizyczny stan rygla z zapytania poll z zamka
+
+// STAN ZAMKA W APLIKACJI 
+const actualLockStates = {};
+const lastUpdate = actualLockStates[primaryMac]?.timestamp || 0;
+const isStale = (Date.now() - lastUpdate) > 5000
+return sendJSON(res, 200, { 
+    lock: isStale ? 'offline' : (actualLockStates[primaryMac].state || false), 
+});; 
+
 const learningQueues = {}; 
 
 function sendJSON(res, statusCode, data) {
