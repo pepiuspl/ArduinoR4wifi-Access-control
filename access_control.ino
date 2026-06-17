@@ -17,7 +17,7 @@
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-const char* app_version = "v2.9.7";
+const char* app_version = "v2.9.8";
 
 struct User { 
   byte uid[4]; 
@@ -1437,7 +1437,7 @@ void loop() {
   }
   else { 
     handleWebServer(); 
-    // 🌟 Skrócone z 3000ms na 1000ms + natychmiastowy sync po openDoor()/zamknięciu
+    // Skrócone z 3000ms na 1000ms + natychmiastowy sync po openDoor()/zamknięciu
     // (forceSyncNow), żeby aplikacja zawsze zdążyła zobaczyć potwierdzone przez
     // sprzęt "otwarte", zanim 3-sekundowe okno otwarcia drzwi się skończy.
     if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 1000)) { 
