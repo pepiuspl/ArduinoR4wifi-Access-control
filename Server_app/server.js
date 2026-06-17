@@ -71,15 +71,10 @@ function getFactoryAdminPassword(mac) {
 }
 
 const unlockQueues = {};
-
-// STAN ZAMKA W APLIKACJI 
 const actualLockStates = {};
 const lastUpdate = actualLockStates[primaryMac]?.timestamp || 0;
 const isStale = (Date.now() - lastUpdate) > 5000
-return sendJSON(res, 200, { 
-    lock: isStale ? 'offline' : (actualLockStates[primaryMac].state || false), 
-});; 
-
+; 
 const learningQueues = {}; 
 
 function sendJSON(res, statusCode, data) {
@@ -402,7 +397,7 @@ const server = http.createServer(async (req, res) => {
           return `[${timestamp}] ${r.message}`;
         });
 
-        //DANE Z BAZY WPROST DO SNACKA W JEDNYM OBIEKCIE JSON
+        //DANE Z BAZY W POSTACI JSON
         return sendJSON(res, 200, {
           auth: true,
           account: appAccountContext, 
@@ -415,7 +410,8 @@ const server = http.createServer(async (req, res) => {
           otaPending: otaUpdatePending,
           pushEntries: accountsRes.rows[0].push_entries !== false,
           pushAlarms: accountsRes.rows[0].push_alarms !== false,
-          otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0)
+          otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0),
+          lock: (actualLockStates[primaryMac] || false)
         });
       }
 
