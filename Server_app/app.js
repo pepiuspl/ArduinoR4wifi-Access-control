@@ -470,29 +470,44 @@ export default function App() {
   };
 
   const fetchStatus = useCallback(() => {
-    if (!isConfigured || !accountId) return;
-    fetch(`${backendUrl}/api/data?accountId=${accountId}`)
-      .then((res) => {
-        if (!res.ok) throw new Error();
-        return res.json();
-      })
-      .then((data) => {
-        if (data.pushEntries !== undefined) setPushEntries(data.pushEntries);
-        if (data.pushAlarms !== undefined) setPushAlarms(data.pushAlarms);
-        if (data.auth === false) {
-          setIsConfigured(false);
-        } else {
-          setLockState(prevState => ({
-            ...data,
-            version: data.version || prevState.version || '2.9.4'
-          }));
-          setErrorMessage('');
-        }
-      })
-      .catch(() => {
-        setErrorMessage(`Łączenie z serwerem...`);
-      });
-  }, [isConfigured, accountId, backendUrl]);
+  if (!isConfigured || !accountId) return;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
+
+  fetch(`${backendUrl}/api/data?accountId=${accountId}`, { signal: controller.signal })
+    .then((res) => {
+      clearTimeout(timeoutId);
+      if (!res.ok) throw new Error('Network response was not ok');
+      return res.json();
+    })
+    .then((data) => {
+      setErrorMessage(''); 
+      
+      if (data.pushEntries !== undefined) setPushEntries(data.pushEntries);
+      if (data.pushAlarms !== undefined) setPushAlarms(data.pushAlarms);
+      
+      if (data.auth === false) {
+        setIsConfigured(false);
+      } else {
+        setLockState(prevState => ({
+          ...data,
+          version: data.version || prevState.version || '2.9.4'
+        }));
+      }
+    })
+    .catch((err) => {
+      clearTimeout(timeoutId);
+      
+      setLockState(prevState => ({
+        ...prevState,
+        lock: 'offline' 
+      }));
+      
+      setErrorMessage(`Brak połączenia z centralką (Offline)`);
+      console.error("Fetch status error:", err.message);
+    });
+}, [isConfigured, accountId, backendUrl]);
 
   const executeCommand = (endpoint, payload = null) => {
   // Wywołujemy Twoją haptykę (wibrację) natychmiast po dotknięciu
@@ -997,10 +1012,14 @@ export default function App() {
       
                 {/*Dynamiczne kolory dla 3 stanów automatyki */}
                 <Text style={[styles.valueBold, { 
-                color: lockState.lock === true ? '#81c784' : lockState.lock === 'pending' ? '#ffb74d' : '#e57373' 
+                  color: 
+                  lockState.lock === true ? '#81c784' : 
+                  lockState.lock === 'pending' ? '#ffb74d' : 
+                  lockState.lock === 'offline' ? '#777' : '#e57373' 
                 }]}>
                 {lockState.lock === true && '🔓 OTWARTY / SYSTEM ZWOLNIONY'}
                 {lockState.lock === 'pending' && '⚡ WYWOŁYWANIE SYGNAŁU...'}
+                {lockState.lock === 'offline' && '❌ CENTRALKA OFFLINE'}
                 {lockState.lock === false && '🔒 ZABEZPIECZONY / RYGIEL ZABLOKOWANY'}
                 </Text>
       
