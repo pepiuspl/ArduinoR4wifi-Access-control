@@ -910,7 +910,7 @@ export default function App() {
             }}
             delayLongPress={2000}
           >
-            <BrandIcon size={64} style={styles.authLogoIcon} />
+            <BrandIcon size={64} variant="dark" style={styles.authLogoIcon} />
           </TouchableOpacity>
           <Text style={styles.titleText}>{getAuthTitle()}</Text>
           
@@ -1217,7 +1217,7 @@ export default function App() {
         </TouchableOpacity>
         <View style={styles.headerBrandRow}>
           <Animated.View style={{ opacity: headerLogoOpacity, marginRight: 8, transform: [{ scale: headerLogoOpacity }] }}>
-            <BrandIcon size={24} />
+            <BrandIcon size={24} variant="dark" />
           </Animated.View>
           <Text style={styles.headerTitleText}>CTRLABLE NODE</Text>
         </View>
@@ -1520,7 +1520,7 @@ export default function App() {
         <Animated.View style={[styles.burgerSidebarDrawerContainer, { left: menuAnimation }]}>
           <View style={styles.sidebarBrandHeaderBox}>
             <Animated.View style={{ marginRight: 10, transform: [{ scale: drawerLogoScale }] }}>
-              <BrandIcon size={34} />
+              <BrandIcon size={34} variant="dark" />
             </Animated.View>
             <Text style={styles.sidebarBrandTitleText}>Nawigacja</Text>
           </View>

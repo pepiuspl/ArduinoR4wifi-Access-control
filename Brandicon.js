@@ -5,6 +5,7 @@ import Svg, { Path } from 'react-native-svg';
 // (skopiowane 1:1 z dokładnie śledzonej geometrii logo - NIE modyfikować
 // współrzędnych; to jest "zamrożona" geometria zatwierdzona przez klienta).
 const NAVY = '#04172A';
+const LIGHT_DOOR = '#F4F6FA'; // do użycia na ciemnym tle (variant="dark") - navy jest tam praktycznie niewidoczne
 const BLUE = '#004DDD';
 
 const DOOR_OPEN_D = `
@@ -32,11 +33,20 @@ const CROP = '60 48 130 136';
  * Statyczna, skalowalna wersja loga (bez animacji) - do użycia w nagłówku,
  * szufladzie menu, ekranie logowania itd. Te same ścieżki co w animowanym
  * ekranie powitalnym, więc wygląd jest zawsze 1:1 zgodny.
+ *
+ * variant="light" (domyślnie) - oryginalne kolory (granatowe drzwi), do
+ * użycia na jasnym/białym tle, np. tym samym co ekran powitalny.
+ * variant="dark" - drzwi w jasnym kolorze, do użycia na ciemnym tle
+ * aplikacji (nagłówek, szuflada menu, ekran logowania) - na granatowym
+ * tle granatowe drzwi praktycznie znikają, więc tam potrzebny jest ten wariant.
+ * Fala Wi-Fi i kłódka zostają niebieskie w obu wariantach - ten niebieski
+ * ma wystarczający kontrast na ciemnym tle.
  */
-export default function BrandIcon({ size = 28, style }) {
+export default function BrandIcon({ size = 28, style, variant = 'light' }) {
+  const doorColor = variant === 'dark' ? LIGHT_DOOR : NAVY;
   return (
     <Svg width={size} height={size} viewBox={CROP} style={style}>
-      <Path d={DOOR_OPEN_D} fill={NAVY} fillRule="evenodd" />
+      <Path d={DOOR_OPEN_D} fill={doorColor} fillRule="evenodd" />
       <Path d={ARC_SMALL_D} fill={BLUE} />
       <Path d={ARC_MID_D} fill={BLUE} />
       <Path d={ARC_LARGE_D} fill={BLUE} />
