@@ -3,6 +3,9 @@ import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAr
 import * as Haptics from 'expo-haptics';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
+import LoaderAnimation from './LoaderAnimation';
+import BrandIcon from './BrandIcon';
+import LoadingPulse from './LoadingPulse';
 
 const { width } = Dimensions.get('window');
 
@@ -120,6 +123,10 @@ export default function App() {
 
   // PODTRZYMANIE SESJI PO WYŁĄCZENIU APLIKACJI
   const [isLoading, setIsLoading] = useState(true);
+  // Czy animacja powitalna (logo) zdążyła się odtworzyć do końca - trzymamy
+  // splash na ekranie aż oba warunki (dane wczytane ORAZ animacja skończona)
+  // będą spełnione, żeby intro nigdy nie urywało się w pół animacji.
+  const [splashAnimationDone, setSplashAnimationDone] = useState(false);
 
   const [lockState, setLockState] = useState({ 
     auth: false, 
@@ -139,6 +146,14 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState('dashboard'); 
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuAnimation = useRef(new Animated.Value(-width * 0.75)).current;
+  // Logo w nagłówku przygasa, gdy szuflada menu się otwiera - tym samym
+  // Animated.Value co sama szuflada, więc jest to zawsze idealnie zsynchronizowane,
+  // bez osobnego wyzwalacza czy ryzyka rozjazdu w czasie.
+  const headerLogoOpacity = menuAnimation.interpolate({
+    inputRange: [-width * 0.75, 0],
+    outputRange: [1, 0.35],
+  });
+  const drawerLogoScale = useRef(new Animated.Value(0.6)).current;
   // Znacznik czasu ostatniego /api/unlock - chroni stan 'pending' przed
   // nadpisaniem przez chwilowo nieaktualny odczyt z serwera (patrz fetchStatus).
   const pendingUnlockSinceRef = useRef(0);
@@ -168,12 +183,19 @@ export default function App() {
 
   const toggleBurgerMenu = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const opening = !isMenuOpen;
     const toValue = isMenuOpen ? -width * 0.75 : 0;
     Animated.timing(menuAnimation, {
       toValue: toValue,
       duration: 250,
       useNativeDriver: false,
     }).start();
+    if (opening) {
+      // Logo w szufladzie "ląduje" z małym odbiciem - jakby to ta sama
+      // ikona z nagłówka właśnie dotarła na miejsce.
+      drawerLogoScale.setValue(0.6);
+      Animated.spring(drawerLogoScale, { toValue: 1, friction: 5, tension: 80, useNativeDriver: true }).start();
+    }
     setIsMenuOpen(!isMenuOpen);
   };
 
@@ -845,6 +867,19 @@ export default function App() {
   return () => clearInterval(interval);
 }, [isConfigured, accountId, isLocalMode, fetchStatus, lockState.lock]);
 
+  // 🌟 EKRAN POWITALNY: pokazujemy go zawsze przy starcie aplikacji, dopóki
+  // (a) AsyncStorage nie skończy odczytu sesji ORAZ (b) animacja logo nie
+  // dograła do końca - niezależnie od tego, czy użytkownik trafi potem na
+  // ekran logowania czy prosto na Dashboard.
+  if (isLoading || !splashAnimationDone) {
+    return (
+      <LoaderAnimation
+        logoSource={require('./assets/ctrlable_logo.png')}
+        onFinished={() => setSplashAnimationDone(true)}
+      />
+    );
+  }
+
   if (!isConfigured) {
     // Dynamiczne dopasowanie nagłówka karty w zależności od etapu połączenia
     const getAuthTitle = () => {
@@ -854,15 +889,6 @@ export default function App() {
       if (authStep === 'register') return 'Rejestracja Konta Master';
       return 'Autoryzacja CTRLABLE';
     };
-
-    // BLOKADA RENDEROWANIA
-    if (isLoading) {
-      return (
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0f0f11' }}>
-          <ActivityIndicator size="large" color="#00ffcc" />
-        </View>
-      );
-    }
 
     /* Dopiero pod spodem leci Twój obecny return z widokami aplikacji
     return (
@@ -884,7 +910,7 @@ export default function App() {
             }}
             delayLongPress={2000}
           >
-            <Text style={styles.lockIconSymbol}>🔒</Text>
+            <BrandIcon size={64} style={styles.authLogoIcon} />
           </TouchableOpacity>
           <Text style={styles.titleText}>{getAuthTitle()}</Text>
           
@@ -910,7 +936,8 @@ export default function App() {
               
               {isScanning ? (
                 <View style={{ alignItems: 'center', marginVertical: 24, width: '100%' }}>
-                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 16, marginBottom: 6 }}>🔍 Inicjalizacja magistrali radiowej...</Text>
+                  <LoadingPulse size={48} />
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 16, marginTop: 10, marginBottom: 6 }}>Inicjalizacja magistrali radiowej...</Text>
                   <Text style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>
                     Wywoływanie uprawnień sieciowych i próba spięcia z węzłem CTRLABLE_SETUP...
                   </Text>
@@ -1188,8 +1215,12 @@ export default function App() {
           <View style={styles.burgerStripeLine} />
           <View style={[styles.burgerStripeLine, { marginVertical: 5 }]} /><View style={styles.burgerStripeLine} />
         </TouchableOpacity>
-        <Text style={styles.headerTitleText}>CTRLABLE NODE
-        </Text>
+        <View style={styles.headerBrandRow}>
+          <Animated.View style={{ opacity: headerLogoOpacity, marginRight: 8, transform: [{ scale: headerLogoOpacity }] }}>
+            <BrandIcon size={24} />
+          </Animated.View>
+          <Text style={styles.headerTitleText}>CTRLABLE NODE</Text>
+        </View>
         <View style={{ width: 24 }} />
         </View>
 
@@ -1307,9 +1338,10 @@ export default function App() {
               )}
 
               {otaState === 'checking' && (
-                <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#4b5563' }]} disabled>
-                  <Text style={styles.btnText}>⏳ Sprawdzanie dostępności aktualizacji...</Text>
-                </TouchableOpacity>
+                <View style={[styles.actionTriggerBtn, { backgroundColor: '#4b5563', flexDirection: 'row', justifyContent: 'center', alignItems: 'center' }]}>
+                  <LoadingPulse size={22} color="#fff" />
+                  <Text style={[styles.btnText, { marginLeft: 10 }]}>Sprawdzanie dostępności aktualizacji...</Text>
+                </View>
               )}
 
               {otaState === 'up-to-date' && (
@@ -1486,7 +1518,12 @@ export default function App() {
 
         {isMenuOpen && <TouchableOpacity style={styles.menuDimBackdropMask} activeOpacity={1} onPress={toggleBurgerMenu} />}
         <Animated.View style={[styles.burgerSidebarDrawerContainer, { left: menuAnimation }]}>
-          <View style={styles.sidebarBrandHeaderBox}><Text style={styles.sidebarBrandTitleText}>Nawigacja</Text></View>
+          <View style={styles.sidebarBrandHeaderBox}>
+            <Animated.View style={{ marginRight: 10, transform: [{ scale: drawerLogoScale }] }}>
+              <BrandIcon size={34} />
+            </Animated.View>
+            <Text style={styles.sidebarBrandTitleText}>Nawigacja</Text>
+          </View>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Dashboard</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
           {!isLocalMode && (
@@ -1512,10 +1549,11 @@ const styles = StyleSheet.create({
   burgerIconTouchContainer: { width: 30, height: 30, justifyContent: 'center' },
   burgerStripeLine: { width: 22, height: 2.5, backgroundColor: '#fff', borderRadius: 2 },
   headerTitleText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
+  headerBrandRow: { flexDirection: 'row', alignItems: 'center' },
   scrollWrapper: { padding: 16, paddingBottom: 40 },
   screenHeaderText: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 16, letterSpacing: 0.3 },
   authCard: { padding: 24, backgroundColor: '#16161a', borderRadius: 16, marginTop: 40, marginHorizontal: 8, alignItems: 'center', borderWidth: 1, borderColor: '#222' },
-  lockIconSymbol: { fontSize: 54, marginBottom: 12 },
+  authLogoIcon: { marginBottom: 12 },
   titleText: { fontSize: 22, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 24 },
   installerBoxContainer: { width: '100%', padding: 12, backgroundColor: '#1c1917', borderRadius: 12, marginBottom: 20, borderWidth: 1, borderColor: '#7c2d12' },
   installerTitleText: { color: '#ef4444', fontWeight: 'bold', fontSize: 13, textTransform: 'uppercase', marginBottom: 12 },
@@ -1544,7 +1582,7 @@ const styles = StyleSheet.create({
   errorBanner: { color: '#ff6b6b', textAlign: 'center', marginTop: 16, fontWeight: 'bold' },
   burgerSidebarDrawerContainer: { position: 'absolute', top: 0, bottom: 0, width: width * 0.75, backgroundColor: '#141417', zIndex: 100, padding: 16, borderRightWidth: 1, borderRightColor: '#222' },
   menuDimBackdropMask: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.7)', zIndex: 99 },
-  sidebarBrandHeaderBox: { paddingVertical: 20, borderBottomWidth: 1, borderBottomColor: '#222', marginBottom: 20 },
+  sidebarBrandHeaderBox: { flexDirection: 'row', alignItems: 'center', paddingVertical: 20, borderBottomWidth: 1, borderBottomColor: '#222', marginBottom: 20 },
   sidebarBrandTitleText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
   menuItemRow: { paddingVertical: 16, paddingHorizontal: 12, borderRadius: 8, marginBottom: 8 },
   menuItemRowActive: { backgroundColor: '#202026' },
