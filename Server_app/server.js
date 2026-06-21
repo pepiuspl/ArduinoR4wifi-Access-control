@@ -7,15 +7,87 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 
+// ─── Security packages ────────────────────────────────────────────────────────
+// Install once on the server:
+//   npm install jsonwebtoken express-rate-limit helmet
+let jwt, RateLimiter;
+try {
+  jwt = require('jsonwebtoken');
+} catch(e) {
+  console.warn('[SECURITY] jsonwebtoken not installed — JWT auth disabled. Run: npm install jsonwebtoken');
+  jwt = null;
+}
+try {
+  const { RateLimiterMemory } = require('rate-limiter-flexible');
+  RateLimiter = RateLimiterMemory;
+} catch(e) {
+  // Fallback: simple in-process counter when rate-limiter-flexible is unavailable
+  RateLimiter = null;
+}
+
 // =========================================================================
 // GLOBAL PLATFORM CONFIGURATION SPACE
 // =========================================================================
 
 const HARDWARE_OTA_USER = 'admin';
 
-const GITHUB_PAT = "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"; 
-const GITHUB_USER = "pepiuspl";
-const GITHUB_REPO = "ArduinoR4wifi-Access-control";
+// ─── GitHub PAT ───────────────────────────────────────────────────────────────
+//   https://github.com/settings/tokens
+const GITHUB_PAT  = process.env.GITHUB_PAT  || '';
+const GITHUB_USER = process.env.GITHUB_USER  || "pepiuspl";
+const GITHUB_REPO = process.env.GITHUB_REPO  || "ArduinoR4wifi-Access-control";
+
+if (!GITHUB_PAT) {
+  console.warn('[SECURITY] GITHUB_PAT env variable not set — OTA firmware checks will fail.');
+}
+
+// ─── JWT configuration ────────────────────────────────────────────────────────
+// Set a strong random secret:  export JWT_SECRET=$(openssl rand -hex 32)
+const JWT_SECRET  = process.env.JWT_SECRET  || 'CHANGE_ME_set_JWT_SECRET_env_variable';
+const JWT_EXPIRES = process.env.JWT_EXPIRES || '7d';   // token lifetime
+
+if (JWT_SECRET === 'CHANGE_ME_set_JWT_SECRET_env_variable') {
+  console.warn('[SECURITY] JWT_SECRET env variable not set — using insecure default. Set it before production use.');
+}
+
+// ─── CORS allowlist ───────────────────────────────────────────────────────────
+// List every origin that is allowed to call this API.
+// For a React Native app (Expo) the origin is the dev server or the app bundle;
+// add your actual domains here. 'null' covers file:// bundled Expo builds.
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+// Always allow localhost variants for development
+const DEV_ORIGINS = ['http://localhost:8081','http://localhost:19000','http://localhost:19006'];
+const ALL_ALLOWED = new Set([...ALLOWED_ORIGINS, ...DEV_ORIGINS]);
+
+function isOriginAllowed(origin) {
+  if (!origin) return true;       // non-browser clients (ESP32, curl) have no Origin
+  if (ALL_ALLOWED.has(origin)) return true;
+  // Expo Go on device sends null or exp:// scheme — allow it for dev
+  if (origin === 'null' || origin.startsWith('exp://')) return true;
+  return false;
+}
+
+// ─── Rate limiters (simple token-bucket per IP) ───────────────────────────────
+// Login:           max 10 attempts per 15 min per IP
+// Forgot-password: max 5 requests per 60 min per IP
+const loginAttempts   = {};   // { ip: { count, resetAt } }
+const forgotAttempts  = {};
+
+function checkRateLimit(store, ip, maxHits, windowMs) {
+  const now = Date.now();
+  if (!store[ip] || now > store[ip].resetAt) {
+    store[ip] = { count: 0, resetAt: now + windowMs };
+  }
+  store[ip].count++;
+  if (store[ip].count > maxHits) {
+    const retryAfterSec = Math.ceil((store[ip].resetAt - now) / 1000);
+    return retryAfterSec;   // seconds to wait
+  }
+  return 0;   // allowed
+}
 
 let otaUpdatePending = false;
 let latestFirmwareVersion = "2.9.7";
@@ -82,14 +154,63 @@ const learningQueues = {};
 // state until the lock reports back that it has actually opened.
 const pendingUnlocks = {};
 
-function sendJSON(res, statusCode, data) {
+function _sendJSON(res, statusCode, data, origin) {
+  // Only echo the Origin back if it's on the allowlist — never '*' in production
+  const corsOrigin = (origin && isOriginAllowed(origin)) ? origin : (DEV_ORIGINS[0]);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': corsOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+    // Basic security headers (subset of helmet for a raw-http server)
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'X-XSS-Protection': '1; mode=block',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'geolocation=()',
   });
   res.end(JSON.stringify(data));
+}
+
+// ─── JWT helpers ─────────────────────────────────────────────────────────────
+function signToken(accountId) {
+  if (!jwt) return null;
+  return jwt.sign({ sub: String(accountId) }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+}
+
+/**
+ * Verify the Bearer token from the Authorization header.
+ * Returns the numeric accountId on success, or null on failure.
+ */
+function verifyToken(req) {
+  if (!jwt) return null;
+  const header = req.headers['authorization'] || '';
+  const match  = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return null;
+  try {
+    const payload = jwt.verify(match[1], JWT_SECRET);
+    return parseInt(payload.sub, 10);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Drop-in guard for protected routes.
+ * Usage inside a route block:
+ *   const accountId = requireAuth(req, res); if (!accountId) return;
+ */
+function requireAuth(req, res) {
+  const id = verifyToken(req);
+  if (!id) {
+    // Use the module-level _sendJSON so we can call this before the scoped
+    // sendJSON wrapper is available (shouldn't happen in practice, but safe).
+    _sendJSON(res, 401, { auth: false, error: 'Token missing or invalid. Please log in again.' },
+              req.headers['origin'] || '');
+    return null;
+  }
+  return id;
 }
 
 function syncMutationToHardware(ip, pathUrl) {
@@ -150,11 +271,20 @@ function getLatestFirmwareContext() {
 }
 
 const server = http.createServer(async (req, res) => {
+  const reqOrigin = req.headers['origin'] || '';
+
+  // Scoped wrapper — all route handlers call sendJSON(res,…) unchanged
+  // but the current request's origin is automatically forwarded.
+  const sendJSON = (r, code, data) => _sendJSON(r, code, data, reqOrigin);
+
   if (req.method === 'OPTIONS') {
+    const corsOrigin = isOriginAllowed(reqOrigin) ? reqOrigin : DEV_ORIGINS[0];
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': corsOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Credentials': 'true',
+      'Access-Control-Max-Age': '86400',
     });
     res.end();
     return;
@@ -245,10 +375,18 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
-      // LOGOWANIE DO APLIKACJI (WERSJA BEZPIECZNA)
+      // LOGOWANIE DO APLIKACJI (WERSJA BEZPIECZNA + JWT + RATE LIMIT)
       // =========================================================================
       if (pathname === '/api/auth/login' && req.method === 'POST') {
-        
+
+        // ── Rate limit: max 10 login attempts per IP per 15 minutes ──────────
+        const waitSec = checkRateLimit(loginAttempts, cleanIp, 10, 15 * 60 * 1000);
+        if (waitSec > 0) {
+          writeToLocalLogFile('Auth RateLimit', `Login rate-limited for IP: ${cleanIp}`);
+          res.setHeader('Retry-After', String(waitSec));
+          return sendJSON(res, 429, { error: `Too many login attempts. Try again in ${waitSec}s.` });
+        }
+
         //Tarcza anty-crash: Jeśli body jest puste lub brakuje pól, kończymy bez wywalenia serwera
         if (!body || !body.email || !body.password) {
           writeToLocalLogFile('Auth Rejection', `Malformed login payload received`);
@@ -279,12 +417,16 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, 401, { error: "Invalid credentials" });
         }
 
-        // Zielone światło
+        // ── Success: issue a signed JWT ───────────────────────────────────────
+        const token = signToken(result.rows[0].id);
         writeToLocalLogFile('Authentication Panel', `User logged in successfully: ${cleanEmail}`);
         return sendJSON(res, 200, {
-          auth: true, 
-          status: "logged_in", 
-          accountId: result.rows[0].id 
+          auth: true,
+          status: "logged_in",
+          token: token,            // ← signed JWT replaces the raw accountId
+          // accountId still included for backward-compat with older app builds;
+          // new app builds should use only the token.
+          accountId: result.rows[0].id
         });
       }
 
@@ -292,6 +434,14 @@ const server = http.createServer(async (req, res) => {
       // KROK 1: ZGŁOSZENIE PROŚBY O RESET (BEZPIECZNY KOD 6-CYFROWY)
       // =========================================================================
       if (pathname === '/api/auth/forgot_password' && req.method === 'POST') {
+        // ── Rate limit: max 5 reset requests per IP per 60 minutes ───────────
+        const waitSec = checkRateLimit(forgotAttempts, cleanIp, 5, 60 * 60 * 1000);
+        if (waitSec > 0) {
+          writeToLocalLogFile('Auth RateLimit', `Forgot-password rate-limited for IP: ${cleanIp}`);
+          res.setHeader('Retry-After', String(waitSec));
+          return sendJSON(res, 429, { error: `Too many reset requests. Try again in ${Math.ceil(waitSec/60)} min.` });
+        }
+
         const cleanEmail = body.email ? body.email.trim().toLowerCase() : '';
         if (!cleanEmail) return sendJSON(res, 400, { error: "Nie podano email" });
 
@@ -371,8 +521,7 @@ const server = http.createServer(async (req, res) => {
       // DOSTARCZANIE DANYCH DO APLIKACJI MOBILNEJ
       // =========================================================================
       if (pathname === '/api/data' && req.method === 'GET') {
-        const accountId = query.accountId;
-        if (!accountId) return sendJSON(res, 401, { auth: false });
+        const accountId = requireAuth(req, res); if (!accountId) return;
 
         const accountsRes = await dbPool.query('SELECT email, push_entries, push_alarms FROM accounts WHERE id = $1', [accountId]);
         if (accountsRes.rows.length === 0) return sendJSON(res, 404, { error: "Account invalid" });
@@ -440,7 +589,8 @@ const server = http.createServer(async (req, res) => {
       // ZMIANA NAZWY LOKATORA
       // =========================================================================
       if (pathname === '/api/user/rename' && req.method === 'POST') {
-        const { accountId, idx, name } = body;
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { idx, name } = body;
         const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
@@ -468,7 +618,8 @@ const server = http.createServer(async (req, res) => {
       // BLOKOWANIE / AKTYWACJA KARTY
       // =========================================================================
       if (pathname === '/api/user/toggle_active' && req.method === 'POST') {
-        const { accountId, idx } = body;
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { idx } = body;
         const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
@@ -492,7 +643,8 @@ const server = http.createServer(async (req, res) => {
       // USUNIĘCIE UŻYTKOWNIKA
       // =========================================================================
       if (pathname === '/api/user/delete' && req.method === 'POST') {
-        const { accountId, idx } = body;
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { idx } = body;
         const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
@@ -515,7 +667,8 @@ const server = http.createServer(async (req, res) => {
       // ZMIANA HASŁA UŻYTKOWNIKA W USTAWIENIACH
       // =========================================================================
       if (pathname === '/api/settings/password' && req.method === 'POST') {
-        const { accountId, newPassword } = body;
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { newPassword } = body;
         if (!newPassword || newPassword.length < 6) {
         return sendJSON(res, 400, { error: "Nowe hasło musi mieć minimum 6 znaków." });
         }
@@ -533,7 +686,8 @@ const server = http.createServer(async (req, res) => {
       // ZMIANA PROFILU WI-FI ZAMKA
       // =========================================================================
       if (pathname === '/api/settings/wifi' && req.method === 'POST') {
-        const { accountId, wifiSSID, wifiPass } = body;
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { wifiSSID, wifiPass } = body;
         if (!wifiSSID) return sendJSON(res, 400, { error: "SSID cannot be blank" });
 
         // Pobieramy IP oraz adres MAC urządzenia
@@ -554,7 +708,7 @@ const server = http.createServer(async (req, res) => {
       // ZDALNE WYWOŁANIE OTWARCIA Z APLIKACJI
       // =========================================================================
       if (pathname === '/api/unlock' && req.method === 'GET') {
-        const accountId = query.accountId;
+        const accountId = requireAuth(req, res); if (!accountId) return;
         const devRes = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
@@ -586,7 +740,7 @@ const server = http.createServer(async (req, res) => {
       // WŁĄCZENIE TRYBU UCZENIA CZYTNIKA RFID
       // =========================================================================
       if (pathname === '/api/toggle_learn' && req.method === 'GET') {
-        const accountId = query.accountId;
+        const accountId = requireAuth(req, res); if (!accountId) return;
         const devRes = await dbPool.query('SELECT mac_address, operational_mode FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
@@ -1141,8 +1295,9 @@ const server = http.createServer(async (req, res) => {
       }
       // OBSŁUGA PUSH TOKENÓW DLA APLIKACJI MOBILNEJ
       if (pathname === '/api/auth/save_push_token' && req.method === 'POST') {
-        const { accountId, token } = body;
-        if (!accountId || !token) return sendJSON(res, 400, { error: "Missing identity maps" });
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { token } = body;
+        if (!token) return sendJSON(res, 400, { error: "Missing push token" });
         
         await dbPool.query('UPDATE accounts SET push_token = $1 WHERE id = $2', [token, accountId]);
         writeToLocalLogFile('Push System', `Zaktualizowano rejestr push_token dla konta ID: ${accountId}`);
@@ -1152,12 +1307,12 @@ const server = http.createServer(async (req, res) => {
       // POWIADOMIENIA PUSH PREFERENCJE
 
       if (pathname === '/api/settings/push_preferences' && req.method === 'POST') {
-        const { accountId, pushEntries, pushAlarms } = body;
-        if (!accountId) return sendJSON(res, 400, { error: "Missing identity scope" });
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { pushEntries, pushAlarms } = body;
               
         await dbPool.query('UPDATE accounts SET push_entries = $1, push_alarms = $2 WHERE id = $3', [pushEntries, pushAlarms, accountId]);
         writeToLocalLogFile('Push System', `Zaktualizowano preferencje push dla konta ID: ${accountId} (Entries: ${pushEntries}, Alarms: ${pushAlarms})`);
-          return sendJSON(res, 200, { success: true });
+        return sendJSON(res, 200, { success: true });
       }
 
       return sendJSON(res, 404, { error: "Endpoint route context invalid" });

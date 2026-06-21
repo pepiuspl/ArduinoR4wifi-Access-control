@@ -68,7 +68,8 @@ export default function App() {
   let [backendUrl, setBackendUrl] = useState('http://185.101.191.76:3000'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [accountId, setAccountId] = useState(null);
+  const [accountId, setAccountId] = useState(null);    // kept for local-mode compat
+  const [authToken, setAuthToken]  = useState(null);    // signed JWT from server
   const [isConfigured, setIsConfigured] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isRegisterMode, setIsRegisterMode] = useState(false); 
@@ -87,8 +88,11 @@ export default function App() {
   const savePushPreferences = (entries, alarms) => {
     fetch(`${backendUrl}/api/settings/push_preferences`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ accountId, pushEntries: entries, pushAlarms: alarms })
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
+      },
+      body: JSON.stringify({ pushEntries: entries, pushAlarms: alarms })
     })
       .then((res) => res.json())
       .then((data) => {
@@ -323,14 +327,23 @@ export default function App() {
       })
       .then(async (data) => {
         setIsAuthenticating(false);
-        if (data.auth && data.accountId) {
+        if (data.auth && (data.token || data.accountId)) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          await AsyncStorage.setItem('@lock_account_id', String(data.accountId));
-          setAccountId(data.accountId);
+          // Store the signed JWT; fall back to accountId for older server builds
+          const tok = data.token || null;
+          const aid = data.accountId || null;
+          if (tok) {
+            await AsyncStorage.setItem('@lock_auth_token', tok);
+            setAuthToken(tok);
+          }
+          if (aid) {
+            await AsyncStorage.setItem('@lock_account_id', String(aid));
+            setAccountId(aid);
+          }
           resetUiToDefault();
           setIsConfigured(true);
           setErrorMessage('');
-          registerForPushNotificationsAsync(data.accountId);
+          registerForPushNotificationsAsync(aid);
         } else {
           throw new Error();
         }
@@ -347,19 +360,17 @@ export default function App() {
   const handleLogout = async () => {
     try {
       // 1. Informujemy backend na Proxmoxie, żeby wyłączył pushe dla tego konta
-      if (accountId) {
+      if (authToken) {
         await fetch(`${backendUrl}/api/auth/save_push_token`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            accountId: accountId, 
-            token: 'LOGGED_OUT' // Bezpieczne nadpisanie tokenu w Postgresie
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+          body: JSON.stringify({ token: 'LOGGED_OUT' })
         });
       }
 
       // 2. Czyścimy pamięć lokalną sesji w telefonie (konto w chmurze i/lub Tryb Lokalny)
       await AsyncStorage.removeItem('@lock_account_id');
+      await AsyncStorage.removeItem('@lock_auth_token');
       await AsyncStorage.removeItem('@lock_local_mode');
       await AsyncStorage.removeItem('@lock_local_admin_pass');
       
@@ -640,7 +651,10 @@ export default function App() {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-  fetch(`${backendUrl}/api/data?accountId=${accountId}`, { signal: controller.signal })
+  fetch(`${backendUrl}/api/data`, {
+    signal: controller.signal,
+    headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+  })
     .then((res) => {
       clearTimeout(timeoutId);
       if (!res.ok) throw new Error('Network response was not ok');
@@ -697,15 +711,23 @@ export default function App() {
   }
 
   const method = payload ? 'POST' : 'GET';
+  // Build auth headers — prefer the signed JWT; fall back gracefully if it
+  // hasn't arrived yet (e.g. older server or session restored from old storage).
+  const authHeader = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
   const config = {
     method: method,
-    headers: payload ? { 'Content-Type': 'application/json' } : {}
+    headers: payload
+      ? { 'Content-Type': 'application/json', ...authHeader }
+      : { ...authHeader }
   };
-  if (payload) config.body = JSON.stringify({ ...payload, accountId });
+  // Remove accountId from the body — the server now reads it from the JWT.
+  if (payload) {
+    const { accountId: _dropped, ...safePayload } = payload;
+    config.body = JSON.stringify(safePayload);
+  }
 
-  const separator = endpoint.includes('?') ? '&' : '?';
-  
-  fetch(`${backendUrl}${endpoint}${payload ? '' : separator + 'accountId=' + accountId}`, config)
+  // GET requests no longer append ?accountId= — the Authorization header carries identity.
+  fetch(`${backendUrl}${endpoint}`, config)
     .then((res) => {
       if (!res.ok) throw new Error(`HTTP status ${res.status}`);
       
@@ -796,8 +818,11 @@ export default function App() {
       // Wysyłamy token bezpośrednio na Twój serwer Proxmox
       const response = await fetch(`${backendUrl}/api/auth/save_push_token`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: targetAccountId, token })
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
+        },
+        body: JSON.stringify({ token })
       });
       
       const resData = await response.json();
@@ -836,12 +861,14 @@ export default function App() {
         } else {
           // KROK B: Pobieramy ID konta (czy jest zalogowany) - tylko w trybie chmury
           const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
+          const storedToken     = await AsyncStorage.getItem('@lock_auth_token');
 
-          if (storedAccountId) {
-            setAccountId(parseInt(storedAccountId, 10));
+          if (storedToken || storedAccountId) {
+            if (storedToken)     setAuthToken(storedToken);
+            if (storedAccountId) setAccountId(parseInt(storedAccountId, 10));
             resetUiToDefault();
-            setIsConfigured(true); // Wpuszczamy do Dashboardu
-            registerForPushNotificationsAsync(parseInt(storedAccountId, 10));
+            setIsConfigured(true);
+            registerForPushNotificationsAsync(storedAccountId ? parseInt(storedAccountId, 10) : null);
           }
         }
       } catch (e) {
