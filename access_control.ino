@@ -377,17 +377,6 @@ void renderSystemUI() {
       } 
     } 
   }   
-  else { 
-    display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
-    display.fillCircle(25, 39, 2, SH110X_BLACK); 
-    display.drawFastVLine(25, 41, 5, SH110X_BLACK); 
-    display.drawCircleHelper(25, 32, 7, 1|2, SH110X_WHITE); 
-    display.drawFastVLine(18, 32, 4, SH110X_WHITE);
-    display.drawFastVLine(32, 32, 4, SH110X_WHITE); 
-    display.setTextSize(2); 
-    display.setCursor(48, 24); 
-    display.print("LOCKED"); 
-  } 
   else if (tamperActive) {
     display.setTextSize(1);
     display.setCursor(4, 16);  display.print("!! ALARM SABOTAZU !!");
@@ -406,6 +395,16 @@ void renderSystemUI() {
     }
     display.setTextSize(1);
     display.setCursor(4, 52);  display.print("# = OK      * = Czyszcz");
+  } else { 
+    display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
+    display.fillCircle(25, 39, 2, SH110X_BLACK); 
+    display.drawFastVLine(25, 41, 5, SH110X_BLACK); 
+    display.drawCircleHelper(25, 32, 7, 1|2, SH110X_WHITE); 
+    display.drawFastVLine(18, 32, 4, SH110X_WHITE);
+    display.drawFastVLine(32, 32, 4, SH110X_WHITE); 
+    display.setTextSize(2); 
+    display.setCursor(48, 24); 
+    display.print("LOCKED"); 
   }
 
   display.drawFastHLine(0, 53, 128, SH110X_WHITE); 
