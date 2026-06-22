@@ -32,6 +32,9 @@ try {
 const HARDWARE_OTA_USER = 'admin';
 
 // ─── GitHub PAT ───────────────────────────────────────────────────────────────
+// NEVER hard-code this. Set the env variable on your Proxmox server:
+//   export GITHUB_PAT="ghp_your_new_token_here"
+// The old token that was in source has been exposed and MUST be rotated at:
 //   https://github.com/settings/tokens
 const GITHUB_PAT  = process.env.GITHUB_PAT  || '';
 const GITHUB_USER = process.env.GITHUB_USER  || "pepiuspl";
@@ -1071,6 +1074,50 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       // LOOP POLL ZAMKA 
       // =========================================================================
+      // =========================================================================
+      // ANTI-TAMPER ALERT  — called by firmware, NOT the app (no JWT needed)
+      // Firmware POSTs {mac, active:true/false} when the NC tamper switch
+      // inside the second-board enclosure opens or closes.
+      // =========================================================================
+      if (pathname === '/api/tamper' && req.method === 'POST') {
+        const { mac, active } = body;
+        if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
+
+        const severity  = active ? '⚠️  TAMPER ALERT' : '✅ Tamper Cleared';
+        const detail    = active
+          ? 'Obudowa drugiej płytki (panel RFID) została OTWARTA. Możliwy sabotaż!'
+          : 'Obudowa drugiej płytki została ponownie zamknięta.';
+
+        writeToLocalLogFile('TAMPER', `[${mac}] ${severity}: ${detail}`);
+
+        // Log to database as a system event (appears in app logs)
+        try {
+          await dbPool.query(
+            'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
+            [mac, `${severity}: ${detail}`]
+          );
+        } catch (_) {}
+
+        // Push notification to account owner
+        try {
+          const accRes = await dbPool.query(
+            `SELECT a.push_token, a.push_alarms
+             FROM accounts a
+             JOIN devices d ON d.account_id = a.id
+             WHERE d.mac_address = $1 LIMIT 1`,
+            [mac]
+          );
+          if (accRes.rows.length > 0) {
+            const { push_token, push_alarms } = accRes.rows[0];
+            if (push_token && push_token !== 'LOGGED_OUT' && push_alarms !== false) {
+              sendPushNotification(push_token, severity, detail);
+            }
+          }
+        } catch (_) {}
+
+        return sendJSON(res, 200, { status: 'logged' });
+      }
+
       if ((pathname === '/api/hardware/poll' || pathname === '/api/poll' || pathname === '/poll') && req.method === 'GET') {
         const logFile = '/var/log/smartlock/smartlock_system.log';
         const forceLog = (msg) => {
@@ -1395,3 +1442,114 @@ function sendPushNotification(token, title, body) {
   req.write(postData);
   req.end();
 }
+      // =========================================================================
+      // KEYPAD PIN VERIFICATION  — firmware-facing (no JWT, uses MAC lookup)
+      // POST { mac, pin }  →  { granted: true/false }
+      //
+      // One-time DB setup (run once on your Proxmox server):
+      //   psql -U postgres -d your_db -c \
+      //   "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS keypad_pin_hash VARCHAR(255);"
+      //
+      // Rate-limit: 5 wrong attempts per 15 min per MAC address
+      // =========================================================================
+      const keypadAttempts = {};   // { mac: { count, resetAt } }
+
+      if (pathname === '/api/auth/keypad' && req.method === 'POST') {
+        const { mac, pin } = body;
+        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
+
+        // Rate limit by MAC
+        const now = Date.now();
+        if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt) {
+          keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
+        }
+        keypadAttempts[mac].count++;
+        if (keypadAttempts[mac].count > 5) {
+          const wait = Math.ceil((keypadAttempts[mac].resetAt - now) / 1000);
+          writeToLocalLogFile('Keypad RateLimit', `Too many PIN attempts from MAC: ${mac}`);
+          return sendJSON(res, 429, { granted: false, error: `Too many attempts. Wait ${wait}s.` });
+        }
+
+        try {
+          // Look up account that owns this device
+          const devRes = await dbPool.query(
+            `SELECT a.id, a.keypad_pin_hash, a.push_token, a.push_alarms
+             FROM accounts a
+             JOIN devices d ON d.account_id = a.id
+             WHERE d.mac_address = $1 LIMIT 1`,
+            [mac]
+          );
+
+          if (devRes.rows.length === 0) {
+            writeToLocalLogFile('Keypad', `Unknown MAC: ${mac}`);
+            return sendJSON(res, 404, { granted: false, error: 'Device not registered' });
+          }
+
+          const row = devRes.rows[0];
+
+          if (!row.keypad_pin_hash) {
+            writeToLocalLogFile('Keypad', `No PIN set for account ${row.id}`);
+            return sendJSON(res, 403, { granted: false, error: 'Keypad PIN not configured' });
+          }
+
+          const valid = await bcrypt.compare(String(pin), row.keypad_pin_hash);
+
+          if (valid) {
+            keypadAttempts[mac] = { count: 0, resetAt: 0 };  // reset counter on success
+            writeToLocalLogFile('Keypad', `PIN GRANTED for account ${row.id} from MAC ${mac}`);
+
+            // Log unlock event to system_events
+            await dbPool.query(
+              'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
+              [mac, `Keypad PIN access granted for account ${row.id}`]
+            ).catch(() => {});
+
+            return sendJSON(res, 200, { granted: true });
+          } else {
+            writeToLocalLogFile('Keypad', `PIN DENIED for account ${row.id} from MAC ${mac} (${keypadAttempts[mac].count}/5)`);
+
+            // Push alert on wrong PIN
+            if (row.push_token && row.push_alarms !== false) {
+              sendPushNotification(
+                row.push_token,
+                '⚠️ Błędny PIN na klawiaturze',
+                `Zarejestrowano nieprawidłową próbę PIN z urządzenia ${mac}`
+              );
+            }
+
+            return sendJSON(res, 200, { granted: false });
+          }
+
+        } catch (err) {
+          writeToLocalLogFile('Keypad ERROR', String(err));
+          return sendJSON(res, 500, { granted: false, error: 'Server error' });
+        }
+      }
+
+      // =========================================================================
+      // SET / CHANGE KEYPAD PIN  — app-facing (JWT protected)
+      // POST { newPin }  →  { success: true }
+      // Send empty string to clear/disable the PIN.
+      // =========================================================================
+      if (pathname === '/api/settings/keypad_pin' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { newPin } = body;
+
+        if (newPin && (String(newPin).length < 4 || String(newPin).length > 8)) {
+          return sendJSON(res, 400, { error: 'PIN must be 4–8 digits' });
+        }
+        if (newPin && !/^\d+$/.test(String(newPin))) {
+          return sendJSON(res, 400, { error: 'PIN must contain digits only' });
+        }
+
+        const hash = newPin ? await bcrypt.hash(String(newPin), 10) : null;
+
+        await dbPool.query(
+          'UPDATE accounts SET keypad_pin_hash = $1 WHERE id = $2',
+          [hash, accountId]
+        );
+
+        const action = newPin ? 'set' : 'cleared';
+        writeToLocalLogFile('Keypad Settings', `PIN ${action} for account ${accountId}`);
+        return sendJSON(res, 200, { success: true, status: action });
+      }

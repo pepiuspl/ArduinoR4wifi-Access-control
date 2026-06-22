@@ -51,6 +51,12 @@ void handleOnlineInstallerServer();
 void executeCloudSynchronization(); 
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister); 
 void sendRemoteLog(String message);
+void sendTamperAlert(bool active);
+void checkTamper();
+char scanKeypad();
+void checkKeypad();
+void handleKeypress(char key);
+void verifyKeypadPIN(const String& pin);
 String urlDecode(String str);
 String urlEncode(String str); 
 
@@ -83,6 +89,36 @@ char owner_email[64] = "";
 #define BUZZER_PIN  27   
 #define RST_PIN     4    
 #define SS_PIN      5   
+
+// ─── ANTI-TAMPER ─────────────────────────────────────────────────────────────
+// ★ Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
+//   Bez przełącznika: IO14 = floating HIGH → fałszywy alarm przy każdym starcie!
+#define TAMPER_PIN       14
+#define TAMPER_INSTALLED false   // ← zmień na true gdy przełącznik NC jest zainstalowany
+
+// ─── KLAWIATURA 4×3 ──────────────────────────────────────────────────────────
+// Złącze (lewy→prawy, 7 pinów):
+//  Pin 1→IO16 (kol: 1 4 7 *)  Pin 2→IO17 (kol: 2 5 8 0)  Pin 3→IO2 (kol: 3 6 9 #)
+//  Pin 4→IO12 (wiersz: 1 2 3, wewn. pull-up)
+//  Pin 5→IO15 (wiersz: 4 5 6, wewn. pull-up)
+//  Pin 6→IO34 (wiersz: 7 8 9, ZEWN. 10kΩ do 3.3V!)
+//  Pin 7→IO35 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
+#define KP_COL1  16
+#define KP_COL2  17
+#define KP_COL3  2
+#define KP_ROW1  12
+#define KP_ROW2  15
+#define KP_ROW3  34
+#define KP_ROW4  35
+
+const uint8_t KP_COLS[3] = { KP_COL1, KP_COL2, KP_COL3 };
+const uint8_t KP_ROWS[4] = { KP_ROW1, KP_ROW2, KP_ROW3, KP_ROW4 };
+const char    KP_MAP[4][3] = {
+  { '1','2','3' },
+  { '4','5','6' },
+  { '7','8','9' },
+  { '*','0','#' }
+};
 
 #define MAX_LOGS 30  
 #define OLED_RESET -1  
@@ -127,6 +163,21 @@ bool systemWasOnline = false;
 // OD RAZU (poza normalnym 1s cyklem), żeby serwer/aplikacja jak najszybciej
 // zobaczyły prawdziwy, potwierdzony przez sprzęt stan rygla.
 bool forceSyncNow = false;
+
+// ─── ZMIENNE ANTI-TAMPER ──────────────────────────────────────────────────────
+bool tamperActive            = false;
+unsigned long lastTamperPost = 0;
+const unsigned long TAMPER_REPEAT_MS = 30000;
+
+// ─── ZMIENNE KLAWIATURA ───────────────────────────────────────────────────────
+String        kpBuffer    = "";
+unsigned long kpLastKey   = 0;
+char          kpLastChar  = 0;
+unsigned long kpLastPress = 0;
+bool          kpChecking  = false;
+const unsigned long KP_TIMEOUT_MS  = 10000;
+const unsigned long KP_DEBOUNCE_MS = 200;
+const int           KP_MAX_LEN     = 8;
 
 String urlDecode(String str) { 
   String decoded = ""; 
@@ -337,6 +388,25 @@ void renderSystemUI() {
     display.setCursor(48, 24); 
     display.print("LOCKED"); 
   } 
+  else if (tamperActive) {
+    display.setTextSize(1);
+    display.setCursor(4, 16);  display.print("!! ALARM SABOTAZU !!");
+    display.setCursor(4, 28);  display.print("Obudowa panelu RFID");
+    display.setCursor(4, 38);  display.print("jest OTWARTA!");
+    display.setCursor(0, 48);  display.print("Zdalne odblokowanie");
+    display.setCursor(12, 56); display.print("ZABLOKOWANE");
+  } else if (kpBuffer.length() > 0 || kpChecking) {
+    display.setCursor(28, 16); display.print("Wpisz PIN:");
+    display.setTextSize(2);    display.setCursor(10, 30);
+    if (kpChecking) {
+      display.print("...");
+    } else {
+      for (int i = 0; i < (int)kpBuffer.length(); i++) display.print('*');
+      display.print("_");
+    }
+    display.setTextSize(1);
+    display.setCursor(4, 52);  display.print("# = OK      * = Czyszcz");
+  }
 
   display.drawFastHLine(0, 53, 128, SH110X_WHITE); 
   display.setTextSize(1); 
@@ -416,7 +486,8 @@ enum SoundId {
   SND_OTA_START,
   SND_OTA_SUCCESS,
   SND_DELETE,
-  SND_CLICK_CONFIRM
+  SND_CLICK_CONFIRM,
+  SND_TAMPER_ALARM     // 5 ostrych impulsów alarmowych
 };
 
 const SoundNote SND_DATA_ACCESS_GRANTED[]  = { {988, 70, 25}, {1318, 70, 25}, {1760, 130, 0} };           // wesoły arpeggio "wejdź"
@@ -432,6 +503,7 @@ const SoundNote SND_DATA_OTA_START[]       = { {1100, 70, 35}, {1600, 110, 0} };
 const SoundNote SND_DATA_OTA_SUCCESS[]     = { {1568, 130, 50}, {1976, 130, 50}, {2349, 260, 0} };
 const SoundNote SND_DATA_DELETE[]          = { {500, 80, 45}, {340, 160, 0} };
 const SoundNote SND_DATA_CLICK_CONFIRM[]   = { {1200, 55, 35}, {1600, 70, 0} };
+const SoundNote SND_DATA_TAMPER_ALARM[]    = { {1800,80,40},{1800,80,40},{1800,80,40},{1800,80,40},{1800,200,0} };
 
 const SoundNote* activeMelody = nullptr;
 int activeMelodyLen = 0;
@@ -476,6 +548,7 @@ void playSound(int id) {
     case SND_OTA_SUCCESS:     activeMelody = SND_DATA_OTA_SUCCESS;     activeMelodyLen = sizeof(SND_DATA_OTA_SUCCESS)/sizeof(SoundNote); break;
     case SND_DELETE:          activeMelody = SND_DATA_DELETE;          activeMelodyLen = sizeof(SND_DATA_DELETE)/sizeof(SoundNote); break;
     case SND_CLICK_CONFIRM:   activeMelody = SND_DATA_CLICK_CONFIRM;   activeMelodyLen = sizeof(SND_DATA_CLICK_CONFIRM)/sizeof(SoundNote); break;
+    case SND_TAMPER_ALARM:    activeMelody = SND_DATA_TAMPER_ALARM;    activeMelodyLen = sizeof(SND_DATA_TAMPER_ALARM)/sizeof(SoundNote); break;
     default: activeMelody = nullptr; activeMelodyLen = 0; break;
   }
   activeNoteIdx = -1;
@@ -568,6 +641,7 @@ void handleProvisioningServer() {
       String localPass = getFactoryAdminPassword();
       String macStr = getMacAddressString();
       client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
+      client.print(",\"tamper\":"); client.print(tamperActive ? "true" : "false"); 
       client.println("{\"status\":\"offline_ready\",\"admin_pass\":\"" + localPass + "\",\"mac\":\"" + macStr + "\"}");
       delay(100); client.stop();
       ESP.restart();
@@ -782,6 +856,7 @@ HEADER_COMPLETE:
         if (i > 0) client.print(","); 
       } 
       client.print("],\"ssid\":\""); client.print(ssid); 
+      client.print(",\"tamper\":"); client.print(tamperActive ? "true" : "false"); 
       client.print("\",\"admin_pass\":\""); client.print(getFactoryAdminPassword()); 
       client.print("\"}");
     } 
@@ -974,7 +1049,12 @@ void executeCloudSynchronization() {
   }
 
   if (serverUnlockSignal) {  
-    if (!doorOpen) openDoor("Zdalne Wywolanie");
+    if (tamperActive) {
+      addLog("!! BLOKADA: zdalne otwarcie zablokowane (alarm sabotazu)!");
+      sendTamperAlert(true);
+    } else if (!doorOpen) {
+      openDoor("Zdalne Wywolanie");
+    }
   }  
   
   if (serverLearnSignal) {  
@@ -1114,6 +1194,127 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   httpPost.stop(); 
 } 
 
+
+// =========================================================================
+// ANTI-TAMPER — sendTamperAlert() + checkTamper()
+// =========================================================================
+void sendTamperAlert(bool active) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClient tc; tc.setTimeout(500);
+  if (!tc.connect(PROXMOX_SERVER, PROXMOX_PORT)) return;
+  String mac  = getMacAddressString();
+  String body = "{\"mac\":\"" + mac + "\",\"active\":" + (active ? "true" : "false") + "}";
+  tc.println("POST /api/tamper HTTP/1.1");
+  tc.print("Host: "); tc.println(PROXMOX_SERVER);
+  tc.println("Content-Type: application/json");
+  tc.print("Content-Length: "); tc.println(body.length());
+  tc.println("Connection: close\r\n"); tc.print(body);
+  unsigned long t = millis();
+  while ((tc.connected() || tc.available()) && millis()-t < 500) { if (tc.available()) tc.read(); }
+  tc.stop();
+}
+
+void checkTamper() {
+  if (!TAMPER_INSTALLED) return;    // wyłączone do czasu fizycznej instalacji przełącznika
+  if (WiFi.status() != WL_CONNECTED) return;
+  bool currentlyOpen = (digitalRead(TAMPER_PIN) == HIGH);
+  if (currentlyOpen && !tamperActive) {
+    tamperActive = true;
+    addLog("!! TAMPER: obudowa drugiej plytki otwarta !!");
+    playSound(SND_TAMPER_ALARM);
+    digitalWrite(LED_GREEN, LOW); digitalWrite(LED_RED, HIGH);
+    sendTamperAlert(true); lastTamperPost = millis();
+  } else if (!currentlyOpen && tamperActive) {
+    tamperActive = false;
+    addLog("TAMPER CLEARED: obudowa zamknieta");
+    digitalWrite(LED_RED, LOW);
+    sendTamperAlert(false);
+  } else if (tamperActive && (millis() - lastTamperPost >= TAMPER_REPEAT_MS)) {
+    playSound(SND_TAMPER_ALARM);
+    sendTamperAlert(true); lastTamperPost = millis();
+  }
+}
+
+// =========================================================================
+// KLAWIATURA PIN — 4×3 matrix keypad
+// =========================================================================
+char scanKeypad() {
+  for (int c = 0; c < 3; c++) {
+    digitalWrite(KP_COLS[c], LOW);
+    delayMicroseconds(20);
+    for (int r = 0; r < 4; r++) {
+      if (digitalRead(KP_ROWS[r]) == LOW) { digitalWrite(KP_COLS[c], HIGH); return KP_MAP[r][c]; }
+    }
+    digitalWrite(KP_COLS[c], HIGH);
+  }
+  return 0;
+}
+
+void verifyKeypadPIN(const String& pin) {
+  kpChecking = true; renderSystemUI();
+  if (WiFi.status() != WL_CONNECTED) {
+    addLog("Keypad: offline — brak weryfikacji PIN"); playSound(SND_ACCESS_DENIED);
+    kpChecking = false; renderSystemUI(); return;
+  }
+  if (tamperActive) {
+    addLog("Keypad: BLOKADA — aktywny alarm sabotazu"); playSound(SND_ACCESS_DENIED);
+    kpChecking = false; renderSystemUI(); return;
+  }
+  WiFiClient kc; kc.setTimeout(3000);
+  if (!kc.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
+    addLog("Keypad: blad polaczenia z serwerem"); playSound(SND_ACCESS_DENIED);
+    kpChecking = false; renderSystemUI(); return;
+  }
+  String mac  = getMacAddressString();
+  String body = "{\"mac\":\"" + mac + "\",\"pin\":\"" + pin + "\"}";
+  kc.println("POST /api/auth/keypad HTTP/1.1");
+  kc.print("Host: "); kc.println(PROXMOX_SERVER);
+  kc.println("Content-Type: application/json");
+  kc.print("Content-Length: "); kc.println(body.length());
+  kc.println("Connection: close\r\n"); kc.print(body);
+  unsigned long deadline = millis() + 3000; String resp = "";
+  while ((kc.connected() || kc.available()) && millis() < deadline) { if (kc.available()) resp += (char)kc.read(); }
+  kc.stop();
+  if (resp.indexOf("\"granted\":true") != -1) {
+    addLog("Keypad: PIN ZAAKCEPTOWANY — otwieranie");
+    playSound(SND_ACCESS_GRANTED);
+    if (!doorOpen) openDoor("Keypad PIN");
+  } else {
+    addLog("Keypad: PIN ODRZUCONY");
+    playSound(SND_ACCESS_DENIED);
+    for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
+  }
+  kpChecking = false; renderSystemUI();
+}
+
+void handleKeypress(char key) {
+  playSound(SND_CLICK_CONFIRM); kpLastKey = millis();
+  if (key == '#') {
+    if (kpBuffer.length() == 0) return;
+    if ((int)kpBuffer.length() < 4) {
+      addLog("Keypad: PIN za krotki (min 4 cyfry)"); playSound(SND_ACCESS_DENIED);
+      kpBuffer = ""; renderSystemUI(); return;
+    }
+    String pin = kpBuffer; kpBuffer = ""; verifyKeypadPIN(pin);
+  } else if (key == '*') {
+    kpBuffer = ""; renderSystemUI();
+  } else {
+    if ((int)kpBuffer.length() < KP_MAX_LEN) { kpBuffer += key; renderSystemUI(); }
+  }
+}
+
+void checkKeypad() {
+  if (kpBuffer.length() > 0 && (millis() - kpLastKey > KP_TIMEOUT_MS)) {
+    kpBuffer = ""; kpLastChar = 0; renderSystemUI();
+    addLog("Keypad: timeout — bufor wyczyszczony");
+  }
+  char key = scanKeypad();
+  if (key == 0) { kpLastChar = 0; return; }
+  if (key == kpLastChar && (millis() - kpLastPress < KP_DEBOUNCE_MS)) return;
+  kpLastChar = key; kpLastPress = millis();
+  handleKeypress(key);
+}
+
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
@@ -1122,6 +1323,14 @@ void setup() {
   delay(1500);
   EEPROM.begin(512);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  // Anti-tamper pin (tylko gdy TAMPER_INSTALLED == true)
+  if (TAMPER_INSTALLED) pinMode(TAMPER_PIN, INPUT_PULLUP);
+  // Klawiatura
+  for (int c = 0; c < 3; c++) { pinMode(KP_COLS[c], OUTPUT); digitalWrite(KP_COLS[c], HIGH); }
+  pinMode(KP_ROW1, INPUT_PULLUP);  // IO12
+  pinMode(KP_ROW2, INPUT_PULLUP);  // IO15
+  pinMode(KP_ROW3, INPUT);         // IO34 — ZEWN. 10kΩ do 3.3V!
+  pinMode(KP_ROW4, INPUT);         // IO35 — ZEWN. 10kΩ do 3.3V!
   Wire.begin();
   Wire.beginTransmission(0x3C);
   if (Wire.endTransmission() == 0) {
@@ -1245,6 +1454,8 @@ void setup() {
 
 void loop() {
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
+  checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
+  checkKeypad();  // obsługa matrycy klawiatury PIN
 
   if (millis() - lastFrameTick > 80) { 
     lastFrameTick = millis();

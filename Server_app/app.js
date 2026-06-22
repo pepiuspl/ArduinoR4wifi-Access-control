@@ -83,6 +83,10 @@ export default function App() {
   
   // STANY I FUNKCJA PUSH
   const [pushEntries, setPushEntries] = useState(true);
+  const [kpPin, setKpPin]         = useState('');        // PIN entry field
+  const [kpPinConfirm, setKpPinConfirm] = useState('');  // confirm field
+  const [kpPinStatus, setKpPinStatus]   = useState('');  // feedback message
+  const [kpPinSet, setKpPinSet]         = useState(false); // whether server has a PIN
   const [pushAlarms, setPushAlarms] = useState(true);
 
   const savePushPreferences = (entries, alarms) => {
@@ -142,7 +146,8 @@ export default function App() {
     logs: [],
     ssid: 'Ecosystem LAN',
     version: '2.9.4',
-    otaProgress: 0 
+    otaProgress: 0,
+    tamper: false   // true when second-board enclosure tamper switch is open
   });
   
   const [newName, setNewName] = useState('');
@@ -608,10 +613,21 @@ export default function App() {
     ) {
       nextLock = 'pending';
     }
+
+    // Derive tamper state from the last 5 log lines so we don't need a separate
+    // API endpoint — the firmware already writes TAMPER events to system_events.
+    let nextTamper = prevState.tamper;
+    if (data.logs && data.logs.length > 0) {
+      const recent = data.logs.slice(0, 5).join(' ');
+      if (recent.includes('TAMPER ALERT'))   nextTamper = true;
+      if (recent.includes('Tamper Cleared') || recent.includes('TAMPER CLEARED')) nextTamper = false;
+    }
+
     return {
       ...prevState,
       ...data,
-      lock: nextLock,
+      lock:   nextLock,
+      tamper: nextTamper,
       version: data.version || prevState.version || '2.9.4',
     };
   };
@@ -1256,6 +1272,18 @@ export default function App() {
           {currentScreen === 'dashboard' && (
             <ScrollView contentContainerStyle={styles.scrollWrapper}>
               <Text style={styles.screenHeaderText}>📱 Dashboard</Text>
+
+              {/* ── TAMPER ALERT BANNER ── shown whenever the second-board enclosure is open */}
+              {lockState.tamper && (
+                <View style={styles.tamperBanner}>
+                  <Text style={styles.tamperBannerTitle}>⚠️  ALARM SABOTAŻOWY</Text>
+                  <Text style={styles.tamperBannerBody}>
+                    Obudowa panelu RFID jest otwarta lub zdjęta.{'\n'}
+                    Zdalnie otwieranie zamka zostało zablokowane.{'\n'}
+                    Sprawdź panel natychmiast.
+                  </Text>
+                </View>
+              )}
               {isLocalMode && (
                 <View style={{ backgroundColor: '#1c1917', borderWidth: 1, borderColor: '#444', borderRadius: 10, padding: 10, marginBottom: 14 }}>
                   <Text style={{ color: '#aaa', fontSize: 12, textAlign: 'center', fontWeight: 'bold' }}>🔌 TRYB LOKALNY - bez internetu, bez konta w chmurze</Text>
@@ -1538,6 +1566,98 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
               )}
+
+              {/* ── KEYPAD PIN ─────────────────────────────────────────────── */}
+              {!isLocalMode && (
+                <View style={styles.card}>
+                  <Text style={styles.sectionHeader}>🔢 PIN Klawiatury (4–8 cyfr)</Text>
+                  <Text style={{ color: '#aaa', fontSize: 12, marginBottom: 12 }}>
+                    Ustaw kod PIN do otwierania zamka klawiaturą 4×3 podłączoną do panelu RFID.
+                    Wpisanie kodu i zatwierdzenie #{' '}
+                    <Text style={{ color: '#64b5f6' }}>#</Text> otworzy zamek.
+                    Gwiazdka{' '}
+                    <Text style={{ color: '#64b5f6' }}>*</Text> czyści bufor.
+                  </Text>
+
+                  {kpPinSet && (
+                    <View style={{ backgroundColor: '#1e3a1e', borderRadius: 8, padding: 8, marginBottom: 10 }}>
+                      <Text style={{ color: '#81c784', fontSize: 12 }}>✓ PIN jest już ustawiony na urządzeniu</Text>
+                    </View>
+                  )}
+
+                  <Text style={styles.inputLabelText}>Nowy PIN (tylko cyfry)</Text>
+                  <TextInput
+                    style={styles.inputField}
+                    placeholder="np. 1234"
+                    placeholderTextColor="#555"
+                    keyboardType="numeric"
+                    secureTextEntry
+                    maxLength={8}
+                    value={kpPin}
+                    onChangeText={setKpPin}
+                  />
+                  <Text style={styles.inputLabelText}>Potwierdź PIN</Text>
+                  <TextInput
+                    style={styles.inputField}
+                    placeholder="powtórz PIN"
+                    placeholderTextColor="#555"
+                    keyboardType="numeric"
+                    secureTextEntry
+                    maxLength={8}
+                    value={kpPinConfirm}
+                    onChangeText={setKpPinConfirm}
+                  />
+
+                  {kpPinStatus ? (
+                    <Text style={{ color: kpPinStatus.startsWith('✓') ? '#81c784' : '#ef4444', fontSize: 12, marginBottom: 8 }}>
+                      {kpPinStatus}
+                    </Text>
+                  ) : null}
+
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    <TouchableOpacity
+                      style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#1a3a5c' }]}
+                      onPress={async () => {
+                        if (!kpPin || kpPin.length < 4) { setKpPinStatus('✗ PIN musi mieć min. 4 cyfry'); return; }
+                        if (kpPin !== kpPinConfirm) { setKpPinStatus('✗ PINy nie są identyczne'); return; }
+                        if (!/^\d+$/.test(kpPin)) { setKpPinStatus('✗ Tylko cyfry'); return; }
+                        try {
+                          const r = await fetch(`${backendUrl}/api/settings/keypad_pin`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+                            body: JSON.stringify({ newPin: kpPin }),
+                          });
+                          const d = await r.json();
+                          if (d.success) {
+                            setKpPinStatus('✓ PIN zapisany');
+                            setKpPinSet(true);
+                            setKpPin(''); setKpPinConfirm('');
+                          } else { setKpPinStatus('✗ ' + (d.error || 'Błąd serwera')); }
+                        } catch { setKpPinStatus('✗ Brak połączenia'); }
+                      }}
+                    >
+                      <Text style={styles.btnText}>💾 Zapisz PIN</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#3a1a1a' }]}
+                      onPress={async () => {
+                        try {
+                          const r = await fetch(`${backendUrl}/api/settings/keypad_pin`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+                            body: JSON.stringify({ newPin: '' }),
+                          });
+                          const d = await r.json();
+                          if (d.success) { setKpPinStatus('✓ PIN usunięty'); setKpPinSet(false); }
+                        } catch { setKpPinStatus('✗ Brak połączenia'); }
+                      }}
+                    >
+                      <Text style={styles.btnText}>🗑 Usuń PIN</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
             </ScrollView>
           </KeyboardAvoidingView>
         )}
@@ -1581,6 +1701,26 @@ const styles = StyleSheet.create({
   screenHeaderText: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 16, letterSpacing: 0.3 },
   authCard: { padding: 24, backgroundColor: '#16161a', borderRadius: 16, marginTop: 40, marginHorizontal: 8, alignItems: 'center', borderWidth: 1, borderColor: '#222' },
   authLogoIcon: { marginBottom: 12 },
+  tamperBanner: {
+    backgroundColor: '#7f1d1d',
+    borderWidth: 2,
+    borderColor: '#ef4444',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  tamperBannerTitle: {
+    color: '#fca5a5',
+    fontSize: 16,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  tamperBannerBody: {
+    color: '#fecaca',
+    fontSize: 13,
+    lineHeight: 20,
+  },
   titleText: { fontSize: 22, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 24 },
   installerBoxContainer: { width: '100%', padding: 12, backgroundColor: '#1c1917', borderRadius: 12, marginBottom: 20, borderWidth: 1, borderColor: '#7c2d12' },
   installerTitleText: { color: '#ef4444', fontWeight: 'bold', fontSize: 13, textTransform: 'uppercase', marginBottom: 12 },
