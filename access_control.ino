@@ -1252,11 +1252,33 @@ void checkTamper() {
 // KLAWIATURA PIN — 4×3 matrix keypad
 // =========================================================================
 char scanKeypad() {
+  // Read baseline state of the two input-only rows (IO34/IO35) BEFORE driving any column.
+  // If they are LOW here it means the pull-up resistor is missing, wrong direction (to GND),
+  // or wrong pin — in all those cases we ignore those rows to prevent phantom keypresses.
+  int base_r3 = digitalRead(KP_ROW3);  // IO34 — should be HIGH with correct 10kΩ to 3.3V
+  int base_r4 = digitalRead(KP_ROW4);  // IO35 — should be HIGH with correct 10kΩ to 3.3V
+
   for (int c = 0; c < 3; c++) {
     digitalWrite(KP_COLS[c], LOW);
     delayMicroseconds(20);
+
     for (int r = 0; r < 4; r++) {
-      if (digitalRead(KP_ROWS[r]) == LOW) { digitalWrite(KP_COLS[c], HIGH); return KP_MAP[r][c]; }
+      bool pressed = false;
+      if (r == 0 || r == 1) {
+        // IO2 and IO15: have internal pull-up — simple LOW detection
+        pressed = (digitalRead(KP_ROWS[r]) == LOW);
+      } else {
+        // IO34 (r==2) and IO35 (r==3): no internal pull-up
+        // ONLY accept if the baseline was HIGH (pull-up working) AND now reads LOW (key pressed)
+        // If baseline was LOW → pull-up missing or wrong → ignore row entirely
+        int base = (r == 2) ? base_r3 : base_r4;
+        pressed = (base == HIGH) && (digitalRead(KP_ROWS[r]) == LOW);
+      }
+
+      if (pressed) {
+        digitalWrite(KP_COLS[c], HIGH);
+        return KP_MAP[r][c];
+      }
     }
     digitalWrite(KP_COLS[c], HIGH);
   }
@@ -1348,6 +1370,17 @@ void setup() {
     pinMode(KP_ROW2, INPUT_PULLUP);  // IO15 — wewnętrzny pull-up
     pinMode(KP_ROW3, INPUT);         // IO34 — ZEWNĘTRZNY 10kΩ do 3.3V!
     pinMode(KP_ROW4, INPUT);         // IO35 — ZEWNĘTRZNY 10kΩ do 3.3V!
+    delay(50);  // let lines settle
+    // ── Keypad diagnostics ─────────────────────────────────────────────────────
+    // Open Serial Monitor at 9600 baud immediately after boot to read this.
+    // ALL rows must read HIGH at startup (no key pressed).
+    // If a row reads LOW → its pull-up resistor is missing, reversed (to GND), or on wrong pin.
+    Serial.println("\n=== KEYPAD DIAGNOSTICS (all should be HIGH) ===");
+    Serial.printf("ROW1 IO%-2d: %s\n", KP_ROW1, digitalRead(KP_ROW1) ? "HIGH OK" : "LOW  ← PROBLEM: internal pull-up issue");
+    Serial.printf("ROW2 IO%-2d: %s\n", KP_ROW2, digitalRead(KP_ROW2) ? "HIGH OK" : "LOW  ← PROBLEM: internal pull-up issue");
+    Serial.printf("ROW3 IO%-2d: %s\n", KP_ROW3, digitalRead(KP_ROW3) ? "HIGH OK" : "LOW  ← PROBLEM: 10kΩ to 3.3V missing or wired to GND");
+    Serial.printf("ROW4 IO%-2d: %s\n", KP_ROW4, digitalRead(KP_ROW4) ? "HIGH OK" : "LOW  ← PROBLEM: 10kΩ to 3.3V missing or wired to GND");
+    Serial.println("================================================\n");
   }
   Wire.begin();
   Wire.beginTransmission(0x3C);
