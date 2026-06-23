@@ -1367,7 +1367,7 @@ void checkKeypad() {
 }
 
 void setup() {
-  pinMode(RELAY_PIN, OUTPU);
+  pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
