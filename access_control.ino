@@ -1369,6 +1369,9 @@ void checkKeypad() {
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
+  while(true) {
+    delay(1000);
+  }
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
@@ -1718,7 +1721,7 @@ void loop() {
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
     pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);  // drive to 3.3V → pulls IN below 5V threshold → relay releases
+    digitalWrite(RELAY_PIN, HIGH);  // drive to 3.3V → pulls IN below 5V threshold → relay releases
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
