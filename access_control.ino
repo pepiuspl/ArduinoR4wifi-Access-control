@@ -601,14 +601,14 @@ void openDoor(String source) {
   globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source; 
-  // Module has internal pull-up to 5V. ESP32 at 3.3V or 0.16V can't reach the
-  // 5V trigger threshold. Setting INPUT (floating) lets the pull-up bring IN to
-  // 5V which fires the relay. OUTPUT HIGH (3.3V) brings IN below threshold → OFF.
+  // Module fires when IN is FLOATING (disconnected = module's pull pulls to trigger level).
+  // ESP32 OUTPUT HIGH (3.3V) or LOW keeps it below trigger → relay stays OFF.
+  // INPUT (high-impedance) lets the module's internal circuit bring IN to trigger level → relay FIRES.
   pinMode(RELAY_PIN, INPUT);
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
   playSound(SND_ACCESS_GRANTED); 
-  forceSyncNow = true; // nie czekamy do następnego cyklu pollingu - zgłoś "opened" natychmiast
+  forceSyncNow = true;
   addLog("Otwarto: " + source);
 } 
 
