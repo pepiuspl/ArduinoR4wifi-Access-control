@@ -17,7 +17,7 @@
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-const char* app_version = "v3.0.0";
+const char* app_version = "v2.9.9";
 
 struct User { 
   byte uid[4]; 
@@ -601,8 +601,10 @@ void openDoor(String source) {
   globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source; 
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); 
+  // Module has internal pull-up to 5V. ESP32 at 3.3V or 0.16V can't reach the
+  // 5V trigger threshold. Setting INPUT (floating) lets the pull-up bring IN to
+  // 5V which fires the relay. OUTPUT HIGH (3.3V) brings IN below threshold → OFF.
+  pinMode(RELAY_PIN, INPUT);
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
   playSound(SND_ACCESS_GRANTED); 
@@ -1366,7 +1368,7 @@ void checkKeypad() {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(RELAY_PIN, HIGH);
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
@@ -1400,7 +1402,7 @@ void setup() {
   // Przekaźnik: OUTPUT HIGH = cewka bez napięcia = styk w pozycji domyślnej
   // (moduł przekaźnika active-LOW: HIGH = wyłączony, LOW = włączony)
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(RELAY_PIN, HIGH);
   
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
@@ -1715,7 +1717,8 @@ void loop() {
 
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
-    digitalWrite(RELAY_PIN, LOW);  // wyłącz przekaźnik (active-LOW: HIGH = off)
+    pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, HIGH);  // drive to 3.3V → pulls IN below 5V threshold → relay releases
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
