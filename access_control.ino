@@ -93,7 +93,9 @@ char owner_email[64] = "";
 // ─── ANTI-TAMPER ─────────────────────────────────────────────────────────────
 // ★ Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
 //   Bez przełącznika: IO14 = floating HIGH → fałszywy alarm przy każdym starcie!
-#define TAMPER_PIN       14
+// Anti-tamper pin — moved to IO36 (IO14 now used for KP_ROW1)
+// When installing tamper switch on IO36: add external 10kΩ pull-up to 3.3V
+#define TAMPER_PIN       36
 #define TAMPER_INSTALLED false   // ← zmień na true gdy przełącznik NC jest zainstalowany
 
 // KLAWIATURA — ustawiona na true (klawiatura jest podłączona)
@@ -119,8 +121,11 @@ char owner_email[64] = "";
 //  Pin 7 → IO35 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
 #define KP_COL1  16
 #define KP_COL2  17
-#define KP_COL3  12   // IO12 (nie IO2 — brak diody LED!)
-#define KP_ROW1  2    // IO2  (INPUT_PULLUP — dioda ~28µA = praktycznie ciemna)
+#define KP_COL3  12   // connector pin 5 — col right (3 6 9 #)  [was IO2 = LED pin!]
+#define KP_ROW1  14   // connector pin 2 — row 1 (1 2 3)  ← MOVE WIRE from IO2 to IO14
+                      // IO2 has the onboard blue LED; its LED circuit pulls IO2 to ~2V
+                      // which is below ESP32's HIGH threshold → always reads LOW → constant beeping
+                      // IO14 has no LED, internal pull-up works correctly
 #define KP_ROW2  15
 #define KP_ROW3  34   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
 #define KP_ROW4  35   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
@@ -1366,7 +1371,7 @@ void setup() {
   //            IO34/IO35 nie są inicjowane (nie pływają, brak fałszywych wciśnięć)
   if (KEYPAD_INSTALLED) {
     for (int c = 0; c < 3; c++) { pinMode(KP_COLS[c], OUTPUT); digitalWrite(KP_COLS[c], HIGH); }
-    pinMode(KP_ROW1, INPUT_PULLUP);  // IO2
+    pinMode(KP_ROW1, INPUT_PULLUP);  // IO14 — wewnętrzny pull-up, brak diody LED
     pinMode(KP_ROW2, INPUT_PULLUP);  // IO15
     pinMode(KP_ROW3, INPUT);         // IO34 - needs external 10k to 3.3V
     pinMode(KP_ROW4, INPUT);         // IO35 - needs external 10k to 3.3V
