@@ -601,14 +601,18 @@ void openDoor(String source) {
   globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source; 
-  // Module fires when IN is FLOATING (disconnected = module's pull pulls to trigger level).
-  // ESP32 OUTPUT HIGH (3.3V) or LOW keeps it below trigger → relay stays OFF.
-  // INPUT (high-impedance) lets the module's internal circuit bring IN to trigger level → relay FIRES.
-  pinMode(RELAY_PIN, INPUT);
+  // Relay hysteresis behaviour:
+  //   INPUT  (float → 5V via module pull)  : coil fires   → NO closes
+  //   OUTPUT LOW  (0V)                      : coil releases → NO opens
+  //   OUTPUT HIGH (3.3V) is in the HYSTERESIS BAND:
+  //     • relay already OFF → stays OFF  (ok at boot)
+  //     • relay already ON  → stays ON   (← was the bug)
+  // Fix: only OUTPUT LOW can release the relay once it has fired.
+  pinMode(RELAY_PIN, INPUT);   // float → module pull → 5V → relay fires
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
   playSound(SND_ACCESS_GRANTED); 
-  forceSyncNow = true;
+  forceSyncNow = true; // nie czekamy do następnego cyklu pollingu - zgłoś "opened" natychmiast
   addLog("Otwarto: " + source);
 } 
 
@@ -1368,7 +1372,7 @@ void checkKeypad() {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW);  // LOW = below release threshold → relay stays/goes OFF
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
@@ -1399,10 +1403,11 @@ void setup() {
     Serial.println("[WARN] Brak ekranu OLED. Ekran wyłączony bezpiecznie.");
   }
 
-  // Przekaźnik: OUTPUT HIGH = cewka bez napięcia = styk w pozycji domyślnej
-  // (moduł przekaźnika active-LOW: HIGH = wyłączony, LOW = włączony)
+  // Relay idle state: OUTPUT LOW keeps coil de-energised.
+  // LOW (0V) is below the release threshold → relay stays OFF whether it was on or off.
+  // HIGH (3.3V) is in hysteresis band → only safe when relay starts cold (boot).
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW);
   
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
@@ -1718,7 +1723,7 @@ void loop() {
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
     pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, HIGH);  // drive to 3.3V → pulls IN below 5V threshold → relay releases
+    digitalWrite(RELAY_PIN, LOW);   // LOW (0V) → below release threshold → relay releases regardless of hysteresis
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
