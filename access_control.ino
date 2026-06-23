@@ -601,12 +601,13 @@ void openDoor(String source) {
   globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source; 
-  // Relay module fires when IN is LOW/floating (active-LOW with pull from 5V supply).
-  // OUTPUT HIGH (3.3V): IN voltage too low for LED forward bias → relay OFF  ← idle
-  // INPUT (floating → pulled near 0V by module): LED conducts → relay fires ← door open
-  // OUTPUT LOW (0.16V): LED still conducts (5V-0.16V > Vf) → relay stays ON ← wrong!
-  // Conclusion: idle/close = OUTPUT HIGH, door open = INPUT (floating).
-  pinMode(RELAY_PIN, INPUT);   // float → module pulls IN near 0V → LED fires → relay ON
+  // Module is active-HIGH (NPN transistor, 5V pull-up on IN).
+  // External 1kΩ pull-down on IO32 → GND required!
+  //   OUTPUT HIGH (3.3V): NPN base above Vbe threshold → relay FIRES
+  //   INPUT/OUTPUT LOW  : pull-down wins → IN near 0V → NPN OFF → relay RELEASES
+  //   Boot (floating)   : pull-down → 0.45V → below Vbe → relay stays OFF at boot
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);   // HIGH fires the relay
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
   playSound(SND_ACCESS_GRANTED); 
@@ -1370,7 +1371,7 @@ void checkKeypad() {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW);   // LOW immediately at boot → relay stays OFF (pull-down holds IN near 0V)
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
@@ -1401,10 +1402,9 @@ void setup() {
     Serial.println("[WARN] Brak ekranu OLED. Ekran wyłączony bezpiecznie.");
   }
 
-  // Przekaźnik: OUTPUT HIGH = cewka bez napięcia = styk w pozycji domyślnej
-  // (moduł przekaźnika active-LOW: HIGH = wyłączony, LOW = włączony)
+  // Relay idle: OUTPUT LOW → pull-down dominates → IN ~0V → NPN OFF → relay releases
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW);
   
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
@@ -1720,7 +1720,7 @@ void loop() {
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
     pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, HIGH);  // drive to 3.3V → pulls IN below 5V threshold → relay releases
+    digitalWrite(RELAY_PIN, LOW);   // LOW + external pull-down → IN ~0V → NPN OFF → relay releases
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
