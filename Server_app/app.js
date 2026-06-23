@@ -1382,7 +1382,12 @@ export default function App() {
           )}
 
         {currentScreen === 'directory' && (
-  <ScrollView contentContainerStyle={styles.scrollWrapper}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={{ flex: 1 }}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 100}
+          >
+          <ScrollView contentContainerStyle={styles.scrollWrapper} keyboardShouldPersistTaps="handled">
     <Text style={styles.screenHeaderText}>👥 Lista Użytkowników</Text>
     
     {/* 🌟 SEKCJA PAROWANIA PRZENIESIONA TUTAJ */}
@@ -1550,6 +1555,7 @@ export default function App() {
               </View>
             </View>
           </ScrollView>
+          </KeyboardAvoidingView>
         )}
         
         {currentScreen === 'settings' && (
