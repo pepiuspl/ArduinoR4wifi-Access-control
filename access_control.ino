@@ -17,7 +17,7 @@
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-const char* app_version = "v3.0.0";
+const char* app_version = "v2.9.9";
 
 struct User { 
   byte uid[4]; 
@@ -96,20 +96,34 @@ char owner_email[64] = "";
 #define TAMPER_PIN       14
 #define TAMPER_INSTALLED false   // ← zmień na true gdy przełącznik NC jest zainstalowany
 
+// KLAWIATURA — ustawiona na true (klawiatura jest podłączona)
+// Wymagane zmiany sprzętowe przed uruchomieniem:
+//  1. ZAMIEŃ 2 KABLE:
+//     Kabel który szedł do IO2  → przepnij na IO12
+//     Kabel który szedł do IO12 → przepnij na IO2
+//     (eliminuje niebieską diodę — IO2 teraz jest wejściem z pull-up, nie wyjściem)
+//  2. DODAJ 2 REZYSTORY 10kΩ:
+//     IO34 → 10kΩ → 3.3V   (wiersz 3: klawisze 7 8 9)
+//     IO35 → 10kΩ → 3.3V   (wiersz 4: klawisze * 0 #)
+//     Bez tych rezystorów IO34/IO35 pływają i powodują fałszywe wciśnięcia → pikanie
+#define KEYPAD_INSTALLED true    // klawiatura podłączona
+
 // ─── KLAWIATURA 4×3 ──────────────────────────────────────────────────────────
-// Złącze (lewy→prawy, 7 pinów):
-//  Pin 1→IO16 (kol: 1 4 7 *)  Pin 2→IO17 (kol: 2 5 8 0)  Pin 3→IO2 (kol: 3 6 9 #)
-//  Pin 4→IO12 (wiersz: 1 2 3, wewn. pull-up)
-//  Pin 5→IO15 (wiersz: 4 5 6, wewn. pull-up)
-//  Pin 6→IO34 (wiersz: 7 8 9, ZEWN. 10kΩ do 3.3V!)
-//  Pin 7→IO35 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
+// PO ZAMIANIE KABLI (patrz wyżej):
+//  Pin 1 → IO16 (kol: 1 4 7 *)
+//  Pin 2 → IO17 (kol: 2 5 8 0)
+//  Pin 3 → IO12 (kol: 3 6 9 #)  ← był IO2 (dioda!), teraz IO12
+//  Pin 4 → IO2  (wiersz: 1 2 3, INPUT_PULLUP — dioda praktycznie wygaszona)  ← był IO12
+//  Pin 5 → IO15 (wiersz: 4 5 6, wewn. pull-up)
+//  Pin 6 → IO34 (wiersz: 7 8 9, ZEWN. 10kΩ do 3.3V!)
+//  Pin 7 → IO35 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
 #define KP_COL1  16
 #define KP_COL2  17
-#define KP_COL3  2
-#define KP_ROW1  12
+#define KP_COL3  12   // IO12 (nie IO2 — brak diody LED!)
+#define KP_ROW1  2    // IO2  (INPUT_PULLUP — dioda ~28µA = praktycznie ciemna)
 #define KP_ROW2  15
-#define KP_ROW3  34
-#define KP_ROW4  35
+#define KP_ROW3  34   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
+#define KP_ROW4  35   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
 
 const uint8_t KP_COLS[3] = { KP_COL1, KP_COL2, KP_COL3 };
 const uint8_t KP_ROWS[4] = { KP_ROW1, KP_ROW2, KP_ROW3, KP_ROW4 };
@@ -1303,6 +1317,7 @@ void handleKeypress(char key) {
 }
 
 void checkKeypad() {
+  if (!KEYPAD_INSTALLED) return;  // wyłączone do czasu fizycznego podłączenia klawiatury
   if (kpBuffer.length() > 0 && (millis() - kpLastKey > KP_TIMEOUT_MS)) {
     kpBuffer = ""; kpLastChar = 0; renderSystemUI();
     addLog("Keypad: timeout — bufor wyczyszczony");
@@ -1324,12 +1339,16 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   // Anti-tamper pin (tylko gdy TAMPER_INSTALLED == true)
   if (TAMPER_INSTALLED) pinMode(TAMPER_PIN, INPUT_PULLUP);
-  // Klawiatura
-  for (int c = 0; c < 3; c++) { pinMode(KP_COLS[c], OUTPUT); digitalWrite(KP_COLS[c], HIGH); }
-  pinMode(KP_ROW1, INPUT_PULLUP);  // IO12
-  pinMode(KP_ROW2, INPUT_PULLUP);  // IO15
-  pinMode(KP_ROW3, INPUT);         // IO34 — ZEWN. 10kΩ do 3.3V!
-  pinMode(KP_ROW4, INPUT);         // IO35 — ZEWN. 10kΩ do 3.3V!
+  // Klawiatura — tylko gdy KEYPAD_INSTALLED == true
+  // Bez flagi: IO2 nie jest ustawiany jako OUTPUT (nie zapala się niebieska LED),
+  //            IO34/IO35 nie są inicjowane (nie pływają, brak fałszywych wciśnięć)
+  if (KEYPAD_INSTALLED) {
+    for (int c = 0; c < 3; c++) { pinMode(KP_COLS[c], OUTPUT); digitalWrite(KP_COLS[c], HIGH); }
+    pinMode(KP_ROW1, INPUT_PULLUP);  // IO2  — wewnętrzny pull-up, dioda ~28µA (praktycznie ciemna)
+    pinMode(KP_ROW2, INPUT_PULLUP);  // IO15 — wewnętrzny pull-up
+    pinMode(KP_ROW3, INPUT);         // IO34 — ZEWNĘTRZNY 10kΩ do 3.3V!
+    pinMode(KP_ROW4, INPUT);         // IO35 — ZEWNĘTRZNY 10kΩ do 3.3V!
+  }
   Wire.begin();
   Wire.beginTransmission(0x3C);
   if (Wire.endTransmission() == 0) {
