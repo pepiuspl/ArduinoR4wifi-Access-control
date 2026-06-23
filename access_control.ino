@@ -604,7 +604,7 @@ void openDoor(String source) {
   // Module has internal pull-up to 5V. ESP32 at 3.3V or 0.16V can't reach the
   // 5V trigger threshold. Setting INPUT (floating) lets the pull-up bring IN to
   // 5V which fires the relay. OUTPUT HIGH (3.3V) brings IN below threshold → OFF.
-  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RELAY_PIN, INPUT);
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
   playSound(SND_ACCESS_GRANTED); 
