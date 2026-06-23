@@ -1366,21 +1366,11 @@ void setup() {
   //            IO34/IO35 nie są inicjowane (nie pływają, brak fałszywych wciśnięć)
   if (KEYPAD_INSTALLED) {
     for (int c = 0; c < 3; c++) { pinMode(KP_COLS[c], OUTPUT); digitalWrite(KP_COLS[c], HIGH); }
-    pinMode(KP_ROW1, INPUT_PULLUP);  // IO2  — wewnętrzny pull-up, dioda ~28µA (praktycznie ciemna)
-    pinMode(KP_ROW2, INPUT_PULLUP);  // IO15 — wewnętrzny pull-up
-    pinMode(KP_ROW3, INPUT);         // IO34 — ZEWNĘTRZNY 10kΩ do 3.3V!
-    pinMode(KP_ROW4, INPUT);         // IO35 — ZEWNĘTRZNY 10kΩ do 3.3V!
-    delay(50);  // let lines settle
-    // ── Keypad diagnostics ─────────────────────────────────────────────────────
-    // Open Serial Monitor at 9600 baud immediately after boot to read this.
-    // ALL rows must read HIGH at startup (no key pressed).
-    // If a row reads LOW → its pull-up resistor is missing, reversed (to GND), or on wrong pin.
-    Serial.println("\n=== KEYPAD DIAGNOSTICS (all should be HIGH) ===");
-    Serial.printf("ROW1 IO%-2d: %s\n", KP_ROW1, digitalRead(KP_ROW1) ? "HIGH OK" : "LOW  ← PROBLEM: internal pull-up issue");
-    Serial.printf("ROW2 IO%-2d: %s\n", KP_ROW2, digitalRead(KP_ROW2) ? "HIGH OK" : "LOW  ← PROBLEM: internal pull-up issue");
-    Serial.printf("ROW3 IO%-2d: %s\n", KP_ROW3, digitalRead(KP_ROW3) ? "HIGH OK" : "LOW  ← PROBLEM: 10kΩ to 3.3V missing or wired to GND");
-    Serial.printf("ROW4 IO%-2d: %s\n", KP_ROW4, digitalRead(KP_ROW4) ? "HIGH OK" : "LOW  ← PROBLEM: 10kΩ to 3.3V missing or wired to GND");
-    Serial.println("================================================\n");
+    pinMode(KP_ROW1, INPUT_PULLUP);  // IO2
+    pinMode(KP_ROW2, INPUT_PULLUP);  // IO15
+    pinMode(KP_ROW3, INPUT);         // IO34 - needs external 10k to 3.3V
+    pinMode(KP_ROW4, INPUT);         // IO35 - needs external 10k to 3.3V
+    delay(50);
   }
   Wire.begin();
   Wire.beginTransmission(0x3C);
@@ -1394,8 +1384,10 @@ void setup() {
     Serial.println("[WARN] Brak ekranu OLED. Ekran wyłączony bezpiecznie.");
   }
 
-  //BEZPIECZEŃSTWO: Przekaźnik jako INPUT odcina wyciek prądu 5V/3.3V
-  pinMode(RELAY_PIN, INPUT); 
+  // Przekaźnik: OUTPUT HIGH = cewka bez napięcia = styk w pozycji domyślnej
+  // (moduł przekaźnika active-LOW: HIGH = wyłączony, LOW = włączony)
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
   
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
@@ -1501,6 +1493,29 @@ void setup() {
   }
   lastRfidWatchdogTime = millis();
   lastFrameTick = millis();
+
+  // ── Boot signature: 3 quick beeps = firmware v3 with keypad+tamper loaded ──
+  // If you do NOT hear 3 beeps at the end of boot, the old firmware is still running.
+  tone(BUZZER_PIN, 1800, 80); delay(150);
+  tone(BUZZER_PIN, 1800, 80); delay(150);
+  tone(BUZZER_PIN, 1800, 80); delay(150);
+
+  // ── Late keypad diagnostics — printed AFTER WiFi (Serial Monitor definitely open) ──
+  if (KEYPAD_INSTALLED) {
+    delay(200);
+    Serial.println("\n======= KEYPAD ROW DIAGNOSTICS =======");
+    Serial.println("All rows must read HIGH when no key pressed.");
+    Serial.println("LOW = pull-up resistor missing, wrong direction, or wrong pin.");
+    Serial.print("ROW1 IO"); Serial.print(KP_ROW1); Serial.print(": ");
+    Serial.println(digitalRead(KP_ROW1) ? "HIGH - OK" : "LOW  - PROBLEM (internal pull-up issue)");
+    Serial.print("ROW2 IO"); Serial.print(KP_ROW2); Serial.print(": ");
+    Serial.println(digitalRead(KP_ROW2) ? "HIGH - OK" : "LOW  - PROBLEM (internal pull-up issue)");
+    Serial.print("ROW3 IO"); Serial.print(KP_ROW3); Serial.print(": ");
+    Serial.println(digitalRead(KP_ROW3) ? "HIGH - OK" : "LOW  - PROBLEM (10k to 3.3V missing or wired to GND)");
+    Serial.print("ROW4 IO"); Serial.print(KP_ROW4); Serial.print(": ");
+    Serial.println(digitalRead(KP_ROW4) ? "HIGH - OK" : "LOW  - PROBLEM (10k to 3.3V missing or wired to GND)");
+    Serial.println("======================================\n");
+  }
 }
 
 void loop() {
@@ -1687,7 +1702,7 @@ void loop() {
 
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
-    pinMode(RELAY_PIN, HIGH); 
+    digitalWrite(RELAY_PIN, HIGH);  // wyłącz przekaźnik (active-LOW: HIGH = off)
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
