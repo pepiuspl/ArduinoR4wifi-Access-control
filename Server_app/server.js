@@ -273,6 +273,9 @@ function getLatestFirmwareContext() {
   }
 }
 
+// Rate-limit store for keypad PIN attempts { mac: {count, resetAt} }
+const keypadAttempts = {};
+
 const server = http.createServer(async (req, res) => {
   const reqOrigin = req.headers['origin'] || '';
 
@@ -541,6 +544,7 @@ const server = http.createServer(async (req, res) => {
         
         const usersRes = await dbPool.query('SELECT id, holder_name as name, is_active as active, card_uid as uid, hardware_slot_idx FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [primaryMac]);
         const logsRes = await dbPool.query('SELECT event_time, message FROM system_events WHERE mac_address = $1 ORDER BY event_time DESC LIMIT 30', [primaryMac]);
+        const kpPinsRes = await dbPool.query('SELECT id, name, active FROM keypad_pins WHERE account_id = $1 ORDER BY created_at ASC', [accountId]).catch(() => ({ rows: [] }));
 
         const processedUsersList = usersRes.rows.map(row => ({
           idx: row.hardware_slot_idx, 
@@ -585,6 +589,7 @@ const server = http.createServer(async (req, res) => {
           pushEntries: accountsRes.rows[0].push_entries !== false,
           pushAlarms: accountsRes.rows[0].push_alarms !== false,
           otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0),
+          keypad_pins: kpPinsRes.rows,
         });
       }
 
@@ -1362,6 +1367,129 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { success: true });
       }
 
+// =========================================================================
+      // =========================================================================
+      // KEYPAD PIN VERIFY — firmware-facing, no JWT, searches keypad_pins table
+      // POST { mac, pin }  →  { granted, name? }
+      // DB setup: CREATE TABLE keypad_pins (id SERIAL PRIMARY KEY,
+      //   account_id INT NOT NULL, name VARCHAR(64) DEFAULT 'Nowy PIN',
+      //   pin_hash VARCHAR(255) NOT NULL, active BOOLEAN DEFAULT true,
+      //   created_at TIMESTAMP DEFAULT NOW());
+      // =========================================================================
+      if (pathname === '/api/auth/keypad' && req.method === 'POST') {
+        const { mac, pin } = body;
+        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
+
+        const now = Date.now();
+        if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
+          keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
+        keypadAttempts[mac].count++;
+        if (keypadAttempts[mac].count > 5) {
+          const wait = Math.ceil((keypadAttempts[mac].resetAt - now) / 1000);
+          writeToLocalLogFile('Keypad RateLimit', `Too many attempts from ${mac}`);
+          return sendJSON(res, 429, { granted: false, error: `Za dużo prób. Poczekaj ${wait}s.` });
+        }
+
+        try {
+          // Get device's account
+          const devRes = await dbPool.query(
+            `SELECT a.id, a.push_token, a.push_alarms
+             FROM accounts a JOIN devices d ON d.account_id = a.id
+             WHERE d.mac_address = $1 LIMIT 1`, [mac]);
+          if (devRes.rows.length === 0)
+            return sendJSON(res, 404, { granted: false, error: 'Device not registered' });
+
+          const { id: accountId, push_token, push_alarms } = devRes.rows[0];
+
+          // Check all active PINs for this account
+          const pinsRes = await dbPool.query(
+            `SELECT id, name, pin_hash FROM keypad_pins
+             WHERE account_id = $1 AND active = true`, [accountId]);
+
+          for (const p of pinsRes.rows) {
+            if (await bcrypt.compare(String(pin), p.pin_hash)) {
+              keypadAttempts[mac] = { count: 0, resetAt: 0 };
+              writeToLocalLogFile('Keypad', `PIN "${p.name}" GRANTED — ${mac}`);
+              await dbPool.query(
+                'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
+                [mac, `Keypad PIN "${p.name}" — dostęp przyznany`]).catch(() => {});
+              return sendJSON(res, 200, { granted: true, name: p.name });
+            }
+          }
+
+          writeToLocalLogFile('Keypad', `PIN DENIED — ${mac} (${keypadAttempts[mac].count}/5)`);
+          if (push_token && push_alarms !== false)
+            sendPushNotification(push_token, '⚠️ Błędny PIN na klawiaturze',
+              `Nieprawidłowa próba PIN z urządzenia ${mac}`);
+          return sendJSON(res, 200, { granted: false });
+
+        } catch (err) {
+          writeToLocalLogFile('Keypad ERROR', String(err));
+          return sendJSON(res, 500, { granted: false, error: 'Server error' });
+        }
+      }
+
+      // =========================================================================
+      // KEYPAD PIN ADD — JWT protected, app-facing
+      // POST { name, pin }  →  { success, id }
+      // =========================================================================
+      if (pathname === '/api/keypad/add' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { name, pin } = body;
+        if (!name || !name.trim()) return sendJSON(res, 400, { error: 'Podaj nazwę' });
+        if (!pin || String(pin).length < 4 || String(pin).length > 8)
+          return sendJSON(res, 400, { error: 'PIN musi mieć 4–8 cyfr' });
+        if (!/^\d+$/.test(String(pin)))
+          return sendJSON(res, 400, { error: 'PIN musi zawierać tylko cyfry' });
+
+        const cnt = await dbPool.query(
+          'SELECT COUNT(*) FROM keypad_pins WHERE account_id = $1', [accountId]);
+        if (parseInt(cnt.rows[0].count) >= 10)
+          return sendJSON(res, 400, { error: 'Limit 10 PINów osiągnięty' });
+
+        const hash = await bcrypt.hash(String(pin), 10);
+        const ins = await dbPool.query(
+          'INSERT INTO keypad_pins (account_id, name, pin_hash) VALUES ($1,$2,$3) RETURNING id',
+          [accountId, name.trim(), hash]);
+        writeToLocalLogFile('Keypad', `PIN "${name.trim()}" added for account ${accountId}`);
+        return sendJSON(res, 200, { success: true, id: ins.rows[0].id });
+      }
+
+      // KEYPAD PIN DELETE  POST { id }
+      if (pathname === '/api/keypad/delete' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { id } = body;
+        if (!id) return sendJSON(res, 400, { error: 'Missing id' });
+        const r = await dbPool.query(
+          'DELETE FROM keypad_pins WHERE id=$1 AND account_id=$2', [id, accountId]);
+        if (r.rowCount === 0) return sendJSON(res, 404, { error: 'Not found' });
+        writeToLocalLogFile('Keypad', `PIN id=${id} deleted from account ${accountId}`);
+        return sendJSON(res, 200, { success: true });
+      }
+
+      // KEYPAD PIN RENAME  POST { id, name }
+      if (pathname === '/api/keypad/rename' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { id, name } = body;
+        if (!id || !name || !name.trim()) return sendJSON(res, 400, { error: 'Missing id or name' });
+        await dbPool.query(
+          'UPDATE keypad_pins SET name=$1 WHERE id=$2 AND account_id=$3',
+          [name.trim(), id, accountId]);
+        return sendJSON(res, 200, { success: true });
+      }
+
+      // KEYPAD PIN TOGGLE ACTIVE  POST { id }
+      if (pathname === '/api/keypad/toggle_active' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { id } = body;
+        if (!id) return sendJSON(res, 400, { error: 'Missing id' });
+        const r = await dbPool.query(
+          'UPDATE keypad_pins SET active = NOT active WHERE id=$1 AND account_id=$2 RETURNING active',
+          [id, accountId]);
+        if (r.rowCount === 0) return sendJSON(res, 404, { error: 'Not found' });
+        return sendJSON(res, 200, { success: true, active: r.rows[0].active });
+      }
+
       return sendJSON(res, 404, { error: "Endpoint route context invalid" });
 
     } catch (dbError) {
@@ -1442,114 +1570,3 @@ function sendPushNotification(token, title, body) {
   req.write(postData);
   req.end();
 }
-      // =========================================================================
-      // KEYPAD PIN VERIFICATION  — firmware-facing (no JWT, uses MAC lookup)
-      // POST { mac, pin }  →  { granted: true/false }
-      //
-      // One-time DB setup (run once on your Proxmox server):
-      //   psql -U postgres -d your_db -c \
-      //   "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS keypad_pin_hash VARCHAR(255);"
-      //
-      // Rate-limit: 5 wrong attempts per 15 min per MAC address
-      // =========================================================================
-      const keypadAttempts = {};   // { mac: { count, resetAt } }
-
-      if (pathname === '/api/auth/keypad' && req.method === 'POST') {
-        const { mac, pin } = body;
-        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
-
-        // Rate limit by MAC
-        const now = Date.now();
-        if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt) {
-          keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
-        }
-        keypadAttempts[mac].count++;
-        if (keypadAttempts[mac].count > 5) {
-          const wait = Math.ceil((keypadAttempts[mac].resetAt - now) / 1000);
-          writeToLocalLogFile('Keypad RateLimit', `Too many PIN attempts from MAC: ${mac}`);
-          return sendJSON(res, 429, { granted: false, error: `Too many attempts. Wait ${wait}s.` });
-        }
-
-        try {
-          // Look up account that owns this device
-          const devRes = await dbPool.query(
-            `SELECT a.id, a.keypad_pin_hash, a.push_token, a.push_alarms
-             FROM accounts a
-             JOIN devices d ON d.account_id = a.id
-             WHERE d.mac_address = $1 LIMIT 1`,
-            [mac]
-          );
-
-          if (devRes.rows.length === 0) {
-            writeToLocalLogFile('Keypad', `Unknown MAC: ${mac}`);
-            return sendJSON(res, 404, { granted: false, error: 'Device not registered' });
-          }
-
-          const row = devRes.rows[0];
-
-          if (!row.keypad_pin_hash) {
-            writeToLocalLogFile('Keypad', `No PIN set for account ${row.id}`);
-            return sendJSON(res, 403, { granted: false, error: 'Keypad PIN not configured' });
-          }
-
-          const valid = await bcrypt.compare(String(pin), row.keypad_pin_hash);
-
-          if (valid) {
-            keypadAttempts[mac] = { count: 0, resetAt: 0 };  // reset counter on success
-            writeToLocalLogFile('Keypad', `PIN GRANTED for account ${row.id} from MAC ${mac}`);
-
-            // Log unlock event to system_events
-            await dbPool.query(
-              'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
-              [mac, `Keypad PIN access granted for account ${row.id}`]
-            ).catch(() => {});
-
-            return sendJSON(res, 200, { granted: true });
-          } else {
-            writeToLocalLogFile('Keypad', `PIN DENIED for account ${row.id} from MAC ${mac} (${keypadAttempts[mac].count}/5)`);
-
-            // Push alert on wrong PIN
-            if (row.push_token && row.push_alarms !== false) {
-              sendPushNotification(
-                row.push_token,
-                '⚠️ Błędny PIN na klawiaturze',
-                `Zarejestrowano nieprawidłową próbę PIN z urządzenia ${mac}`
-              );
-            }
-
-            return sendJSON(res, 200, { granted: false });
-          }
-
-        } catch (err) {
-          writeToLocalLogFile('Keypad ERROR', String(err));
-          return sendJSON(res, 500, { granted: false, error: 'Server error' });
-        }
-      }
-
-      // =========================================================================
-      // SET / CHANGE KEYPAD PIN  — app-facing (JWT protected)
-      // POST { newPin }  →  { success: true }
-      // Send empty string to clear/disable the PIN.
-      // =========================================================================
-      if (pathname === '/api/settings/keypad_pin' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
-        const { newPin } = body;
-
-        if (newPin && (String(newPin).length < 4 || String(newPin).length > 8)) {
-          return sendJSON(res, 400, { error: 'PIN must be 4–8 digits' });
-        }
-        if (newPin && !/^\d+$/.test(String(newPin))) {
-          return sendJSON(res, 400, { error: 'PIN must contain digits only' });
-        }
-
-        const hash = newPin ? await bcrypt.hash(String(newPin), 10) : null;
-
-        await dbPool.query(
-          'UPDATE accounts SET keypad_pin_hash = $1 WHERE id = $2',
-          [hash, accountId]
-        );
-
-        const action = newPin ? 'set' : 'cleared';
-        writeToLocalLogFile('Keypad Settings', `PIN ${action} for account ${accountId}`);
-        return sendJSON(res, 200, { success: true, status: action });
-      }

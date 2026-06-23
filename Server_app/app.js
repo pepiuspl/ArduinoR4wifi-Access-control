@@ -83,11 +83,67 @@ export default function App() {
   
   // STANY I FUNKCJA PUSH
   const [pushEntries, setPushEntries] = useState(true);
-  const [kpPin, setKpPin]         = useState('');        // PIN entry field
-  const [kpPinConfirm, setKpPinConfirm] = useState('');  // confirm field
-  const [kpPinStatus, setKpPinStatus]   = useState('');  // feedback message
-  const [kpPinSet, setKpPinSet]         = useState(false); // whether server has a PIN
+  const [keypadPins, setKeypadPins]   = useState([]);   // [{id, name, active}]
+  const [kpNewName, setKpNewName]     = useState('');
+  const [kpNewCode, setKpNewCode]     = useState('');
+  const [kpNewConfirm, setKpNewConfirm] = useState('');
+  const [kpStatus, setKpStatus]       = useState('');
+  const [kpRenameId, setKpRenameId]   = useState(null);
+  const [kpRenameName, setKpRenameName] = useState('');
   const [pushAlarms, setPushAlarms] = useState(true);
+
+  // ── Keypad PIN management ────────────────────────────────────────────────────
+  const kpAuthHeader = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+
+  const kpAdd = async () => {
+    if (!kpNewName.trim())  { setKpStatus('Podaj nazwę'); return; }
+    if (kpNewCode.length < 4) { setKpStatus('PIN musi mieć min. 4 cyfry'); return; }
+    if (kpNewCode !== kpNewConfirm) { setKpStatus('PINy nie są identyczne'); return; }
+    try {
+      const r = await fetch(`${backendUrl}/api/keypad/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
+        body: JSON.stringify({ name: kpNewName.trim(), pin: kpNewCode }),
+      });
+      const d = await r.json();
+      if (d.success) {
+        setKpNewName(''); setKpNewCode(''); setKpNewConfirm('');
+        setKpStatus('✓ Dodano: ' + kpNewName.trim());
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } else { setKpStatus('✗ ' + (d.error || 'Błąd serwera')); }
+    } catch { setKpStatus('✗ Brak połączenia'); }
+  };
+
+  const kpDelete = async (id, name) => {
+    await fetch(`${backendUrl}/api/keypad/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
+      body: JSON.stringify({ id }),
+    });
+    setKpStatus('✓ Usunięto: ' + name);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+  };
+
+  const kpToggle = async (id) => {
+    await fetch(`${backendUrl}/api/keypad/toggle_active`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
+      body: JSON.stringify({ id }),
+    });
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
+  const kpRename = async () => {
+    if (!kpRenameName.trim()) return;
+    await fetch(`${backendUrl}/api/keypad/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
+      body: JSON.stringify({ id: kpRenameId, name: kpRenameName.trim() }),
+    });
+    setKpRenameId(null); setKpRenameName('');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+  // ─────────────────────────────────────────────────────────────────────────────
 
   const savePushPreferences = (entries, alarms) => {
     fetch(`${backendUrl}/api/settings/push_preferences`, {
@@ -680,7 +736,8 @@ export default function App() {
       setErrorMessage(''); 
       
       if (data.pushEntries !== undefined) setPushEntries(data.pushEntries);
-      if (data.pushAlarms !== undefined) setPushAlarms(data.pushAlarms);
+      if (data.pushAlarms  !== undefined) setPushAlarms(data.pushAlarms);
+      if (data.keypad_pins !== undefined) setKeypadPins(data.keypad_pins);
       
       if (data.auth === false) {
         setIsConfigured(false);
@@ -1567,100 +1624,86 @@ export default function App() {
                 </View>
               )}
 
-              {/* ── KEYPAD PIN ─────────────────────────────────────────────── */}
+              {/* ── KEYPAD PINs ── like RFID cards but for the keypad ─────── */}
               {!isLocalMode && (
                 <View style={styles.card}>
-                  <Text style={styles.sectionHeader}>🔢 PIN Klawiatury (4–8 cyfr)</Text>
+                  <Text style={styles.sectionHeader}>🔢 Kody PIN Klawiatury</Text>
                   <Text style={{ color: '#aaa', fontSize: 12, marginBottom: 12 }}>
-                    Ustaw kod PIN do otwierania zamka klawiaturą 4×3 podłączoną do panelu RFID.
-                    Wpisanie kodu i zatwierdzenie #{' '}
-                    <Text style={{ color: '#64b5f6' }}>#</Text> otworzy zamek.
-                    Gwiazdka{' '}
-                    <Text style={{ color: '#64b5f6' }}>*</Text> czyści bufor.
+                    Każda osoba ma własny PIN (4–8 cyfr). Wpisz kod na klawiaturze i zatwierdź{' '}
+                    <Text style={{ color: '#64b5f6' }}>#</Text>. Gwiazdka{' '}
+                    <Text style={{ color: '#64b5f6' }}>*</Text> czyści wpisany kod.
                   </Text>
 
-                  {kpPinSet && (
-                    <View style={{ backgroundColor: '#1e3a1e', borderRadius: 8, padding: 8, marginBottom: 10 }}>
-                      <Text style={{ color: '#81c784', fontSize: 12 }}>✓ PIN jest już ustawiony na urządzeniu</Text>
+                  {/* List of existing PINs */}
+                  {keypadPins.map((kp) => (
+                    <View key={kp.id} style={{ backgroundColor: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                      {kpRenameId === kp.id ? (
+                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                          <TextInput
+                            style={[styles.inputField, { flex: 1, marginBottom: 0 }]}
+                            value={kpRenameName}
+                            onChangeText={setKpRenameName}
+                            placeholder="Nowa nazwa"
+                            placeholderTextColor="#555"
+                            autoFocus
+                          />
+                          <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12 }]} onPress={kpRename}>
+                            <Text style={styles.btnText}>✓</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12, backgroundColor: '#333' }]} onPress={() => setKpRenameId(null)}>
+                            <Text style={styles.btnText}>✕</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: kp.active ? '#81c784' : '#555', marginRight: 10 }} />
+                          <Text style={{ color: kp.active ? '#fff' : '#666', flex: 1, fontSize: 15 }}>{kp.name}</Text>
+                          <TouchableOpacity onPress={() => { setKpRenameId(kp.id); setKpRenameName(kp.name); }} style={{ paddingHorizontal: 8 }}>
+                            <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => kpToggle(kp.id)} style={{ paddingHorizontal: 8 }}>
+                            <Text style={{ color: '#64b5f6', fontSize: 12 }}>{kp.active ? 'Blok.' : 'Aktyw.'}</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity onPress={() => kpDelete(kp.id, kp.name)} style={{ paddingHorizontal: 8 }}>
+                            <Text style={{ color: '#ef4444', fontSize: 12 }}>Usuń</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
                     </View>
+                  ))}
+
+                  {keypadPins.length === 0 && (
+                    <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginBottom: 12 }}>Brak skonfigurowanych PINów</Text>
                   )}
 
-                  <Text style={styles.inputLabelText}>Nowy PIN (tylko cyfry)</Text>
-                  <TextInput
-                    style={styles.inputField}
-                    placeholder="np. 1234"
-                    placeholderTextColor="#555"
-                    keyboardType="numeric"
-                    secureTextEntry
-                    maxLength={8}
-                    value={kpPin}
-                    onChangeText={setKpPin}
-                  />
-                  <Text style={styles.inputLabelText}>Potwierdź PIN</Text>
-                  <TextInput
-                    style={styles.inputField}
-                    placeholder="powtórz PIN"
-                    placeholderTextColor="#555"
-                    keyboardType="numeric"
-                    secureTextEntry
-                    maxLength={8}
-                    value={kpPinConfirm}
-                    onChangeText={setKpPinConfirm}
-                  />
-
-                  {kpPinStatus ? (
-                    <Text style={{ color: kpPinStatus.startsWith('✓') ? '#81c784' : '#ef4444', fontSize: 12, marginBottom: 8 }}>
-                      {kpPinStatus}
-                    </Text>
-                  ) : null}
-
-                  <View style={{ flexDirection: 'row', gap: 8 }}>
-                    <TouchableOpacity
-                      style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#1a3a5c' }]}
-                      onPress={async () => {
-                        if (!kpPin || kpPin.length < 4) { setKpPinStatus('✗ PIN musi mieć min. 4 cyfry'); return; }
-                        if (kpPin !== kpPinConfirm) { setKpPinStatus('✗ PINy nie są identyczne'); return; }
-                        if (!/^\d+$/.test(kpPin)) { setKpPinStatus('✗ Tylko cyfry'); return; }
-                        try {
-                          const r = await fetch(`${backendUrl}/api/settings/keypad_pin`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
-                            body: JSON.stringify({ newPin: kpPin }),
-                          });
-                          const d = await r.json();
-                          if (d.success) {
-                            setKpPinStatus('✓ PIN zapisany');
-                            setKpPinSet(true);
-                            setKpPin(''); setKpPinConfirm('');
-                          } else { setKpPinStatus('✗ ' + (d.error || 'Błąd serwera')); }
-                        } catch { setKpPinStatus('✗ Brak połączenia'); }
-                      }}
-                    >
-                      <Text style={styles.btnText}>💾 Zapisz PIN</Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#3a1a1a' }]}
-                      onPress={async () => {
-                        try {
-                          const r = await fetch(`${backendUrl}/api/settings/keypad_pin`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
-                            body: JSON.stringify({ newPin: '' }),
-                          });
-                          const d = await r.json();
-                          if (d.success) { setKpPinStatus('✓ PIN usunięty'); setKpPinSet(false); }
-                        } catch { setKpPinStatus('✗ Brak połączenia'); }
-                      }}
-                    >
-                      <Text style={styles.btnText}>🗑 Usuń PIN</Text>
-                    </TouchableOpacity>
-                  </View>
+                  {/* Add new PIN */}
+                  {keypadPins.length < 10 && (
+                    <>
+                      <Text style={[styles.inputLabelText, { marginTop: 8 }]}>Nazwa osoby</Text>
+                      <TextInput style={styles.inputField} placeholder="np. Mama, Tata, Gość" placeholderTextColor="#555"
+                        value={kpNewName} onChangeText={setKpNewName} />
+                      <Text style={styles.inputLabelText}>PIN (4–8 cyfr)</Text>
+                      <TextInput style={styles.inputField} placeholder="••••" placeholderTextColor="#555"
+                        keyboardType="numeric" secureTextEntry maxLength={8}
+                        value={kpNewCode} onChangeText={setKpNewCode} />
+                      <Text style={styles.inputLabelText}>Potwierdź PIN</Text>
+                      <TextInput style={styles.inputField} placeholder="••••" placeholderTextColor="#555"
+                        keyboardType="numeric" secureTextEntry maxLength={8}
+                        value={kpNewConfirm} onChangeText={setKpNewConfirm} />
+                      {kpStatus ? (
+                        <Text style={{ color: kpStatus.startsWith('✓') ? '#81c784' : '#ef4444', fontSize: 12, marginBottom: 8 }}>{kpStatus}</Text>
+                      ) : null}
+                      <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#1a3a5c', width: '100%' }]} onPress={kpAdd}>
+                        <Text style={styles.btnText}>➕ Dodaj PIN</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
                 </View>
               )}
             </ScrollView>
           </KeyboardAvoidingView>
         )}
+
         
 
         {isMenuOpen && <TouchableOpacity style={styles.menuDimBackdropMask} activeOpacity={1} onPress={toggleBurgerMenu} />}
@@ -1688,7 +1731,8 @@ export default function App() {
         </Animated.View>
       </View>
     </SafeAreaView>
-);}
+  );
+}
 
 const styles = StyleSheet.create({
   darkContainer: { flex: 1, backgroundColor: '#0f0f11' },

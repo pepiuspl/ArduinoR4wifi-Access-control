@@ -1316,9 +1316,17 @@ void verifyKeypadPIN(const String& pin) {
   while ((kc.connected() || kc.available()) && millis() < deadline) { if (kc.available()) resp += (char)kc.read(); }
   kc.stop();
   if (resp.indexOf("\"granted\":true") != -1) {
-    addLog("Keypad: PIN ZAAKCEPTOWANY — otwieranie");
+    // Extract the PIN owner's name from the server response
+    String pinOwner = "Keypad PIN";
+    int ns = resp.indexOf("\"name\":\"");
+    if (ns != -1) {
+      ns += 8;
+      int ne = resp.indexOf("\"", ns);
+      if (ne > ns) pinOwner = resp.substring(ns, ne);
+    }
+    addLog("Keypad: ZAAKCEPTOWANO [" + pinOwner + "] — otwieranie");
     playSound(SND_ACCESS_GRANTED);
-    if (!doorOpen) openDoor("Keypad PIN");
+    if (!doorOpen) openDoor("Keypad: " + pinOwner);
   } else {
     addLog("Keypad: PIN ODRZUCONY");
     playSound(SND_ACCESS_DENIED);
