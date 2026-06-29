@@ -17,7 +17,7 @@
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-const char* app_version = "v3.0.0";
+const char* app_version = "v3.0.1";
 
 struct User { 
   byte uid[4]; 
@@ -1341,6 +1341,7 @@ void verifyKeypadPIN(const String& pin) {
 }
 
 void handleKeypress(char key) {
+  addLog("DBG key=[" + String(key) + "] buf=[" + kpBuffer + "] len=" + String(kpBuffer.length()));
   playSound(SND_CLICK_CONFIRM); kpLastKey = millis();
   if (key == '#') {
     if (kpBuffer.length() == 0) return;
