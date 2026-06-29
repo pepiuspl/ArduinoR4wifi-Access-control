@@ -88,7 +88,7 @@ function checkRateLimit(store, ip, maxHits, windowMs) {
   if (!store[ip] || now > store[ip].resetAt) {
     store[ip] = { count: 0, resetAt: now + windowMs };
   }
-  store[ip].count++;
+  store[ip].count;
   if (store[ip].count > maxHits) {
     const retryAfterSec = Math.ceil((store[ip].resetAt - now) / 1000);
     return retryAfterSec;   // seconds to wait
@@ -143,8 +143,8 @@ function getFactoryAdminPassword(mac) {
   const salt = "CTRLABLE_KEY_2026";   
   const combined = cleanMac + salt;
   let hashNum = 0;
-  for (let i = 0; i < combined.length; i++) {
-    hashNum += combined.charCodeAt(i) * (i + 1);
+  for (let i = 0; i < combined.length; i) {
+    hashNum = combined.charCodeAt(i) * (i + 1);
   }
   return "CN" + String(hashNum).substring(0, 5);
 }
@@ -193,7 +193,7 @@ function signToken(accountId) {
 function verifyToken(req) {
   if (!jwt) return null;
   const header = req.headers['authorization'] || '';
-  const match  = header.match(/^Bearer\s+(.+)$/i);
+  const match  = header.match(/^Bearer\s(.)$/i);
   if (!match) return null;
   try {
     const payload = jwt.verify(match[1], JWT_SECRET);
@@ -252,7 +252,7 @@ function getLatestFirmwareContext() {
 
     // Wyciąganie cyfr wersji niezależnie od tego, czy jest kropka po 'v' czy nie
     const getVerArray = (filename) => {
-      const match = filename.match(/lock_v\.?([\d.]+)\.bin/);
+      const match = filename.match(/lock_v\.?([\d.])\.bin/);
       if (!match) return [0];
       return match[1].split('.').map(Number);
     };
@@ -260,7 +260,7 @@ function getLatestFirmwareContext() {
     binFiles.sort((a, b) => {
       const verA = getVerArray(a);
       const verB = getVerArray(b);
-      for (let i = 0; i < Math.max(verA.length, verB.length); i++) {
+      for (let i = 0; i < Math.max(verA.length, verB.length); i) {
         const numA = verA[i] || 0;
         const numB = verB[i] || 0;
         if (numA !== numB) return numB - numA;
@@ -269,7 +269,7 @@ function getLatestFirmwareContext() {
     });
 
     const latestFile = binFiles[0];
-    const match = latestFile.match(/lock_v\.?([\d.]+)\.bin/);
+    const match = latestFile.match(/lock_v\.?([\d.])\.bin/);
     const extractedVersion = match ? match[1] : "0.0.0";
     return { version: extractedVersion, filename: latestFile };
   } catch (e) {
@@ -309,7 +309,7 @@ const server = http.createServer(async (req, res) => {
   if (cleanIp === '127.0.0.1' || cleanIp === '::1') cleanIp = '192.168.0.46';
 
   let bodyStr = '';
-  req.on('data', chunk => { bodyStr += chunk; });
+  req.on('data', chunk => { bodyStr = chunk; });
   req.on('end', async () => {
     let body = {};
     if (bodyStr) {
@@ -328,7 +328,7 @@ const server = http.createServer(async (req, res) => {
 
     try {
       // =========================================================================
-      // REJESTRACJA KONTA + EMAIL POWITALNY + AUDYT RODO
+      // REJESTRACJA KONTA  EMAIL POWITALNY  AUDYT RODO
       // =========================================================================
       if (pathname === '/api/auth/register' && req.method === 'POST') {
         if (!body.email || !body.password) return sendJSON(res, 400, { error: "Missing identity payloads" });
@@ -385,7 +385,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
-      // LOGOWANIE DO APLIKACJI (WERSJA BEZPIECZNA + JWT + RATE LIMIT)
+      // LOGOWANIE DO APLIKACJI (WERSJA BEZPIECZNA  JWT  RATE LIMIT)
       // =========================================================================
       if (pathname === '/api/auth/login' && req.method === 'POST') {
 
@@ -464,7 +464,7 @@ const server = http.createServer(async (req, res) => {
         
         await dbPool.query(
           `UPDATE accounts 
-           SET reset_token = $1, reset_token_expires = NOW() + INTERVAL '15 minutes'
+           SET reset_token = $1, reset_token_expires = NOW()  INTERVAL '15 minutes'
            WHERE email = $2`,
           [secureCode, cleanEmail]
         );
@@ -785,9 +785,24 @@ const server = http.createServer(async (req, res) => {
 
       //  UPDATE -- OTA CHECK
       if (pathname === '/api/hardware/log' && req.method === 'GET') {
-        const msg = query.msg || '';
-        const mac = query.mac || '00:00:00:00:00:00';
-        writeToLocalLogFile('Hardware Remote Log', `[Node: ${mac}] ${msg}`);
+        const msg = String(query.msg || '').trim();
+        const mac = String(query.mac || '00:00:00:00:00:00').toUpperCase();
+        let eventMac = mac;
+        if (mac.includes(':')) {
+          const directDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1 LIMIT 1', [mac]).catch(() => ({ rows: [] }));
+          if (directDev.rows.length === 0) {
+            const reversedMac = mac.split(':').reverse().join(':');
+            const revDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1 LIMIT 1', [reversedMac]).catch(() => ({ rows: [] }));
+            if (revDev.rows.length > 0) eventMac = reversedMac;
+          }
+        }
+        writeToLocalLogFile('Hardware Remote Log', `[Node: ${eventMac}] ${msg}`);
+        if (msg.length > 0) {
+          await dbPool.query(
+            'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
+            [eventMac, msg]
+          ).catch(() => {});
+        }
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
         res.end("OK");
         return;
@@ -820,7 +835,7 @@ const server = http.createServer(async (req, res) => {
         let data = '';
         forceLog(`Odebrano odpowiedź z GitHuba. Kod statusu: ${githubRes.statusCode}`);
         
-        githubRes.on('data', (chunk) => data += chunk);
+        githubRes.on('data', (chunk) => data = chunk);
         githubRes.on('end', () => {
             try {
                 const release = JSON.parse(data);
@@ -856,6 +871,7 @@ const server = http.createServer(async (req, res) => {
         });
     });
 
+
     githubReq.on('error', (err) => {
         forceLog(`Krytyczny błąd sieciowy połączenia HTTPS: ${err.message}`);
         if (!res.headersSent) {
@@ -889,7 +905,7 @@ const server = http.createServer(async (req, res) => {
 
       const githubReq = https.get(options, (githubRes) => {
         let data = '';
-        githubRes.on('data', (chunk) => data += chunk);
+        githubRes.on('data', (chunk) => data = chunk);
         githubRes.on('end', () => {
           try {
             const release = JSON.parse(data);
@@ -1041,7 +1057,7 @@ const server = http.createServer(async (req, res) => {
         actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, timestamp: Date.now() };
 
         readStream.on('data', (chunk) => {
-          transmittedBytes += chunk.length;
+          transmittedBytes = chunk.length;
           const currentPercentage = Math.round((transmittedBytes / fileSize) * 100);
 
           // Odświeżamy też "timestamp", żeby urządzenie nie pokazało się jako
@@ -1394,13 +1410,14 @@ const server = http.createServer(async (req, res) => {
       //   created_at TIMESTAMP DEFAULT NOW());
       // =========================================================================
       if (pathname === '/api/auth/keypad' && req.method === 'POST') {
-        const { mac, pin } = body;
+        
         if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
-
+        const { pin } = body;
+        const mac = String(body.mac || '').toUpperCase();
         const now = Date.now();
         if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
           keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
-        keypadAttempts[mac].count++;
+        keypadAttempts[mac].count;
         if (keypadAttempts[mac].count > 5) {
           const wait = Math.ceil((keypadAttempts[mac].resetAt - now) / 1000);
           writeToLocalLogFile('Keypad RateLimit', `Too many attempts from ${mac}`);
@@ -1408,11 +1425,25 @@ const server = http.createServer(async (req, res) => {
         }
 
         try {
-          // Get device's account
-          const devRes = await dbPool.query(
+          // Get device's account. Polling already tolerates reversed MAC byte order,
+          // so keypad auth should too.
+          let deviceMac = mac;
+          let devRes = await dbPool.query(
             `SELECT a.id, a.push_token, a.push_alarms
              FROM accounts a JOIN devices d ON d.account_id = a.id
              WHERE d.mac_address = $1 LIMIT 1`, [mac]);
+          if (devRes.rows.length === 0 && mac.includes(':')) {
+            const reversedMac = mac.split(':').reverse().join(':');
+            const revRes = await dbPool.query(
+              `SELECT a.id, a.push_token, a.push_alarms
+               FROM accounts a JOIN devices d ON d.account_id = a.id
+               WHERE d.mac_address = $1 LIMIT 1`, [reversedMac]);
+            if (revRes.rows.length > 0) {
+              deviceMac = reversedMac;
+              devRes = revRes;
+              writeToLocalLogFile('Keypad', `Resolved keypad MAC ${mac} as ${deviceMac}`);
+            }
+          }
           if (devRes.rows.length === 0)
             return sendJSON(res, 404, { granted: false, error: 'Device not registered' });
 
@@ -1426,18 +1457,21 @@ const server = http.createServer(async (req, res) => {
           for (const p of pinsRes.rows) {
             if (await bcrypt.compare(String(pin), p.pin_hash)) {
               keypadAttempts[mac] = { count: 0, resetAt: 0 };
-              writeToLocalLogFile('Keypad', `PIN "${p.name}" GRANTED — ${mac}`);
+              writeToLocalLogFile('Keypad', `PIN "${p.name}" GRANTED - ${deviceMac}`);
               await dbPool.query(
                 'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
-                [mac, `Keypad PIN "${p.name}" — dostęp przyznany`]).catch(() => {});
+                [deviceMac, `Keypad PIN "${p.name}" - dostep przyznany`]).catch(() => {});
               return sendJSON(res, 200, { granted: true, name: p.name });
             }
           }
 
-          writeToLocalLogFile('Keypad', `PIN DENIED — ${mac} (${keypadAttempts[mac].count}/5)`);
+          writeToLocalLogFile('Keypad', `PIN DENIED - ${deviceMac} (${keypadAttempts[mac].count}/5)`);
+          await dbPool.query(
+            'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
+            [deviceMac, `Keypad PIN - dostep odrzucony (${keypadAttempts[mac].count}/5)`]).catch(() => {});
           if (push_token && push_alarms !== false)
             sendPushNotification(push_token, '⚠️ Błędny PIN na klawiaturze',
-              `Nieprawidłowa próba PIN z urządzenia ${mac}`);
+              `Nieprawidlowa proba PIN z urzadzenia ${deviceMac}`);
           return sendJSON(res, 200, { granted: false });
 
         } catch (err) {
@@ -1456,7 +1490,7 @@ const server = http.createServer(async (req, res) => {
         if (!name || !name.trim()) return sendJSON(res, 400, { error: 'Podaj nazwę' });
         if (!pin || String(pin).length < 4 || String(pin).length > 8)
           return sendJSON(res, 400, { error: 'PIN musi mieć 4–8 cyfr' });
-        if (!/^\d+$/.test(String(pin)))
+        if (!/^\d$/.test(String(pin)))
           return sendJSON(res, 400, { error: 'PIN musi zawierać tylko cyfry' });
 
         const cnt = await dbPool.query(
@@ -1572,7 +1606,7 @@ function sendPushNotification(token, title, body) {
   const req = https.request(options, (res) => {
     // Expo zwraca odpowiedź w formacie JSON - warto ją chociaż zalogować w razie problemów
     let responseData = '';
-    res.on('data', (chunk) => { responseData += chunk; });
+    res.on('data', (chunk) => { responseData = chunk; });
     res.on('end', () => {
       if (res.statusCode !== 200) {
         writeToLocalLogFile('Push System Warning', `Bramka Expo zwróciła kod ${res.statusCode}: ${responseData}`);

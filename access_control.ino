@@ -57,6 +57,9 @@ char scanKeypad();
 void checkKeypad();
 void handleKeypress(char key);
 void verifyKeypadPIN(const String& pin);
+void relayActivate();
+void relayDeactivate();
+void logKeypadEvent(String message); 
 String urlDecode(String str);
 String urlEncode(String str); 
 
@@ -82,7 +85,8 @@ char ssid[32] = "";
 char pass[32] = "";
 char owner_email[64] = "";
 
-#define RELAY_PIN   32   
+#define RELAY_PIN   32
+#define RELAY_ACTIVE_LOW true   
 #define BUTTON_PIN  33   
 #define LED_GREEN   25   
 #define LED_RED     26   
@@ -505,6 +509,9 @@ enum SoundId {
   SND_OTA_SUCCESS,
   SND_DELETE,
   SND_CLICK_CONFIRM,
+  SND_KEY_DIGIT,
+  SND_KEY_CLEAR,
+  SND_KEY_SUBMIT,
   SND_TAMPER_ALARM     // 5 ostrych impulsów alarmowych
 };
 
@@ -521,6 +528,9 @@ const SoundNote SND_DATA_OTA_START[]       = { {1100, 70, 35}, {1600, 110, 0} };
 const SoundNote SND_DATA_OTA_SUCCESS[]     = { {1568, 130, 50}, {1976, 130, 50}, {2349, 260, 0} };
 const SoundNote SND_DATA_DELETE[]          = { {500, 80, 45}, {340, 160, 0} };
 const SoundNote SND_DATA_CLICK_CONFIRM[]   = { {1200, 55, 35}, {1600, 70, 0} };
+const SoundNote SND_DATA_KEY_DIGIT[]       = { {1450, 35, 0} };
+const SoundNote SND_DATA_KEY_CLEAR[]       = { {900, 60, 35}, {600, 90, 0} };
+const SoundNote SND_DATA_KEY_SUBMIT[]      = { {1700, 55, 25}, {2200, 95, 0} };
 const SoundNote SND_DATA_TAMPER_ALARM[]    = { {1800,80,40},{1800,80,40},{1800,80,40},{1800,80,40},{1800,200,0} };
 
 const SoundNote* activeMelody = nullptr;
@@ -566,6 +576,9 @@ void playSound(int id) {
     case SND_OTA_SUCCESS:     activeMelody = SND_DATA_OTA_SUCCESS;     activeMelodyLen = sizeof(SND_DATA_OTA_SUCCESS)/sizeof(SoundNote); break;
     case SND_DELETE:          activeMelody = SND_DATA_DELETE;          activeMelodyLen = sizeof(SND_DATA_DELETE)/sizeof(SoundNote); break;
     case SND_CLICK_CONFIRM:   activeMelody = SND_DATA_CLICK_CONFIRM;   activeMelodyLen = sizeof(SND_DATA_CLICK_CONFIRM)/sizeof(SoundNote); break;
+    case SND_KEY_DIGIT:       activeMelody = SND_DATA_KEY_DIGIT;       activeMelodyLen = sizeof(SND_DATA_KEY_DIGIT)/sizeof(SoundNote); break;
+    case SND_KEY_CLEAR:       activeMelody = SND_DATA_KEY_CLEAR;       activeMelodyLen = sizeof(SND_DATA_KEY_CLEAR)/sizeof(SoundNote); break;
+    case SND_KEY_SUBMIT:      activeMelody = SND_DATA_KEY_SUBMIT;      activeMelodyLen = sizeof(SND_DATA_KEY_SUBMIT)/sizeof(SoundNote); break;
     case SND_TAMPER_ALARM:    activeMelody = SND_DATA_TAMPER_ALARM;    activeMelodyLen = sizeof(SND_DATA_TAMPER_ALARM)/sizeof(SoundNote); break;
     default: activeMelody = nullptr; activeMelodyLen = 0; break;
   }
@@ -596,18 +609,22 @@ void updateBuzzer() {
   }
 }
 
+void relayActivate() {
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
+  pinMode(RELAY_PIN, OUTPUT);
+}
+
+void relayDeactivate() {
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
+  pinMode(RELAY_PIN, OUTPUT);
+}
+
 void openDoor(String source) { 
   doorOpen = true;  
   globalAnimFrame = 0;  
   accessEndTime = millis() + 3000;
   globalDisplayInfo = source; 
-  // Module is active-HIGH (NPN transistor, 5V pull-up on IN).
-  // External 1kΩ pull-down on IO32 → GND required!
-  //   OUTPUT HIGH (3.3V): NPN base above Vbe threshold → relay FIRES
-  //   INPUT/OUTPUT LOW  : pull-down wins → IN near 0V → NPN OFF → relay RELEASES
-  //   Boot (floating)   : pull-down → 0.45V → below Vbe → relay stays OFF at boot
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);   // HIGH fires the relay
+  relayActivate();
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
   playSound(SND_ACCESS_GRANTED); 
@@ -1312,16 +1329,16 @@ char scanKeypad() {
 void verifyKeypadPIN(const String& pin) {
   kpChecking = true; renderSystemUI();
   if (WiFi.status() != WL_CONNECTED) {
-    addLog("Keypad: offline — brak weryfikacji PIN"); playSound(SND_ACCESS_DENIED);
+    logKeypadEvent("Keypad: offline - brak weryfikacji PIN"); playSound(SND_ACCESS_DENIED);
     kpChecking = false; renderSystemUI(); return;
   }
   if (tamperActive) {
-    addLog("Keypad: BLOKADA — aktywny alarm sabotazu"); playSound(SND_ACCESS_DENIED);
+    logKeypadEvent("Keypad: BLOKADA - aktywny alarm sabotazu"); playSound(SND_ACCESS_DENIED);
     kpChecking = false; renderSystemUI(); return;
   }
   WiFiClient kc; kc.setTimeout(3000);
   if (!kc.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
-    addLog("Keypad: blad polaczenia z serwerem"); playSound(SND_ACCESS_DENIED);
+    logKeypadEvent("Keypad: blad polaczenia z serwerem"); playSound(SND_ACCESS_DENIED);
     kpChecking = false; renderSystemUI(); return;
   }
   String mac  = getMacAddressString();
@@ -1343,11 +1360,11 @@ void verifyKeypadPIN(const String& pin) {
       int ne = resp.indexOf("\"", ns);
       if (ne > ns) pinOwner = resp.substring(ns, ne);
     }
-    addLog("Keypad: ZAAKCEPTOWANO [" + pinOwner + "] — otwieranie");
+    logKeypadEvent("Keypad: ZAAKCEPTOWANO [" + pinOwner + "] - otwieranie");
     playSound(SND_ACCESS_GRANTED);
     if (!doorOpen) openDoor("Keypad: " + pinOwner);
   } else {
-    addLog("Keypad: PIN ODRZUCONY");
+    logKeypadEvent("Keypad: PIN ODRZUCONY");
     playSound(SND_ACCESS_DENIED);
     for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
   }
@@ -1355,19 +1372,27 @@ void verifyKeypadPIN(const String& pin) {
 }
 
 void handleKeypress(char key) {
-  addLog("DBG key=[" + String(key) + "] buf=[" + kpBuffer + "] len=" + String(kpBuffer.length()));
-  playSound(SND_CLICK_CONFIRM); kpLastKey = millis();
+  kpLastKey = millis();
   if (key == '#') {
+    playSound(SND_KEY_SUBMIT);
+    logKeypadEvent("Keypad: # zatwierdzono, len=" + String(kpBuffer.length()));
     if (kpBuffer.length() == 0) return;
     if ((int)kpBuffer.length() < 4) {
-      addLog("Keypad: PIN za krotki (min 4 cyfry)"); playSound(SND_ACCESS_DENIED);
+      logKeypadEvent("Keypad: PIN za krotki (min 4 cyfry)"); playSound(SND_ACCESS_DENIED);
       kpBuffer = ""; renderSystemUI(); return;
     }
     String pin = kpBuffer; kpBuffer = ""; verifyKeypadPIN(pin);
   } else if (key == '*') {
+    playSound(SND_KEY_CLEAR);
+    logKeypadEvent("Keypad: * czyszczenie bufora");
     kpBuffer = ""; renderSystemUI();
   } else {
-    if ((int)kpBuffer.length() < KP_MAX_LEN) { kpBuffer += key; renderSystemUI(); }
+    playSound(SND_KEY_DIGIT);
+    if ((int)kpBuffer.length() < KP_MAX_LEN) {
+      kpBuffer += key;
+      logKeypadEvent("Keypad: cyfra, len=" + String(kpBuffer.length()));
+      renderSystemUI();
+    }
   }
 }
 
@@ -1375,7 +1400,7 @@ void checkKeypad() {
   if (!KEYPAD_INSTALLED) return;  // wyłączone do czasu fizycznego podłączenia klawiatury
   if (kpBuffer.length() > 0 && (millis() - kpLastKey > KP_TIMEOUT_MS)) {
     kpBuffer = ""; kpLastChar = 0; renderSystemUI();
-    addLog("Keypad: timeout — bufor wyczyszczony");
+    logKeypadEvent("Keypad: timeout - bufor wyczyszczony");
   }
   char key = scanKeypad();
   if (key == 0) { kpLastChar = 0; return; }
@@ -1385,8 +1410,7 @@ void checkKeypad() {
 }
 
 void setup() {
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);   // LOW immediately at boot → relay stays OFF (pull-down holds IN near 0V)
+  relayDeactivate();
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
@@ -1418,8 +1442,7 @@ void setup() {
   }
 
   // Relay idle: OUTPUT LOW → pull-down dominates → IN ~0V → NPN OFF → relay releases
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
+  relayDeactivate();
   
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
@@ -1734,8 +1757,7 @@ void loop() {
 
   if (doorOpen && millis() > accessEndTime) { 
     doorOpen = false;
-    pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);   // LOW + external pull-down → IN ~0V → NPN OFF → relay releases
+    relayDeactivate();
     delay(100); 
     forceHardwareRFIDReset(); 
     lastRfidWatchdogTime = millis(); 
@@ -1760,13 +1782,17 @@ void loop() {
 
 void sendRemoteLog(String message) {
   WiFiClient logClient;
-  message.replace(" ", "%20");
   if (logClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     // POPRAWKA: to było zahardkodowane na MAC jednego konkretnego zamka
     // testowego, więc logi WSZYSTKICH urządzeń trafiały pod ten sam adres.
-    logClient.print("GET /api/hardware/log?mac=" + urlEncode(getMacAddressString()) + "&msg=" + message + " HTTP/1.1\r\n");
+    logClient.print("GET /api/hardware/log?mac=" + urlEncode(getMacAddressString()) + "&msg=" + urlEncode(message) + " HTTP/1.1\r\n");
     logClient.print("Host: " + String(PROXMOX_SERVER) + "\r\n");
     logClient.print("Connection: close\r\n\r\n");
     logClient.stop();
   }
+
+void logKeypadEvent(String message) {
+  addLog(message);
+  if (WiFi.status() == WL_CONNECTED) sendRemoteLog(message);
+}
 }
