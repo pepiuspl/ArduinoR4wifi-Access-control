@@ -1423,7 +1423,75 @@ export default function App() {
               ))}
               {lockState.users.length === 0 ? <Text style={styles.subLabel}>Brak rekordów przypisanych do tego zamka.</Text> : null}
             </View>
+
+            {/* ── Kody PIN Klawiatury ─────────────────────────────────────── */}
+            {!isLocalMode && (
+              <View style={styles.card}>
+                <Text style={styles.sectionHeader}>🔢 Kody PIN Klawiatury</Text>
+                <Text style={{ color: '#aaa', fontSize: 12, marginBottom: 12 }}>
+                  Każda osoba ma własny PIN (4–8 cyfr). Wpisz na klawiaturze i zatwierdź{' '}
+                  <Text style={{ color: '#64b5f6' }}>#</Text>. Gwiazdka{' '}
+                  <Text style={{ color: '#64b5f6' }}>*</Text> czyści bufor.
+                </Text>
+                {keypadPins.map((kp) => (
+                  <View key={kp.id} style={{ backgroundColor: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    {kpRenameId === kp.id ? (
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <TextInput style={[styles.inputField, { flex: 1, marginBottom: 0 }]}
+                          value={kpRenameName} onChangeText={setKpRenameName}
+                          placeholder="Nowa nazwa" placeholderTextColor="#555" autoFocus />
+                        <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12 }]} onPress={kpRename}>
+                          <Text style={styles.btnText}>✓</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12, backgroundColor: '#333' }]} onPress={() => setKpRenameId(null)}>
+                          <Text style={styles.btnText}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : (
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: kp.active ? '#81c784' : '#555', marginRight: 10 }} />
+                        <Text style={{ color: kp.active ? '#fff' : '#666', flex: 1, fontSize: 15 }}>{kp.name}</Text>
+                        <TouchableOpacity onPress={() => { setKpRenameId(kp.id); setKpRenameName(kp.name); }} style={{ paddingHorizontal: 8 }}>
+                          <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => kpToggle(kp.id)} style={{ paddingHorizontal: 8 }}>
+                          <Text style={{ color: '#64b5f6', fontSize: 12 }}>{kp.active ? 'Blok.' : 'Aktyw.'}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => kpDelete(kp.id, kp.name)} style={{ paddingHorizontal: 8 }}>
+                          <Text style={{ color: '#ef4444', fontSize: 12 }}>Usuń</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+                ))}
+                {keypadPins.length === 0 && (
+                  <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginBottom: 12 }}>Brak skonfigurowanych PINów</Text>
+                )}
+                {keypadPins.length < 10 && (
+                  <>
+                    <Text style={[styles.inputLabelText, { marginTop: 8 }]}>Nazwa osoby</Text>
+                    <TextInput style={styles.inputField} placeholder="np. Mama, Tata, Gość"
+                      placeholderTextColor="#555" value={kpNewName} onChangeText={setKpNewName} />
+                    <Text style={styles.inputLabelText}>PIN (4–8 cyfr)</Text>
+                    <TextInput style={styles.inputField} placeholder="••••" placeholderTextColor="#555"
+                      keyboardType="numeric" secureTextEntry maxLength={8}
+                      value={kpNewCode} onChangeText={setKpNewCode} />
+                    <Text style={styles.inputLabelText}>Potwierdź PIN</Text>
+                    <TextInput style={styles.inputField} placeholder="••••" placeholderTextColor="#555"
+                      keyboardType="numeric" secureTextEntry maxLength={8}
+                      value={kpNewConfirm} onChangeText={setKpNewConfirm} />
+                    {kpStatus ? (
+                      <Text style={{ color: kpStatus.startsWith('✓') ? '#81c784' : '#ef4444', fontSize: 12, marginBottom: 8 }}>{kpStatus}</Text>
+                    ) : null}
+                    <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#1a3a5c', width: '100%' }]} onPress={kpAdd}>
+                      <Text style={styles.btnText}>➕ Dodaj PIN</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            )}
           </ScrollView>
+          </KeyboardAvoidingView>
         )}
 
         {currentScreen === 'system' && (
@@ -1555,7 +1623,6 @@ export default function App() {
               </View>
             </View>
           </ScrollView>
-          </KeyboardAvoidingView>
         )}
         
         {currentScreen === 'settings' && (
@@ -1630,82 +1697,6 @@ export default function App() {
                 </View>
               )}
 
-              {/* ── KEYPAD PINs ── like RFID cards but for the keypad ─────── */}
-              {!isLocalMode && (
-                <View style={styles.card}>
-                  <Text style={styles.sectionHeader}>🔢 Kody PIN Klawiatury</Text>
-                  <Text style={{ color: '#aaa', fontSize: 12, marginBottom: 12 }}>
-                    Każda osoba ma własny PIN (4–8 cyfr). Wpisz kod na klawiaturze i zatwierdź{' '}
-                    <Text style={{ color: '#64b5f6' }}>#</Text>. Gwiazdka{' '}
-                    <Text style={{ color: '#64b5f6' }}>*</Text> czyści wpisany kod.
-                  </Text>
-
-                  {/* List of existing PINs */}
-                  {keypadPins.map((kp) => (
-                    <View key={kp.id} style={{ backgroundColor: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 8 }}>
-                      {kpRenameId === kp.id ? (
-                        <View style={{ flexDirection: 'row', gap: 8 }}>
-                          <TextInput
-                            style={[styles.inputField, { flex: 1, marginBottom: 0 }]}
-                            value={kpRenameName}
-                            onChangeText={setKpRenameName}
-                            placeholder="Nowa nazwa"
-                            placeholderTextColor="#555"
-                            autoFocus
-                          />
-                          <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12 }]} onPress={kpRename}>
-                            <Text style={styles.btnText}>✓</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12, backgroundColor: '#333' }]} onPress={() => setKpRenameId(null)}>
-                            <Text style={styles.btnText}>✕</Text>
-                          </TouchableOpacity>
-                        </View>
-                      ) : (
-                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: kp.active ? '#81c784' : '#555', marginRight: 10 }} />
-                          <Text style={{ color: kp.active ? '#fff' : '#666', flex: 1, fontSize: 15 }}>{kp.name}</Text>
-                          <TouchableOpacity onPress={() => { setKpRenameId(kp.id); setKpRenameName(kp.name); }} style={{ paddingHorizontal: 8 }}>
-                            <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity onPress={() => kpToggle(kp.id)} style={{ paddingHorizontal: 8 }}>
-                            <Text style={{ color: '#64b5f6', fontSize: 12 }}>{kp.active ? 'Blok.' : 'Aktyw.'}</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity onPress={() => kpDelete(kp.id, kp.name)} style={{ paddingHorizontal: 8 }}>
-                            <Text style={{ color: '#ef4444', fontSize: 12 }}>Usuń</Text>
-                          </TouchableOpacity>
-                        </View>
-                      )}
-                    </View>
-                  ))}
-
-                  {keypadPins.length === 0 && (
-                    <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginBottom: 12 }}>Brak skonfigurowanych PINów</Text>
-                  )}
-
-                  {/* Add new PIN */}
-                  {keypadPins.length < 10 && (
-                    <>
-                      <Text style={[styles.inputLabelText, { marginTop: 8 }]}>Nazwa osoby</Text>
-                      <TextInput style={styles.inputField} placeholder="np. Mama, Tata, Gość" placeholderTextColor="#555"
-                        value={kpNewName} onChangeText={setKpNewName} />
-                      <Text style={styles.inputLabelText}>PIN (4–8 cyfr)</Text>
-                      <TextInput style={styles.inputField} placeholder="••••" placeholderTextColor="#555"
-                        keyboardType="numeric" secureTextEntry maxLength={8}
-                        value={kpNewCode} onChangeText={setKpNewCode} />
-                      <Text style={styles.inputLabelText}>Potwierdź PIN</Text>
-                      <TextInput style={styles.inputField} placeholder="••••" placeholderTextColor="#555"
-                        keyboardType="numeric" secureTextEntry maxLength={8}
-                        value={kpNewConfirm} onChangeText={setKpNewConfirm} />
-                      {kpStatus ? (
-                        <Text style={{ color: kpStatus.startsWith('✓') ? '#81c784' : '#ef4444', fontSize: 12, marginBottom: 8 }}>{kpStatus}</Text>
-                      ) : null}
-                      <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#1a3a5c', width: '100%' }]} onPress={kpAdd}>
-                        <Text style={styles.btnText}>➕ Dodaj PIN</Text>
-                      </TouchableOpacity>
-                    </>
-                  )}
-                </View>
-              )}
             </ScrollView>
           </KeyboardAvoidingView>
         )}
