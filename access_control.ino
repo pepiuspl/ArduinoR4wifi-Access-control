@@ -17,7 +17,7 @@
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-const char* app_version = "v3.0.1";
+const char* app_version = "v3.0.0";
 
 struct User { 
   byte uid[4]; 
@@ -1055,8 +1055,9 @@ void handleOnlineInstallerServer() {
 } 
 
 void executeCloudSynchronization() { 
-  WiFiClient httpCheck; 
+  WiFiClient httpCheck;
   httpCheck.setTimeout(250);
+  httpCheck.setConnectTimeout(500);
   if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
     Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba...");
     return;
@@ -1255,6 +1256,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 void sendTamperAlert(bool active) {
   if (WiFi.status() != WL_CONNECTED) return;
   WiFiClient tc; tc.setTimeout(500);
+  tc.setConnectTimeout(500);
   if (!tc.connect(PROXMOX_SERVER, PROXMOX_PORT)) return;
   String mac  = getMacAddressString();
   String body = "{\"mac\":\"" + mac + "\",\"active\":" + (active ? "true" : "false") + "}";
@@ -1337,6 +1339,7 @@ void verifyKeypadPIN(const String& pin) {
     kpChecking = false; renderSystemUI(); return;
   }
   WiFiClient kc; kc.setTimeout(3000);
+  kc.setConnectTimeout(2000);
   if (!kc.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     logKeypadEvent("Keypad: blad polaczenia z serwerem"); playSound(SND_ACCESS_DENIED);
     kpChecking = false; renderSystemUI(); return;
@@ -1372,6 +1375,7 @@ void verifyKeypadPIN(const String& pin) {
 }
 
 void handleKeypress(char key) {
+  logKeypadEvent("DBG key=[" + String(key) + "] buf=[" + kpBuffer + "]");
   kpLastKey = millis();
   if (key == '#') {
     playSound(SND_KEY_SUBMIT);
@@ -1742,7 +1746,8 @@ void loop() {
       // krytyczne - pomijamy je całkowicie offline, by nie czekać na nic.
       if (WiFi.status() == WL_CONNECTED) {
         WiFiClient buttonLogClient; 
-        buttonLogClient.setTimeout(150); 
+        buttonLogClient.setTimeout(150);
+        buttonLogClient.setConnectTimeout(300);
         if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
           buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1");
           buttonLogClient.print("Host: "); buttonLogClient.println(PROXMOX_SERVER); 

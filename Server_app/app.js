@@ -65,7 +65,7 @@ function buildLocalRequestUrl(endpoint, payload, adminPass) {
 }
 
 export default function App() {
-  let [backendUrl, setBackendUrl] = useState('192.168.0.199:3000'); 
+  let [backendUrl, setBackendUrl] = useState('http://192.168.0.199:3000'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [accountId, setAccountId] = useState(null);    // kept for local-mode compat
