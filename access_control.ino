@@ -1047,10 +1047,11 @@ void executeCloudSynchronization() {
   
   lastSuccessfulPollTime = millis(); 
   String macStr = getMacAddressString();
-  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email));  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId);  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
   unsigned long deadline = millis() + 300;
+  unsigned long installedReleaseId = 0;
   String payloadResponse = "";  
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {  
     if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK");
@@ -1063,7 +1064,18 @@ void executeCloudSynchronization() {
   
   bool serverUnlockSignal = (payloadResponse.indexOf("\"unlock\":true") != -1);
   bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1); 
-  bool serverOtaSignal    = (payloadResponse.indexOf("\"ota\":true") != -1); 
+  bool serverOtaSignal    = (payloadResponse.indexOf("\"ota\":true") != -1);
+  
+  int ridIdx = payloadResponse.indexOf("\"latest_release_id\":");
+  if (ridIdx != -1) {
+    ridIdx += 20;
+    int ridEnd = payloadResponse.indexOf(",", ridIdx);
+    if (ridEnd == -1) ridEnd = payloadResponse.indexOf("}", ridIdx);
+    if (ridEnd > ridIdx) {
+      unsigned long newReleaseId = payloadResponse.substring(ridIdx, ridEnd).toInt();
+      if (newReleaseId > 0) latestFirmwareReleaseId = newReleaseId;
+    }
+  }
 
   if (serverOtaSignal) {
     sendRemoteLog("[HARDWARE] Wykryto ota:true w pakiecie poll! Odpalam update.");
@@ -1171,6 +1183,8 @@ void performLocalFirmwareUpdate() {
           updateDisplay("SUKCES OTA", "Wgrywanie i Reset...");
           sendRemoteLog("[OTA PULL SUCCESS] Aktualizacja kompletna i zweryfikowana! Restart systemu...");
           delay(2000);
+          EEPROM.put(480, latestFirmwareReleaseId);
+          EEPROM.commit();
           ESP.restart();
         }
       } else {

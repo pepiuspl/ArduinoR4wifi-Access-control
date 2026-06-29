@@ -571,6 +571,8 @@ export default function App() {
 };
 
   //LOGIKA WYKRYWANIA I ANALIZY AKTUALIZACJI OTA
+  const [latestReleaseId, setLatestReleaseId] = useState(0);
+  const [knownReleaseId, setKnownReleaseId]   = useState(0);
   const handleCheckUpdate = () => {
     setOtaState('checking');
     fetch(`${backendUrl}/api/firmware/version`)
@@ -579,19 +581,22 @@ export default function App() {
         return res.json();
       })
       .then((data) => {
-        // Zapisywanie numeru wersji z GitHuba do stanu, aby użyć go w tekście UI
         setLatestVersion(data.latestVersion);
+        setLatestReleaseId(data.releaseId || 0);  // store the release ID
 
         const currentVer = (lockState.version || '0.0.0').replace(/v\.?/g, '').trim();
-        const latestVer = data.latestVersion.replace(/v\.?/g, '').trim();
-        
-        if (currentVer === latestVer) {
-          setOtaState('up-to-date');
-          
-          setTimeout(() => {
-            setOtaState('idle');
-          }, 5000);
+        const latestVer  = data.latestVersion.replace(/v\.?/g, '').trim();
 
+        // If server provides a releaseId, use it as the source of truth.
+        // Two pushes to the same version tag → different releaseId → update offered.
+        // Falls back to version string comparison for older server builds.
+        const isUpToDate = data.releaseId
+          ? (knownReleaseId >= data.releaseId)   // knownReleaseId = what device last installed
+          : (currentVer === latestVer);
+
+        if (isUpToDate) {
+          setOtaState('up-to-date');
+          setTimeout(() => setOtaState('idle'), 5000);
         } else {
           setOtaState('available');
         }
@@ -633,6 +638,7 @@ export default function App() {
             if (normalizeVer(lockStateRef.current.version) === normalizeVer(latestVersion)) {
               clearInterval(checkInterval);
               setOtaState('success');
+              setKnownReleaseId(latestReleaseId);
               setTimeout(() => setOtaState('idle'), 5000);
             }
 

@@ -31,6 +31,10 @@ try {
 
 const HARDWARE_OTA_USER = 'admin';
 
+// OTA release version
+let latestFirmwareReleaseId = 0;
+
+
 // ─── GitHub PAT ───────────────────────────────────────────────────────────────
 // NEVER hard-code this. Set the env variable on your Proxmox server:
 //   export GITHUB_PAT="ghp_your_new_token_here"
@@ -115,7 +119,7 @@ const mailTransport = nodemailer.createTransport({
   auth: null
 });
 
-// 📁 LOCAL FILE LOGGING ENVIRONMENT INITIALIZATION
+// LOCAL FILE LOGGING ENVIRONMENT INITIALIZATION
 const logDirectory = '/var/log/smartlock';
 const localLogFile = path.join(logDirectory, 'smartlock_system.log');
 
@@ -831,12 +835,16 @@ const server = http.createServer(async (req, res) => {
                 }
                 
                 latestFirmwareVersion = release.tag_name;
+                latestFirmwareReleaseId = release.id;
                 forceLog(`Sukces! Najnowsza wersja na GitHubie to: ${latestFirmwareVersion}`);
                 
                 // Wysyłamy odpowiedź do aplikacji tylko, jeśli wątek główny jej nie uprzedził
                 if (!res.headersSent) {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ latestVersion: latestFirmwareVersion }));
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ 
+                    latestVersion: latestFirmwareVersion,
+                    releaseId: latestFirmwareReleaseId  // ADD THIS
+                  }));
                 }
             } catch (e) {
                 forceLog(`Błąd parsowania odpowiedzi JSON z GitHuba: ${e.message}`);
@@ -1223,8 +1231,16 @@ const server = http.createServer(async (req, res) => {
   const cleanLatest = latestFw.version.replace('v', '').trim();
   
   // Zezwalamy na update TYLKO, gdy wersje się różnią ORAZ kliknięto przycisk w aplikacji (otaUpdatePending === true)
-  const otaUpdateTrigger = (cleanLatest !== '0.0.0' && cleanCurrent !== cleanLatest && otaUpdatePending === true);
-
+  // Compare by release ID: if the server has a newer release (higher ID) than
+  // what the device is running, trigger OTA — even if the version string is identical.
+  // latestFirmwareReleaseId comes from the GitHub release object and is always
+  // a higher integer for a newer release, regardless of tag name.
+  const deviceKnownReleaseId = parseInt(query.release_id || '0', 10);
+  const otaUpdateTrigger = (
+    latestFirmwareReleaseId > 0 &&
+    latestFirmwareReleaseId > deviceKnownReleaseId &&
+    otaUpdatePending === true
+  );
   // Jedyny log, jaki tu zostaje – zapisze się WYŁĄCZNIE w ułamku sekundy, w którym faktycznie rusza aktualizacja
   if (otaUpdateTrigger) {
     forceLog(`[OTA ACTIVATED] Zezwolono urządzeniu [${mac}] na pobranie wersji ${cleanLatest}`);
@@ -1235,6 +1251,7 @@ const server = http.createServer(async (req, res) => {
     learn: isLearning,
     username: learningQueues[mac] || '',
     ota: otaUpdateTrigger,
+    latest_release_id: latestFirmwareReleaseId,
     latest_version: latestFw.version
   });
 }
