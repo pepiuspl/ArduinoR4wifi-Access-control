@@ -1,9 +1,9 @@
-name: Compile on tag push ESP32 
+name: Compile on release ESP32 
 
 on:
   push:
-    tags:
-      - 'v*' # Uruchamia się automatycznie po wypchnięciu tagu wersji (np. v2.9.8)
+    branches:
+      - main  # Uruchamia się automatycznie po każdym pushu na branch main
 
 jobs:
   build-and-release:
@@ -77,12 +77,14 @@ jobs:
           BIN_FILE=$(find ./build -name "*.bin" ! -name "*merged*" ! -name "*bootloader*" ! -name "*partitions*" | head -n 1)
         fi
         echo "💡 Wybrany właściwy, lekki plik binarny aplikacji: $BIN_FILE"
-        cp "$BIN_FILE" "./lock_${{ github.ref_name }}.bin"
+        cp "$BIN_FILE" "./lock_${{ github.sha }}.bin"
 
     # 7. Automatyczne stworzenie wydania i podpięcie odchudzonego pliku aktualizacji
-    - name: Broadcast Release to Proxmox Network
+    - name: Create Release and Upload Firmware
       uses: softprops/action-gh-release@v2
       with:
-        files: lock_${{ github.ref_name }}.bin
+        tag_name: build-${{ github.sha }}
+        name: Build ${{ github.run_number }} (${{ github.sha }})
+        files: lock_${{ github.sha }}.bin
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
