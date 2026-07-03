@@ -17,7 +17,9 @@
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-const char* app_version = "v3.0.0";
+int latestFirmwareReleaseId = 0;
+unsigned long installedReleaseId = 0;
+const char* app_version = "v3.0.1";
 
 struct User { 
   byte uid[4]; 
@@ -48,7 +50,8 @@ void renderSystemUI();
 void handleProvisioningServer();
 void handleWebServer(); 
 void handleOnlineInstallerServer(); 
-void executeCloudSynchronization(); 
+void executeCloudSynchronization();
+void performLocalFirmwareUpdate(); 
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister); 
 void sendRemoteLog(String message);
 void sendTamperAlert(bool active);
@@ -1057,7 +1060,7 @@ void handleOnlineInstallerServer() {
 void executeCloudSynchronization() { 
   WiFiClient httpCheck;
   httpCheck.setTimeout(250);
-  httpCheck.setConnectTimeout(500);
+  httpCheck.setConnectionTimeout(500);
   if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
     Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba...");
     return;
@@ -1069,7 +1072,6 @@ void executeCloudSynchronization() {
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
   unsigned long deadline = millis() + 300;
-  unsigned long installedReleaseId = 0;
   String payloadResponse = "";  
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {  
     if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK");
@@ -1256,7 +1258,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 void sendTamperAlert(bool active) {
   if (WiFi.status() != WL_CONNECTED) return;
   WiFiClient tc; tc.setTimeout(500);
-  tc.setConnectTimeout(500);
+  tc.setConnectionTimeout(500);
   if (!tc.connect(PROXMOX_SERVER, PROXMOX_PORT)) return;
   String mac  = getMacAddressString();
   String body = "{\"mac\":\"" + mac + "\",\"active\":" + (active ? "true" : "false") + "}";
@@ -1339,7 +1341,7 @@ void verifyKeypadPIN(const String& pin) {
     kpChecking = false; renderSystemUI(); return;
   }
   WiFiClient kc; kc.setTimeout(3000);
-  kc.setConnectTimeout(2000);
+  kc.setConnectionTimeout(2000);
   if (!kc.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     logKeypadEvent("Keypad: blad polaczenia z serwerem"); playSound(SND_ACCESS_DENIED);
     kpChecking = false; renderSystemUI(); return;
@@ -1746,8 +1748,7 @@ void loop() {
       // krytyczne - pomijamy je całkowicie offline, by nie czekać na nic.
       if (WiFi.status() == WL_CONNECTED) {
         WiFiClient buttonLogClient; 
-        buttonLogClient.setTimeout(150);
-        buttonLogClient.setConnectTimeout(300);
+        buttonLogClient.setTimeout(150); 
         if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
           buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1");
           buttonLogClient.print("Host: "); buttonLogClient.println(PROXMOX_SERVER); 
@@ -1796,8 +1797,9 @@ void sendRemoteLog(String message) {
     logClient.stop();
   }
 
+}
+
 void logKeypadEvent(String message) {
   addLog(message);
   if (WiFi.status() == WL_CONNECTED) sendRemoteLog(message);
-}
 }
