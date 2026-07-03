@@ -134,8 +134,8 @@ char owner_email[64] = "";
                       // which is below ESP32's HIGH threshold → always reads LOW → constant beeping
                       // IO14 has no LED, internal pull-up works correctly
 #define KP_ROW2  15
-#define KP_ROW3  34   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
-#define KP_ROW4  35   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
+#define KP_ROW3  35   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
+#define KP_ROW4  34   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
 
 const uint8_t KP_COLS[3] = { KP_COL1, KP_COL2, KP_COL3 };
 const uint8_t KP_ROWS[4] = { KP_ROW1, KP_ROW2, KP_ROW3, KP_ROW4 };

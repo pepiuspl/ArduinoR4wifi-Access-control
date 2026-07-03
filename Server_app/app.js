@@ -65,7 +65,7 @@ function buildLocalRequestUrl(endpoint, payload, adminPass) {
 }
 
 export default function App() {
-  let [backendUrl, setBackendUrl] = useState('http://192.168.0.199:3000'); 
+  let [backendUrl, setBackendUrl] = useState('192.168.0.199:3000'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [accountId, setAccountId] = useState(null);    // kept for local-mode compat
@@ -735,30 +735,27 @@ export default function App() {
   })
     .then((res) => {
       clearTimeout(timeoutId);
-      if (!res.ok) throw new Error('Network response was not ok');
+      // Always parse JSON — server returns {auth:false} on 401 which we handle below
       return res.json();
     })
     .then((data) => {
-      setErrorMessage(''); 
-      
+      if (data.auth === false) {
+        // Token expired or invalid — re-login silently
+        setIsConfigured(false);
+        return;
+      }
+      setErrorMessage('');
       if (data.pushEntries !== undefined) setPushEntries(data.pushEntries);
       if (data.pushAlarms  !== undefined) setPushAlarms(data.pushAlarms);
       if (data.keypad_pins !== undefined) setKeypadPins(data.keypad_pins);
-      
-      if (data.auth === false) {
-        setIsConfigured(false);
-      } else {
-        setLockState(prevState => mergeLockState(prevState, data));
-      }
+      setLockState(prevState => mergeLockState(prevState, data));
     })
     .catch((err) => {
       clearTimeout(timeoutId);
-      
       setLockState(prevState => ({
         ...prevState,
-        lock: 'offline' 
+        lock: 'offline'
       }));
-      
       setErrorMessage(`Brak połączenia z centralką (Offline)`);
       console.error("Fetch status error:", err.message);
     });
