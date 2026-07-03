@@ -590,8 +590,11 @@ export default function App() {
         // If server provides a releaseId, use it as the source of truth.
         // Two pushes to the same version tag → different releaseId → update offered.
         // Falls back to version string comparison for older server builds.
-        const isUpToDate = (data.releaseId && knownReleaseId > 0)
-          ? (knownReleaseId >= data.releaseId)
+        // deviceReleaseId comes from /api/data (lockState), not /api/firmware/version
+        const deviceId = lockState.deviceReleaseId || knownReleaseId || 0;
+        const latestId = data.releaseId || 0;
+        const isUpToDate = (latestId > 0 && deviceId > 0)
+          ? (deviceId >= latestId)
           : (currentVer === latestVer);
 
         if (isUpToDate) {
@@ -634,8 +637,13 @@ export default function App() {
             // zmiany wersji, choćby aktualizacja faktycznie się powiodła.
             // Normalizujemy obie strony (usuwamy ewentualny prefiks "v"), żeby
             // drobna niezgodność formatu też nie generowała fałszywego timeoutu.
+            // Use release ID comparison when available — version strings are identical for same-tag patches
+            const deviceIdNow = lockStateRef.current.deviceReleaseId || 0;
             const normalizeVer = (v) => (v || '').replace(/v\.?/g, '').trim();
-            if (normalizeVer(lockStateRef.current.version) === normalizeVer(latestVersion)) {
+            const isDone = latestReleaseId > 0
+              ? (deviceIdNow >= latestReleaseId)
+              : (normalizeVer(lockStateRef.current.version) === normalizeVer(latestVersion));
+            if (isDone) {
               clearInterval(checkInterval);
               setOtaState('success');
               setKnownReleaseId(latestReleaseId);

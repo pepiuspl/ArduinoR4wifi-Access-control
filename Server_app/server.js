@@ -594,6 +594,8 @@ const server = http.createServer(async (req, res) => {
           pushEntries: accountsRes.rows[0].push_entries !== false,
           pushAlarms: accountsRes.rows[0].push_alarms !== false,
           otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0),
+          deviceReleaseId: (actualLockStates[primaryMac]?.deviceReleaseId || 0),
+          latestReleaseId: latestFirmwareReleaseId,
           keypad_pins: kpPinsRes.rows,
         });
       }
@@ -1220,12 +1222,14 @@ const server = http.createServer(async (req, res) => {
   // To jest JEDYNE miejsce w całym serwerze, gdzie ustawiamy actualLockStates[mac].state -
   // nigdy nie zgadujemy stanu na podstawie samego wysłania komendy z aplikacji,
   // bo wtedy UI pokazywałoby "OTWARTY" zanim zamek faktycznie się odblokuje.
+  const deviceReleaseId = parseInt(query.release_id || '0', 10);
   if (query.opened !== undefined) {
     const reportedOpen = query.opened === '1';
     actualLockStates[mac] = {
       ...(actualLockStates[mac] || {}),
       state: reportedOpen,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      deviceReleaseId: deviceReleaseId || (actualLockStates[mac]?.deviceReleaseId || 0)
     };
     if (reportedOpen) delete pendingUnlocks[mac];
   } else {
@@ -1568,6 +1572,31 @@ mailTransport.verify((error, success) => {
 server.listen(3000, () => {
   console.log('⚡ Multi-Tenant SmartLock Engine live on port 3000. Writing local filesystem archives at /var/log/smartlock/');
   writeToLocalLogFile('Core Daemon', 'Platform backend environment daemon spun up successfully.');
+
+  // Prefetch latest release ID from GitHub on startup so it's available immediately
+  if (GITHUB_PAT) {
+    const startupOptions = {
+      hostname: 'api.github.com',
+      path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
+      family: 4,
+      headers: { 'User-Agent': 'NodeJS-SmartLock-Server', 'Authorization': `token ${GITHUB_PAT}` }
+    };
+    const startupReq = https.get(startupOptions, (githubRes) => {
+      let data = '';
+      githubRes.on('data', (chunk) => data += chunk);
+      githubRes.on('end', () => {
+        try {
+          const release = JSON.parse(data);
+          if (githubRes.statusCode === 200 && release.id) {
+            latestFirmwareReleaseId = release.id;
+            latestFirmwareVersion = release.tag_name;
+            writeToLocalLogFile('Core Daemon', `Startup GitHub prefetch: ${release.tag_name} (id=${release.id})`);
+          }
+        } catch (e) {}
+      });
+    });
+    startupReq.on('error', () => {});
+  }
 });
 
 function sendPushNotification(token, title, body) {
