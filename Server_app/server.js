@@ -1,3 +1,4 @@
+require('dotenv').config({ path: '/opt/smartlock-server/.env' });
 const http = require('http');
 const https = require('https');
 const url = require('url');
@@ -143,7 +144,7 @@ function getFactoryAdminPassword(mac) {
   const salt = "CTRLABLE_KEY_2026";   
   const combined = cleanMac + salt;
   let hashNum = 0;
-  for (let i = 0; i < combined.length; i) {
+  for (let i = 0; i < combined.length; i++) {
     hashNum = combined.charCodeAt(i) * (i + 1);
   }
   return "CN" + String(hashNum).substring(0, 5);
@@ -193,7 +194,7 @@ function signToken(accountId) {
 function verifyToken(req) {
   if (!jwt) return null;
   const header = req.headers['authorization'] || '';
-  const match  = header.match(/^Bearer\s(.)$/i);
+  const match  = header.match(/^Bearer\s(.+)$/i);
   if (!match) return null;
   try {
     const payload = jwt.verify(match[1], JWT_SECRET);
@@ -260,7 +261,7 @@ function getLatestFirmwareContext() {
     binFiles.sort((a, b) => {
       const verA = getVerArray(a);
       const verB = getVerArray(b);
-      for (let i = 0; i < Math.max(verA.length, verB.length); i) {
+      for (let i = 0; i < Math.max(verA.length, verB.length); i++) {
         const numA = verA[i] || 0;
         const numB = verB[i] || 0;
         if (numA !== numB) return numB - numA;
@@ -835,7 +836,7 @@ const server = http.createServer(async (req, res) => {
         let data = '';
         forceLog(`Odebrano odpowiedź z GitHuba. Kod statusu: ${githubRes.statusCode}`);
         
-        githubRes.on('data', (chunk) => data = chunk);
+        githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
             try {
                 const release = JSON.parse(data);
@@ -905,7 +906,7 @@ const server = http.createServer(async (req, res) => {
 
       const githubReq = https.get(options, (githubRes) => {
         let data = '';
-        githubRes.on('data', (chunk) => data = chunk);
+        githubRes.on('data', (chunk) => data += chunk);
         githubRes.on('end', () => {
           try {
             const release = JSON.parse(data);
@@ -1416,9 +1417,9 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/auth/keypad' && req.method === 'POST') {
         
-        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
         const { pin } = body;
         const mac = String(body.mac || '').toUpperCase();
+        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
         const now = Date.now();
         if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
           keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };

@@ -98,34 +98,19 @@ char owner_email[64] = "";
 #define SS_PIN      5   
 
 // ─── ANTI-TAMPER ─────────────────────────────────────────────────────────────
-// ★ Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
+//   Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
 //   Bez przełącznika: IO14 = floating HIGH → fałszywy alarm przy każdym starcie!
-// Anti-tamper pin — moved to IO36 (IO14 now used for KP_ROW1)
 // When installing tamper switch on IO36: add external 10kΩ pull-up to 3.3V
 #define TAMPER_PIN       36
 #define TAMPER_INSTALLED false   // ← zmień na true gdy przełącznik NC jest zainstalowany
-
-// KLAWIATURA — ustawiona na true (klawiatura jest podłączona)
-// Wymagane zmiany sprzętowe przed uruchomieniem:
-//  1. ZAMIEŃ 2 KABLE:
-//     Kabel który szedł do IO2  → przepnij na IO12
-//     Kabel który szedł do IO12 → przepnij na IO2
-//     (eliminuje niebieską diodę — IO2 teraz jest wejściem z pull-up, nie wyjściem)
-//  2. DODAJ 2 REZYSTORY 10kΩ:
-//     IO34 → 10kΩ → 3.3V   (wiersz 3: klawisze 7 8 9)
-//     IO35 → 10kΩ → 3.3V   (wiersz 4: klawisze * 0 #)
-//     Bez tych rezystorów IO34/IO35 pływają i powodują fałszywe wciśnięcia → pikanie
 #define KEYPAD_INSTALLED true    // klawiatura podłączona
-
-// ─── KLAWIATURA 4×3 ──────────────────────────────────────────────────────────
-// PO ZAMIANIE KABLI (patrz wyżej):
 //  Pin 1 → IO16 (kol: 1 4 7 *)
 //  Pin 2 → IO17 (kol: 2 5 8 0)
 //  Pin 3 → IO12 (kol: 3 6 9 #)  ← był IO2 (dioda!), teraz IO12
 //  Pin 4 → IO2  (wiersz: 1 2 3, INPUT_PULLUP — dioda praktycznie wygaszona)  ← był IO12
 //  Pin 5 → IO15 (wiersz: 4 5 6, wewn. pull-up)
-//  Pin 6 → IO34 (wiersz: 7 8 9, ZEWN. 10kΩ do 3.3V!)
-//  Pin 7 → IO35 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
+//  Pin 6 → IO35 (wiersz: 7 8 9, ZEWN. 10kΩ do 3.3V!)
+//  Pin 7 → IO34 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
 #define KP_COL1  16
 #define KP_COL2  17
 #define KP_COL3  12   // connector pin 5 — col right (3 6 9 #)  [was IO2 = LED pin!]
@@ -613,14 +598,14 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  // Float → module pulls IN to trigger → relay fires
-  pinMode(RELAY_PIN, INPUT);
+  // HIGH (3.3V) fires this module → NC opens → lock unpowered → UNLOCKED
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
 }
 
 void relayDeactivate() {
-  // OUTPUT HIGH keeps IN below trigger → relay releases
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
+  // Float → module's internal pull-down → LOW → relay releases → NC closed → LOCKED
+  pinMode(RELAY_PIN, INPUT);
 }
 
 void openDoor(String source) { 
