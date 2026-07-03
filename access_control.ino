@@ -598,14 +598,12 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  // HIGH (3.3V) fires this module → NC opens → lock unpowered → UNLOCKED
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW);
 }
 
 void relayDeactivate() {
   // Float → module's internal pull-down → LOW → relay releases → NC closed → LOCKED
-  pinMode(RELAY_PIN, INPUT);
+  digitalWrite(RELAY_PIN, HIGH);
 }
 
 void openDoor(String source) { 
@@ -1383,7 +1381,8 @@ void checkKeypad() {
 }
 
 void setup() {
-  relayDeactivate();
+  pinMode(RELAY_PIN, OUTPUT);
+digitalWrite(RELAY_PIN, HIGH);   // stan spoczynku
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
@@ -1428,7 +1427,6 @@ void setup() {
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, LOW); 
 
-  // 4. 🌟 NAPRAWA RFID: Czyste uruchomienie SPI i natychmiastowy start czytnika
   SPI.begin(); 
   rfid.PCD_Init();
 
