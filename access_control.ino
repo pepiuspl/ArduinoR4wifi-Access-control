@@ -1297,30 +1297,11 @@ void checkTamper() {
 // KLAWIATURA PIN — 4×3 matrix keypad
 // =========================================================================
 char scanKeypad() {
-  // Read baseline state of the two input-only rows (IO34/IO35) BEFORE driving any column.
-  // If they are LOW here it means the pull-up resistor is missing, wrong direction (to GND),
-  // or wrong pin — in all those cases we ignore those rows to prevent phantom keypresses.
-  int base_r3 = digitalRead(KP_ROW3);  // IO34 — should be HIGH with correct 10kΩ to 3.3V
-  int base_r4 = digitalRead(KP_ROW4);  // IO35 — should be HIGH with correct 10kΩ to 3.3V
-
   for (int c = 0; c < 3; c++) {
     digitalWrite(KP_COLS[c], LOW);
-    delayMicroseconds(20);
-
+    delayMicroseconds(50);
     for (int r = 0; r < 4; r++) {
-      bool pressed = false;
-      if (r == 0 || r == 1) {
-        // IO2 and IO15: have internal pull-up — simple LOW detection
-        pressed = (digitalRead(KP_ROWS[r]) == LOW);
-      } else {
-        // IO34 (r==2) and IO35 (r==3): no internal pull-up
-        // ONLY accept if the baseline was HIGH (pull-up working) AND now reads LOW (key pressed)
-        // If baseline was LOW → pull-up missing or wrong → ignore row entirely
-        int base = (r == 2) ? base_r3 : base_r4;
-        pressed = (base == HIGH) && (digitalRead(KP_ROWS[r]) == LOW);
-      }
-
-      if (pressed) {
+      if (digitalRead(KP_ROWS[r]) == LOW) {
         digitalWrite(KP_COLS[c], HIGH);
         return KP_MAP[r][c];
       }
