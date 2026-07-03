@@ -613,13 +613,13 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
 }
 
 void relayDeactivate() {
-  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
 }
 
 void openDoor(String source) { 
