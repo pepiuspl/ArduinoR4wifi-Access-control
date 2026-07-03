@@ -1490,7 +1490,7 @@ const server = http.createServer(async (req, res) => {
         if (!name || !name.trim()) return sendJSON(res, 400, { error: 'Podaj nazwę' });
         if (!pin || String(pin).length < 4 || String(pin).length > 8)
           return sendJSON(res, 400, { error: 'PIN musi mieć 4–8 cyfr' });
-        if (!/^\d$/.test(String(pin)))
+        if (!/^\d+$/.test(String(pin)))
           return sendJSON(res, 400, { error: 'PIN musi zawierać tylko cyfry' });
 
         const cnt = await dbPool.query(
