@@ -1,4 +1,3 @@
-require('dotenv').config({ path: '/opt/smartlock-server/.env' });
 const http = require('http');
 const https = require('https');
 const url = require('url');
@@ -140,11 +139,11 @@ function writeToLocalLogFile(module, message) {
 
 function getFactoryAdminPassword(mac) {
   if (!mac) return 'admin';
-  const cleanMac = mac.toUpperCase();
-  const salt = "CTRLABLE_KEY_2026";
+  const cleanMac = mac.toUpperCase(); 
+  const salt = "CTRLABLE_KEY_2026";   
   const combined = cleanMac + salt;
   let hashNum = 0;
-  for (let i = 0; i < combined.length; i++) {
+  for (let i = 0; i < combined.length; i) {
     hashNum = combined.charCodeAt(i) * (i + 1);
   }
   return "CN" + String(hashNum).substring(0, 5);
@@ -194,7 +193,7 @@ function signToken(accountId) {
 function verifyToken(req) {
   if (!jwt) return null;
   const header = req.headers['authorization'] || '';
-  const match  = header.match(/^Bearer\s(.+)$/i);
+  const match  = header.match(/^Bearer\s(.)$/i);
   if (!match) return null;
   try {
     const payload = jwt.verify(match[1], JWT_SECRET);
@@ -248,7 +247,7 @@ function getLatestFirmwareContext() {
   try {
     const files = fs.readdirSync(updatesDir);
     const binFiles = files.filter(f => f.startsWith('lock_v') && f.endsWith('.bin'));
-
+    
     if (binFiles.length === 0) return { version: '0.0.0', filename: null };
 
     // Wyciąganie cyfr wersji niezależnie od tego, czy jest kropka po 'v' czy nie
@@ -261,7 +260,7 @@ function getLatestFirmwareContext() {
     binFiles.sort((a, b) => {
       const verA = getVerArray(a);
       const verB = getVerArray(b);
-      for (let i = 0; i < Math.max(verA.length, verB.length); i++) {
+      for (let i = 0; i < Math.max(verA.length, verB.length); i) {
         const numA = verA[i] || 0;
         const numB = verB[i] || 0;
         if (numA !== numB) return numB - numA;
@@ -318,9 +317,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     const unparsedRawUrlString = req.url || '';
-    const isBackgroundHandshakeNoise =
-      /poll/i.test(unparsedRawUrlString) ||
-      /data/i.test(unparsedRawUrlString) ||
+    const isBackgroundHandshakeNoise = 
+      /poll/i.test(unparsedRawUrlString) || 
+      /data/i.test(unparsedRawUrlString) || 
       /log_button/i.test(unparsedRawUrlString);
 
     if (!isBackgroundHandshakeNoise) {
@@ -333,7 +332,7 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/auth/register' && req.method === 'POST') {
         if (!body.email || !body.password) return sendJSON(res, 400, { error: "Missing identity payloads" });
-
+        
         // 🛡️ Strażnik RODO - sprawdzenie akceptacji z aplikacji mobilnej
         if (!body.privacy_policy_accepted) {
           return sendJSON(res, 400, { error: "Rejestracja odrzucona. Wymagany akcept polityki prywatności." });
@@ -346,10 +345,10 @@ const server = http.createServer(async (req, res) => {
         try {
           // Wstrzyknięcie danych do tabeli accounts (uwzględniając password_hash oraz privacy_policy_accepted_at)
           await dbPool.query(
-            'INSERT INTO accounts (email, password_hash, privacy_policy_accepted_at) VALUES ($1, $2, $3)',
+            'INSERT INTO accounts (email, password_hash, privacy_policy_accepted_at) VALUES ($1, $2, $3)', 
             [cleanEmail, hash, acceptedTimestamp]
           );
-
+          
           const welcomeMailManifest = {
             from: '"CTRLABLE Node System" <node@ctrlable.pl>',
             to: cleanEmail,
@@ -406,17 +405,17 @@ const server = http.createServer(async (req, res) => {
 
         const cleanEmail = body.email.trim().toLowerCase();
         const result = await dbPool.query('SELECT * FROM accounts WHERE email = $1', [cleanEmail]);
-
+        
         if (result.rows.length === 0) {
           writeToLocalLogFile('Auth Rejection', `Failed login attempt: ${cleanEmail}`);
           return sendJSON(res, 401, { error: "Invalid credentials" });
         }
-
+        
         const valid = await bcrypt.compare(body.password, result.rows[0].password_hash);
-
+        
         if (!valid) {
           writeToLocalLogFile('Auth Rejection', `Failed login: ${cleanEmail} (Password hash mismatch)`);
-
+          
           if (result.rows[0].push_token && result.rows[0].push_alarms !== false) {
             sendPushNotification(
               result.rows[0].push_token,
@@ -462,23 +461,23 @@ const server = http.createServer(async (req, res) => {
         }
 
         const secureCode = Math.floor(100000 + Math.random() * 900000).toString();
-
+        
         await dbPool.query(
-          `UPDATE accounts
+          `UPDATE accounts 
            SET reset_token = $1, reset_token_expires = NOW()  INTERVAL '15 minutes'
            WHERE email = $2`,
           [secureCode, cleanEmail]
         );
 
         const automatedMailManifest = {
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          from: '"CTRLABLE Node System" <node@ctrlable.pl>', 
           to: cleanEmail,
           subject: 'Kod autoryzacyjny resetu hasła CTRLABLE',
           html: `<h3>Twój kod weryfikacyjny:</h3>
                  <h1 style="color:#0284c7; font-family:monospace; letter-spacing:2px;">${secureCode}</h1>
                  <p>Kod jest ważny przez 15 minut. Jeśli nie prosiłeś o reset hasła, możesz zignorować tę wiadomość.</p>`
         };
-
+        
         mailTransport.sendMail(automatedMailManifest, (mailError, info) => {
           if (mailError) writeToLocalLogFile('Błąd serwera SMTP', mailError.message);
         });
@@ -502,13 +501,13 @@ const server = http.createServer(async (req, res) => {
 
         return sendJSON(res, 200, { valid: true });
       }
-
+      
       if (pathname === '/api/auth/confirm_password_reset' && req.method === 'POST') {
         const { email, code, newPassword } = body;
         if (!email || !code || !newPassword) return sendJSON(res, 400, { error: "Missing parameters" });
 
         const cleanEmail = email.trim().toLowerCase();
-
+        
         const userRes = await dbPool.query(
           'SELECT id FROM accounts WHERE email = $1 AND reset_token = $2 AND reset_token_expires > NOW()',
           [cleanEmail, code]
@@ -536,7 +535,7 @@ const server = http.createServer(async (req, res) => {
 
         const accountsRes = await dbPool.query('SELECT email, push_entries, push_alarms FROM accounts WHERE id = $1', [accountId]);
         if (accountsRes.rows.length === 0) return sendJSON(res, 404, { error: "Account invalid" });
-
+        
         const appAccountContext = { email: accountsRes.rows[0].email };
 
         const devicesRes = await dbPool.query('SELECT d.* FROM devices d WHERE d.account_id = $1', [accountId]);
@@ -546,13 +545,13 @@ const server = http.createServer(async (req, res) => {
 
         const primaryDevice = devicesRes.rows[0];
         const primaryMac = primaryDevice.mac_address;
-
+        
         const usersRes = await dbPool.query('SELECT id, holder_name as name, is_active as active, card_uid as uid, hardware_slot_idx FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [primaryMac]);
         const logsRes = await dbPool.query('SELECT event_time, message FROM system_events WHERE mac_address = $1 ORDER BY event_time DESC LIMIT 30', [primaryMac]);
         const kpPinsRes = await dbPool.query('SELECT id, name, active FROM keypad_pins WHERE account_id = $1 ORDER BY created_at ASC', [accountId]).catch(() => ({ rows: [] }));
 
         const processedUsersList = usersRes.rows.map(row => ({
-          idx: row.hardware_slot_idx,
+          idx: row.hardware_slot_idx, 
           name: row.name,
           active: row.active,
           uid: row.uid
@@ -583,11 +582,11 @@ const server = http.createServer(async (req, res) => {
         //DANE Z BAZY W POSTACI JSON
         return sendJSON(res, 200, {
           auth: true,
-          account: appAccountContext,
+          account: appAccountContext, 
           mode: isOffline ? 'Offline' : primaryDevice.operational_mode,
-          lock: lockValue,
+          lock: lockValue, 
           total: processedUsersList.length,
-          users: processedUsersList,
+          users: processedUsersList, 
           logs: localizedLogsFeed,
           version: primaryDevice.firmware_version || latestFirmwareVersion,
           otaPending: otaUpdatePending,
@@ -621,7 +620,7 @@ const server = http.createServer(async (req, res) => {
 
         // Wysyłamy do rygla poprawną komendę zmiany nazwy ze slotem
         const syncSuccess = await syncMutationToHardware(
-        targetIp,
+        targetIp, 
         `/api/rename_user?idx=${idx}&name=${encodeURIComponent(name)}&pass=${currentDynamicPassword}`
         );
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
@@ -725,8 +724,8 @@ const server = http.createServer(async (req, res) => {
         const devRes = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
-
-          unlockQueues[targetMac] = true;
+          
+          unlockQueues[targetMac] = true; 
           unlockQueues['00:00:00:00:00:00'] = true;
 
           // 🌟 Zapisujemy TYLKO czas zgłoszenia komendy. Realny stan rygla
@@ -738,13 +737,13 @@ const server = http.createServer(async (req, res) => {
 
           await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
           writeToLocalLogFile('API Control Command', `Dispatched remote unlock trigger down to: ${targetMac}`);
-
+          
           // Bezpiecznik: jeśli sprzęt jest offline i nigdy nie odpowie, kolejka
           // nie powinna zostać aktywna w nieskończoność.
-          setTimeout(() => {
-            unlockQueues[targetMac] = false;
+          setTimeout(() => { 
+            unlockQueues[targetMac] = false; 
             unlockQueues['00:00:00:00:00:00'] = false;
-          }, 8000);
+          }, 8000); 
         }
         return sendJSON(res, 200, { status: "ok" });
       }
@@ -775,10 +774,10 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/hardware/log_button' && req.method === 'GET') {
         const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
         const targetMac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
-
+        
         await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Naciśnięto przycisk fizyczny']);
         writeToLocalLogFile('Hardware Handshake', `[Node: ${targetMac}] Local physical click recorded quietly.`);
-
+        
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
         res.end("OK");
         return;
@@ -813,7 +812,7 @@ const server = http.createServer(async (req, res) => {
 
       if (pathname === '/api/firmware/version' && req.method === 'GET') {
     const logFile = '/var/log/smartlock/smartlock_system.log';
-
+    
     const forceLog = (msg) => {
         try {
             fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG GITHUB] ${msg}\n`);
@@ -826,7 +825,7 @@ const server = http.createServer(async (req, res) => {
         hostname: 'api.github.com',
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
         family: 4,
-        headers: {
+        headers: { 
             'User-Agent': 'NodeJS-SmartLock-Server',
             'Authorization': `token ${GITHUB_PAT}`
         }
@@ -835,12 +834,12 @@ const server = http.createServer(async (req, res) => {
     const githubReq = https.get(options, (githubRes) => {
         let data = '';
         forceLog(`Odebrano odpowiedź z GitHuba. Kod statusu: ${githubRes.statusCode}`);
-
+        
         githubRes.on('data', (chunk) => data = chunk);
         githubRes.on('end', () => {
             try {
                 const release = JSON.parse(data);
-
+                
                 if (githubRes.statusCode !== 200) {
                     forceLog(`GitHub odrzucił autoryzację. Powód: ${release.message}`);
                     if (!res.headersSent) {
@@ -849,15 +848,15 @@ const server = http.createServer(async (req, res) => {
                     }
                     return;
                 }
-
+                
                 latestFirmwareVersion = release.tag_name;
                 latestFirmwareReleaseId = release.id;
                 forceLog(`Sukces! Najnowsza wersja na GitHubie to: ${latestFirmwareVersion}`);
-
+                
                 // Wysyłamy odpowiedź do aplikacji tylko, jeśli wątek główny jej nie uprzedził
                 if (!res.headersSent) {
                   res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({
+                  res.end(JSON.stringify({ 
                     latestVersion: latestFirmwareVersion,
                     releaseId: latestFirmwareReleaseId  // ADD THIS
                   }));
@@ -880,7 +879,7 @@ const server = http.createServer(async (req, res) => {
             res.end(JSON.stringify({ error: err.message }));
         }
     });
-    return;
+    return; 
 }
 
     // UPDATE LOGIC -- GET NEW PACKAGE
@@ -898,7 +897,7 @@ const server = http.createServer(async (req, res) => {
         path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
         family: 4,
         timeout: 8000,
-        headers: {
+        headers: { 
           'User-Agent': 'NodeJS-SmartLock-Server',
           'Authorization': `token ${GITHUB_PAT}`
         }
@@ -910,7 +909,7 @@ const server = http.createServer(async (req, res) => {
         githubRes.on('end', () => {
           try {
             const release = JSON.parse(data);
-
+            
             if (githubRes.statusCode !== 200) {
               forceLog(`GitHub odrzucił autoryzację: ${release.message}`);
               return sendJSON(res, githubRes.statusCode, { error: release.message });
@@ -947,10 +946,10 @@ const server = http.createServer(async (req, res) => {
             };
 
             const fileStream = fs.createWriteStream(targetFilePath);
-
+            
             // Rekurencyjna funkcja radząca sobie z przekierowaniami 302 (GitHub -> S3)
             const executeDownloadPipeline = (downloadUrl) => {
-
+              
               // 1. Definiujemy osobną funkcję zwrotną (callback), by kod był czytelny
               const callback = (fileRes) => {
                 if (fileRes.statusCode === 302 || fileRes.statusCode === 301) {
@@ -1046,7 +1045,7 @@ const server = http.createServer(async (req, res) => {
         const fileSize = fs.statSync(filePath).size;
         forceLog(`Zamek [${mac}] podłączył się. Rozpoczynam strumieniowanie pliku: ${latestFirmwareFile} (${fileSize} bajtów) do Arduino...`);
 
-        res.writeHead(200, {
+        res.writeHead(200, { 
             'Content-Type': 'application/octet-stream',
             'Content-Length': fileSize
         });
@@ -1070,7 +1069,7 @@ const server = http.createServer(async (req, res) => {
 
         readStream.on('end', () => {
             otaUpdatePending = false;
-            actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100, timestamp: Date.now() };
+            actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 99, timestamp: Date.now() };
             forceLog(`Sukces! Strumieniowanie pliku ${latestFirmwareFile} do zamka [${mac}] zakończone pomyślnie.`);
         });
 
@@ -1094,7 +1093,7 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query(
           `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version)
            VALUES ($1, $2, $3, $4)
-           ON CONFLICT (mac_address) DO UPDATE
+           ON CONFLICT (mac_address) DO UPDATE 
            SET last_known_ip = $3, firmware_version = $4, last_heartbeat = CURRENT_TIMESTAMP`,
           [mac, ownerId, currentIp, firmware]
         );
@@ -1102,7 +1101,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
-      // LOOP POLL ZAMKA
+      // LOOP POLL ZAMKA 
       // =========================================================================
       // =========================================================================
       // ANTI-TAMPER ALERT  — called by firmware, NOT the app (no JWT needed)
@@ -1164,7 +1163,7 @@ const server = http.createServer(async (req, res) => {
           if (checkDev.rows.length === 0) {
             const reversedMac = mac.split(':').reverse().join(':');
             const checkDevRev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [reversedMac]);
-
+            
             if (checkDevRev.rows.length > 0) {
               mac = reversedMac;
             } else if (query.email) {
@@ -1184,9 +1183,9 @@ const server = http.createServer(async (req, res) => {
 
   // Definiujemy stany na podstawie Twoich globalnych kolejek rygla, zapobiegając ReferenceError
   const unlockAction = !!(unlockQueues[mac] || unlockQueues['00:00:00:00:00:00']);
-  const isLearning = !!learningQueues[mac];
+  const isLearning = !!learningQueues[mac]; 
 
-  let clientReportedVersion = query.version || null;
+  let clientReportedVersion = query.version || null; 
   let currentHardwareVersion = '0.0.0';
 
   // WYCISZONE: Usunięto stąd forceLog ("=== NOWE ZAPYTANIE POLL ==="), całkowicie żegnając sekundowy spam!
@@ -1234,6 +1233,11 @@ const server = http.createServer(async (req, res) => {
     actualLockStates[mac] = { state: false, ...(actualLockStates[mac] || {}), timestamp: Date.now() };
   }
 
+  // Mark OTA as 100% complete when device polls back after restart
+  if ((actualLockStates[mac]?.otaProgress || 0) === 99) {
+    actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100 };
+  }
+
   // PRZYWRÓCENIE DZIAŁANIA PRZEKAŹNIKA (Konsumpcja tokenu otwierania z kolejki)
   // Zerujemy TYLKO kolejkę komend - realny stan rygla (powyżej) pochodzi
   // wyłącznie z potwierdzenia sprzętu, nigdy z samego faktu wysłania komendy.
@@ -1246,7 +1250,7 @@ const server = http.createServer(async (req, res) => {
   const latestFw = getLatestFirmwareContext();
   const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
   const cleanLatest = latestFw.version.replace('v', '').trim();
-
+  
   // Zezwalamy na update TYLKO, gdy wersje się różnią ORAZ kliknięto przycisk w aplikacji (otaUpdatePending === true)
   // Compare by release ID: if the server has a newer release (higher ID) than
   // what the device is running, trigger OTA — even if the version string is identical.
@@ -1309,7 +1313,7 @@ const server = http.createServer(async (req, res) => {
           // SILNIK POWIADOMIEŃ PUSH: Sprawdzanie tokenu push i ustawień powiadomień dla właściciela konta
           let targetMacForOwner = mac;
           let ownerRes = await dbPool.query('SELECT account_id FROM devices WHERE mac_address = $1 LIMIT 1', [targetMacForOwner]);
-
+          
           // Jeśli nie znaleziono urządzenia, próbujemy odwrócić bajty MAC (tak jak w poll)
           if (ownerRes.rows.length === 0 && mac.includes(':')) {
             const reversedMac = mac.split(':').reverse().join(':');
@@ -1323,12 +1327,12 @@ const server = http.createServer(async (req, res) => {
           if (ownerRes.rows.length > 0) {
             const ownerId = ownerRes.rows[0].account_id;
             const tokenRes = await dbPool.query('SELECT push_token, push_entries FROM accounts WHERE id = $1', [ownerId]);
-
+            
             if (tokenRes.rows.length === 0) {
               writeToLocalLogFile('Push Diagnostic', `Błąd: Urządzenie istnieje, ale konto właściciela ID: ${ownerId} nie istnieje w tabeli accounts.`);
             } else {
               const accountData = tokenRes.rows[0];
-
+              
               if (!accountData.push_token) {
                 writeToLocalLogFile('Push Diagnostic', `⚠️ Brak zapisanego tokenu push dla konta ID: ${ownerId}. Zaloguj się ponownie w aplikacji.`);
               } else if (accountData.push_entries === false) {
@@ -1336,8 +1340,8 @@ const server = http.createServer(async (req, res) => {
               } else {
                 // Wszystkie warunki spełnione -> Wywołujemy wysyłkę
                 sendPushNotification(
-                  accountData.push_token,
-                  "Ktoś wszedł do domu",
+                  accountData.push_token, 
+                  "Ktoś wszedł do domu", 
                   `Użytkownik ${credentialRes.rows[0].holder_name} właśnie otworzył drzwi.`
                 );
               }
@@ -1362,18 +1366,18 @@ const server = http.createServer(async (req, res) => {
         let mac = body.mac;
         let uid = body.uid;
         let slot = body.slot || 0;
-
+        
         if (!mac) {
           const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
           mac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
         }
         const pendingLabel = learningQueues[mac] || 'Nowy Użytkownik';
-
+        
         await dbPool.query(
-          'INSERT INTO card_credentials (mac_address, card_uid, holder_name, is_active, hardware_slot_idx) VALUES ($1, $2, $3, true, $4) ON CONFLICT (mac_address, card_uid) DO UPDATE SET holder_name = $3, hardware_slot_idx = $4',
+          'INSERT INTO card_credentials (mac_address, card_uid, holder_name, is_active, hardware_slot_idx) VALUES ($1, $2, $3, true, $4) ON CONFLICT (mac_address, card_uid) DO UPDATE SET holder_name = $3, hardware_slot_idx = $4', 
           [mac, uid, pendingLabel, slot]
         );
-
+        
         await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Przypisano: ${pendingLabel} [${uid}]`]);
         writeToLocalLogFile('Hardware Registration', `[Node: ${mac}] Mapped card holder row to: ${pendingLabel} [${uid}] (EEPROM Slot: ${slot})`);
         delete learningQueues[mac];
@@ -1384,7 +1388,7 @@ const server = http.createServer(async (req, res) => {
         const accountId = requireAuth(req, res); if (!accountId) return;
         const { token } = body;
         if (!token) return sendJSON(res, 400, { error: "Missing push token" });
-
+        
         await dbPool.query('UPDATE accounts SET push_token = $1 WHERE id = $2', [token, accountId]);
         writeToLocalLogFile('Push System', `Zaktualizowano rejestr push_token dla konta ID: ${accountId}`);
         return sendJSON(res, 200, { success: true });
@@ -1395,7 +1399,7 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/settings/push_preferences' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
         const { pushEntries, pushAlarms } = body;
-
+              
         await dbPool.query('UPDATE accounts SET push_entries = $1, push_alarms = $2 WHERE id = $3', [pushEntries, pushAlarms, accountId]);
         writeToLocalLogFile('Push System', `Zaktualizowano preferencje push dla konta ID: ${accountId} (Entries: ${pushEntries}, Alarms: ${pushAlarms})`);
         return sendJSON(res, 200, { success: true });
@@ -1411,9 +1415,10 @@ const server = http.createServer(async (req, res) => {
       //   created_at TIMESTAMP DEFAULT NOW());
       // =========================================================================
       if (pathname === '/api/auth/keypad' && req.method === 'POST') {
+        
+        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
         const { pin } = body;
         const mac = String(body.mac || '').toUpperCase();
-        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
         const now = Date.now();
         if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
           keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
@@ -1490,7 +1495,7 @@ const server = http.createServer(async (req, res) => {
         if (!name || !name.trim()) return sendJSON(res, 400, { error: 'Podaj nazwę' });
         if (!pin || String(pin).length < 4 || String(pin).length > 8)
           return sendJSON(res, 400, { error: 'PIN musi mieć 4–8 cyfr' });
-        if (!/^\d+$/.test(String(pin)))
+        if (!/^\d$/.test(String(pin)))
           return sendJSON(res, 400, { error: 'PIN musi zawierać tylko cyfry' });
 
         const cnt = await dbPool.query(
@@ -1572,7 +1577,7 @@ function sendPushNotification(token, title, body) {
     const logFile = '/var/log/smartlock/smartlock_system.log';
     const timestamp = new Date().toISOString();
     const mockLine = `[${timestamp}] [PUSH SIMULATOR] 📱 WYSŁANO PUSH -> Tytuł: "${title}" | Treść: "${body}" (Token: ${token})\n`;
-
+    
     fs.appendFile(logFile, mockLine, (err) => {
       if (err) console.error(`[Push Mock Error] ${err.message}`);
     });
@@ -1613,11 +1618,11 @@ function sendPushNotification(token, title, body) {
       }
     });
   });
-
+  
   req.on('error', (e) => {
     writeToLocalLogFile('Push Notification Error', e.message);
   });
-
+  
   req.write(postData);
   req.end();
 }

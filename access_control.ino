@@ -134,8 +134,8 @@ char owner_email[64] = "";
                       // which is below ESP32's HIGH threshold → always reads LOW → constant beeping
                       // IO14 has no LED, internal pull-up works correctly
 #define KP_ROW2  15
-#define KP_ROW3  35   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
-#define KP_ROW4  34   // ZEWNĘTRZNY 10kΩ do 3.3V wymagany!
+#define KP_ROW3  34   // IO34 — external 10kΩ to 3.3V (or use INPUT_PULLUP)
+#define KP_ROW4  35   // IO35 — external 10kΩ to 3.3V (or use INPUT_PULLUP)
 
 const uint8_t KP_COLS[3] = { KP_COL1, KP_COL2, KP_COL3 };
 const uint8_t KP_ROWS[4] = { KP_ROW1, KP_ROW2, KP_ROW3, KP_ROW4 };
@@ -613,13 +613,14 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
+  // Float → module pulls IN to trigger → relay fires
+  pinMode(RELAY_PIN, INPUT);
 }
 
 void relayDeactivate() {
+  // OUTPUT HIGH keeps IN below trigger → relay releases
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
+  digitalWrite(RELAY_PIN, HIGH);
 }
 
 void openDoor(String source) { 
@@ -1402,6 +1403,7 @@ void setup() {
   Serial.begin(9600); 
   delay(1500);
   EEPROM.begin(512);
+  EEPROM.get(480, installedReleaseId);  // restore flashed release ID
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   // Anti-tamper pin (tylko gdy TAMPER_INSTALLED == true)
   if (TAMPER_INSTALLED) pinMode(TAMPER_PIN, INPUT_PULLUP);
@@ -1412,8 +1414,8 @@ void setup() {
     for (int c = 0; c < 3; c++) { pinMode(KP_COLS[c], OUTPUT); digitalWrite(KP_COLS[c], HIGH); }
     pinMode(KP_ROW1, INPUT_PULLUP);  // IO14 — wewnętrzny pull-up, brak diody LED
     pinMode(KP_ROW2, INPUT_PULLUP);  // IO15
-    pinMode(KP_ROW3, INPUT);         // IO34 - needs external 10k to 3.3V
-    pinMode(KP_ROW4, INPUT);         // IO35 - needs external 10k to 3.3V
+    pinMode(KP_ROW3, INPUT_PULLUP);  // IO34 — internal pull-up
+    pinMode(KP_ROW4, INPUT_PULLUP);  // IO35 — internal pull-up
     delay(50);
   }
   Wire.begin();
