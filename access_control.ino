@@ -100,7 +100,7 @@ char owner_email[64] = "";
 //   Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
 //   Bez przełącznika: IO14 = floating HIGH → fałszywy alarm przy każdym starcie!
 // When installing tamper switch on IO36: add external 10kΩ pull-up to 3.3V
-#define TAMPER_PIN       13
+#define TAMPER_PIN       36  // IO36 — input-only, no conflict with RELAY_PIN 13
 #define TAMPER_INSTALLED false   // ← zmień na true gdy przełącznik NC jest zainstalowany
 #define KEYPAD_INSTALLED true    // klawiatura podłączona
 //  Pin 1 → IO16 (kol: 1 4 7 *)
@@ -600,7 +600,6 @@ void relayActivate() {
 }
 
 void relayDeactivate() {
-  // Float → module's internal pull-down → LOW → relay releases → NC closed → LOCKED
   digitalWrite(RELAY_PIN, HIGH);
 }
 
@@ -1706,8 +1705,9 @@ void loop() {
       // Logowanie naciśnięcia przycisku do chmury jest "nice to have", nie
       // krytyczne - pomijamy je całkowicie offline, by nie czekać na nic.
       if (WiFi.status() == WL_CONNECTED) {
-        WiFiClient buttonLogClient; 
-        buttonLogClient.setTimeout(150); 
+        WiFiClient buttonLogClient;
+        buttonLogClient.setTimeout(150);
+        buttonLogClient.setConnectionTimeout(300);
         if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
           buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1");
           buttonLogClient.print("Host: "); buttonLogClient.println(PROXMOX_SERVER); 
@@ -1747,6 +1747,7 @@ void loop() {
 
 void sendRemoteLog(String message) {
   WiFiClient logClient;
+  logClient.setConnectionTimeout(400);
   if (logClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     // POPRAWKA: to było zahardkodowane na MAC jednego konkretnego zamka
     // testowego, więc logi WSZYSTKICH urządzeń trafiały pod ten sam adres.
@@ -1759,6 +1760,5 @@ void sendRemoteLog(String message) {
 }
 
 void logKeypadEvent(String message) {
-  addLog(message);
-  if (WiFi.status() == WL_CONNECTED) sendRemoteLog(message);
+  addLog(message);  // buffered — visible in app on next poll, no blocking
 }
