@@ -702,6 +702,7 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/settings/wifi' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
         const { wifiSSID, wifiPass } = body;
+        writeToLocalLogFile("Received new WiFi configuration");
         if (!wifiSSID) return sendJSON(res, 400, { error: "SSID cannot be blank" });
 
         // Pobieramy IP oraz adres MAC urządzenia

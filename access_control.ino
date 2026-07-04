@@ -785,7 +785,7 @@ void handleWebServer() {
             } 
         } 
     } 
-HEADER_COMPLETE: 
+    HEADER_COMPLETE: 
     int contentLength = 0;
     int clPos = fullHeader.indexOf("Content-Length:"); 
     if (clPos != -1) { 
@@ -1005,7 +1005,15 @@ HEADER_COMPLETE:
       String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&pass=")); 
       String decSSID = urlDecode(nSSID); 
       String decPass = urlDecode(nPass); 
-      saveConfiguration(decSSID, decPass, String(owner_email)); 
+      saveConfiguration(decSSID, decPass, String(owner_email));
+      client.println("HTTP/1.1 200 OK");
+      client.println("Content-Type: text/plain");
+      client.println("Connection: close");
+      client.println();
+      client.println("OK");
+      client.flush();
+      delay(500);
+      ESP.restart(); 
       addLog("Zapisano ustawienia Wi-Fi");
       client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
       delay(1); client.stop(); blockTelemetry = false; return; 
