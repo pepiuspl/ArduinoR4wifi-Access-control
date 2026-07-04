@@ -88,8 +88,7 @@ char ssid[32] = "";
 char pass[32] = "";
 char owner_email[64] = "";
 
-#define RELAY_PIN   32
-#define RELAY_ACTIVE_LOW true   
+#define RELAY_PIN   13  
 #define BUTTON_PIN  33   
 #define LED_GREEN   25   
 #define LED_RED     26   
@@ -101,7 +100,7 @@ char owner_email[64] = "";
 //   Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
 //   Bez przełącznika: IO14 = floating HIGH → fałszywy alarm przy każdym starcie!
 // When installing tamper switch on IO36: add external 10kΩ pull-up to 3.3V
-#define TAMPER_PIN       36
+#define TAMPER_PIN       13
 #define TAMPER_INSTALLED false   // ← zmień na true gdy przełącznik NC jest zainstalowany
 #define KEYPAD_INSTALLED true    // klawiatura podłączona
 //  Pin 1 → IO16 (kol: 1 4 7 *)
@@ -1382,7 +1381,6 @@ void checkKeypad() {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
-digitalWrite(RELAY_PIN, HIGH);   // stan spoczynku
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
