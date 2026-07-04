@@ -305,9 +305,8 @@ const server = http.createServer(async (req, res) => {
   const pathname = parsedUrl.pathname;
   const query = parsedUrl.query;
 
-  let rawIp = req.socket.remoteAddress || '';
+  let rawIp = req.headers['x-real-ip'] || req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || '';
   let cleanIp = rawIp.includes('::ffff:') ? rawIp.split('::ffff:')[1] : rawIp;
-  if (cleanIp === '127.0.0.1' || cleanIp === '::1') cleanIp = '192.168.0.46';
 
   let bodyStr = '';
   req.on('data', chunk => { bodyStr = chunk; });
@@ -1203,12 +1202,21 @@ const server = http.createServer(async (req, res) => {
     }
   } else {
     // Zapisujemy i aktualizujemy tętno (heartbeat) urządzenia oraz jego wersję
-    let queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version';
+    // Only update last_known_ip if it looks like a valid device IP (not router/gateway)
+    const isValidDeviceIp = /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(cleanIp) && !['192.168.0.1','10.0.0.1','172.16.0.1'].includes(cleanIp);
+    let queryText = isValidDeviceIp
+      ? 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version'
+      : 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP WHERE mac_address = $2 RETURNING firmware_version';
     let queryParams = [cleanIp, mac];
 
     if (clientReportedVersion) {
-      queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
-      queryParams = [cleanIp, mac, clientReportedVersion];
+      if (isValidDeviceIp) {
+        queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
+        queryParams = [cleanIp, mac, clientReportedVersion];
+      } else {
+        queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, firmware_version = $2 WHERE mac_address = $1 RETURNING firmware_version';
+        queryParams = [mac, clientReportedVersion];
+      }
     }
 
     const devLookup = await dbPool.query(queryText, queryParams);

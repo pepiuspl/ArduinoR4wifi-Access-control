@@ -666,25 +666,6 @@ export default function App() {
         // W razie błędu wracamy do opcji ponownego kliknięcia
         setOtaState('available');
         Alert.alert('Błąd aktualizacji', 'Serwer nie mógł pobrać stabilnego pliku z serwera.');
-      });
-  };
-
-  // Scala nową odpowiedź z poprzednim stanem, chroniąc optymistyczny stan
-  // 'pending' przed nadpisaniem przez chwilowo nieaktualne 'false' - serwer
-  // / centralka mogły jeszcze nie zdążyć przetworzyć komendy odblokowania.
-  // Bez tego UI potrafiło pokazać "zamknięty" na chwilę i nigdy nie złapać
-  // momentu, w którym zamek faktycznie się otwiera.
-  const mergeLockState = (prevState, data) => {
-    let nextLock = data.lock;
-    if (
-      prevState.lock === 'pending' &&
-      data.lock === false &&
-      Date.now() - pendingUnlockSinceRef.current < 4000
-    ) {
-      nextLock = 'pending';
-    }
-
-    // Derive tamper state from the last 5 log lines so we don't need a separate
     // API endpoint — the firmware already writes TAMPER events to system_events.
     let nextTamper = prevState.tamper;
     if (data.logs && data.logs.length > 0) {
