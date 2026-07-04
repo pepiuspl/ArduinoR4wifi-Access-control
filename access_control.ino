@@ -12,7 +12,7 @@
 #include <time.h> 
 
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
-#define PROXMOX_SERVER "192.168.0.199"
+#define PROXMOX_SERVER "node.ctrlable.pl"
 #define PROXMOX_PORT   3000
 
 unsigned long lastOtaCheck = 0;
@@ -191,7 +191,6 @@ const int           KP_MAX_LEN     = 8;
 
 String urlDecode(String str) { 
   String decoded = ""; 
-  char ch; 
   int i = 0;
   while (i < str.length()) { 
     if (str[i] == '+') { 
@@ -619,7 +618,7 @@ void openDoor(String source) {
 } 
 
 void handleProvisioningServer() { 
-  WiFiClient client = server.available(); 
+  WiFiClient client = server.accept(); 
   if (!client) return; 
   String reqHeader = "";
   unsigned long webTimeout = millis() + 2000;  
@@ -717,7 +716,7 @@ void handleProvisioningServer() {
 } 
 
 void handleWebServer() { 
-  WiFiClient client = server.available(); 
+  WiFiClient client = server.accept(); 
   if (!client) return; 
   
   blockTelemetry = true; 
@@ -1003,7 +1002,6 @@ HEADER_COMPLETE:
     else if (reqHeader.indexOf("/api/save_settings") != -1) { 
       int sIdx = reqHeader.indexOf("s=") + 2;
       int pIdx = reqHeader.indexOf("&p=") + 3; 
-      int spaceIdx = reqHeader.indexOf(" ", pIdx);
       String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
       String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&pass=")); 
       String decSSID = urlDecode(nSSID); 
@@ -1018,7 +1016,7 @@ HEADER_COMPLETE:
 } 
 
 void handleOnlineInstallerServer() { 
-  WiFiClient client = server.available(); 
+  WiFiClient client = server.accept(); 
   if (!client) return; 
   String reqHeader = "";
   unsigned long webTimeout = millis() + 250; 
@@ -1341,11 +1339,9 @@ void verifyKeypadPIN(const String& pin) {
 }
 
 void handleKeypress(char key) {
-  logKeypadEvent("DBG key=[" + String(key) + "] buf=[" + kpBuffer + "]");
   kpLastKey = millis();
   if (key == '#') {
     playSound(SND_KEY_SUBMIT);
-    logKeypadEvent("Keypad: # zatwierdzono, len=" + String(kpBuffer.length()));
     if (kpBuffer.length() == 0) return;
     if ((int)kpBuffer.length() < 4) {
       logKeypadEvent("Keypad: PIN za krotki (min 4 cyfry)"); playSound(SND_ACCESS_DENIED);
@@ -1360,7 +1356,6 @@ void handleKeypress(char key) {
     playSound(SND_KEY_DIGIT);
     if ((int)kpBuffer.length() < KP_MAX_LEN) {
       kpBuffer += key;
-      logKeypadEvent("Keypad: cyfra, len=" + String(kpBuffer.length()));
       renderSystemUI();
     }
   }

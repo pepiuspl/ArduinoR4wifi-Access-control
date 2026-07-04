@@ -30,6 +30,17 @@ try {
   };
 }
 
+// SecureStore — sensitive keys stored in iOS Keychain / Android Keystore
+// Falls back silently to AsyncStorage when SecureStore unavailable
+let SecureStore;
+try { SecureStore = require('expo-secure-store'); } catch { SecureStore = null; }
+const SECURE_KEYS = new Set(['@lock_auth_token', '@lock_local_admin_pass']);
+const Storage = {
+  getItem:    (k) => SecureStore && SECURE_KEYS.has(k) ? SecureStore.getItemAsync(k)        : AsyncStorage.getItem(k),
+  setItem:    (k, v) => SecureStore && SECURE_KEYS.has(k) ? SecureStore.setItemAsync(k, String(v)) : AsyncStorage.setItem(k, String(v)),
+  removeItem: (k) => SecureStore && SECURE_KEYS.has(k) ? SecureStore.deleteItemAsync(k)    : AsyncStorage.removeItem(k),
+};
+
 // 🌟 TRYB LOKALNY: gdy centralka jest skonfigurowana jako w pełni offline,
 // ZAWSZE nadaje swój własny punkt dostępu pod tym stałym adresem - więc nie
 // trzeba żadnego wykrywania urządzenia w sieci domowej.
@@ -65,7 +76,7 @@ function buildLocalRequestUrl(endpoint, payload, adminPass) {
 }
 
 export default function App() {
-  let [backendUrl, setBackendUrl] = useState('http://192.168.0.199:3000'); 
+  let [backendUrl, setBackendUrl] = useState('https://node.ctrlable.pl'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [accountId, setAccountId] = useState(null);    // kept for local-mode compat
@@ -310,7 +321,7 @@ export default function App() {
         if (!data || !data.admin_pass) throw new Error('missing admin_pass');
 
         await AsyncStorage.setItem('@lock_local_mode', '1');
-        await AsyncStorage.setItem('@lock_local_admin_pass', data.admin_pass);
+        await Storage.setItem('@lock_local_admin_pass', data.admin_pass);
         setLocalAdminPass(data.admin_pass);
         setIsLocalMode(true);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -394,7 +405,7 @@ export default function App() {
           const tok = data.token || null;
           const aid = data.accountId || null;
           if (tok) {
-            await AsyncStorage.setItem('@lock_auth_token', tok);
+            await Storage.setItem('@lock_auth_token', tok);
             setAuthToken(tok);
           }
           if (aid) {
@@ -430,10 +441,10 @@ export default function App() {
       }
 
       // 2. Czyścimy pamięć lokalną sesji w telefonie (konto w chmurze i/lub Tryb Lokalny)
-      await AsyncStorage.removeItem('@lock_account_id');
-      await AsyncStorage.removeItem('@lock_auth_token');
-      await AsyncStorage.removeItem('@lock_local_mode');
-      await AsyncStorage.removeItem('@lock_local_admin_pass');
+      await Storage.removeItem('@lock_account_id');
+      await Storage.removeItem('@lock_auth_token');
+      await Storage.removeItem('@lock_local_mode');
+      await Storage.removeItem('@lock_local_admin_pass');
       
       // 3. 🛠️ TWOJE RESETOWANIE INTERFEJSU (UI):
       menuAnimation.setValue(-width * 0.75); 
@@ -938,7 +949,7 @@ export default function App() {
 
         // KROK A.2: Czy urządzenie zostało skonfigurowane w Trybie Lokalnym (Offline)?
         const storedLocalMode = await AsyncStorage.getItem('@lock_local_mode');
-        const storedLocalPass = await AsyncStorage.getItem('@lock_local_admin_pass');
+        const storedLocalPass = await Storage.getItem('@lock_local_admin_pass');
 
         if (storedLocalMode === '1' && storedLocalPass) {
           setIsLocalMode(true);
@@ -948,7 +959,7 @@ export default function App() {
         } else {
           // KROK B: Pobieramy ID konta (czy jest zalogowany) - tylko w trybie chmury
           const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
-          const storedToken     = await AsyncStorage.getItem('@lock_auth_token');
+          const storedToken     = await Storage.getItem('@lock_auth_token');
 
           if (storedToken || storedAccountId) {
             if (storedToken)     setAuthToken(storedToken);

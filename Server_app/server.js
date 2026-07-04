@@ -104,11 +104,11 @@ const updatesDir = '/opt/smartlock-server/updates';
 
 // CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
 const dbPool = new Pool({
-  user: 'admin',
-  host: 'localhost',
-  database: 'smartlock_db',
-  password: 'Groszowice1!',
-  port: 5432,
+  user:     process.env.DB_USER     || 'admin',
+  host:     process.env.DB_HOST     || 'localhost',
+  database: process.env.DB_NAME     || 'smartlock_db',
+  password: process.env.DB_PASSWORD || 'Groszowice1!',
+  port:     parseInt(process.env.DB_PORT || '5432'),
 });
 
 // Local Postfix delivery service
@@ -1427,7 +1427,7 @@ const server = http.createServer(async (req, res) => {
         const now = Date.now();
         if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
           keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
-        keypadAttempts[mac].count;
+        keypadAttempts[mac].count++;
         if (keypadAttempts[mac].count > 5) {
           const wait = Math.ceil((keypadAttempts[mac].resetAt - now) / 1000);
           writeToLocalLogFile('Keypad RateLimit', `Too many attempts from ${mac}`);
