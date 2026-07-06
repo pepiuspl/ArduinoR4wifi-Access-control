@@ -1717,7 +1717,7 @@ void loop() {
         buttonLogClient.setTimeout(150);
         buttonLogClient.setConnectionTimeout(300);
         if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
-          buttonLogClient.println("GET /api/hardware/log_button HTTP/1.1");
+          uttonLogClient.println("GET /api/hardware/log_button?mac=" + urlEncode(getMacAddressString()) + " HTTP/1.1");
           buttonLogClient.print("Host: "); buttonLogClient.println(PROXMOX_SERVER); 
           buttonLogClient.println("Connection: close\r\n"); 
           buttonLogClient.stop(); 
