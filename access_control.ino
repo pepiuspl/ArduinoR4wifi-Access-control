@@ -100,8 +100,8 @@ char owner_email[64] = "";
 //   Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
 //   Bez przełącznika: IO14 = floating HIGH → fałszywy alarm przy każdym starcie!
 // When installing tamper switch on IO36: add external 10kΩ pull-up to 3.3V
-#define TAMPER_PIN       36  // IO36 — input-only, no conflict with RELAY_PIN 13
-#define TAMPER_INSTALLED false   // ← zmień na true gdy przełącznik NC jest zainstalowany
+#define TAMPER_PIN       32  // IO36 — input-only, no conflict with RELAY_PIN 13
+#define TAMPER_INSTALLED true   // ← zmień na true gdy przełącznik NC jest zainstalowany
 #define KEYPAD_INSTALLED true    // klawiatura podłączona
 //  Pin 1 → IO16 (kol: 1 4 7 *)
 //  Pin 2 → IO17 (kol: 2 5 8 0)
