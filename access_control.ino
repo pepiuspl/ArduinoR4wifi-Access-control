@@ -1547,6 +1547,7 @@ void setup() {
 
 void loop() {
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
+  handleProvisioningServer();  // process local web requests (WiFi change, settings) even when online
   checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
   checkKeypad();  // obsługa matrycy klawiatury PIN
 
