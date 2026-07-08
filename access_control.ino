@@ -391,7 +391,7 @@ void renderSystemUI() {
     display.setCursor(4, 16);  display.print("!! ALARM SABOTAZU !!");
     display.setCursor(4, 28);  display.print("Obudowa panelu RFID");
     display.setCursor(4, 38);  display.print("jest OTWARTA!");
-    display.setCursor(0, 48);  display.print("Zdalne odblokowanie");
+    display.setCursor(0, 48);  display.print("Otwarto");
     display.setCursor(12, 56); display.print("ZABLOKOWANE");
    } else if (kpBuffer.length() > 0 || kpChecking) {
     display.setCursor(28, 14); display.print("Wpisz PIN:");

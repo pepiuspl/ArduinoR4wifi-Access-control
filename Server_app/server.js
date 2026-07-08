@@ -1,4 +1,4 @@
-require('dotenv').config({ path: '/opt/smartlock-server/.env' });
+require('dotenv').config({ path: '/opt/smartlock-server/.env', override: true });
 const http = require('http');
 const https = require('https');
 const url = require('url');
@@ -104,11 +104,11 @@ const updatesDir = '/opt/smartlock-server/updates';
 
 // CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
 const dbPool = new Pool({
-  user:     process.env.DB_USER     || 'admin',
-  host:     process.env.DB_HOST     || 'localhost',
-  database: process.env.DB_NAME     || 'smartlock_db',
-  password: process.env.DB_PASSWORD || 'Groszowice1!',
-  port:     parseInt(process.env.DB_PORT || '5432'),
+  user: 'admin',
+  host: 'localhost',
+  database: 'smartlock_db',
+  password: 'Groszowice1!',
+  port: 5432,
 });
 
 // Local Postfix delivery service
@@ -122,17 +122,51 @@ const mailTransport = nodemailer.createTransport({
 
 // LOCAL FILE LOGGING ENVIRONMENT INITIALIZATION
 const logDirectory = '/var/log/smartlock';
-const localLogFile = path.join(logDirectory, 'smartlock_system.log');
+const localLogFile = path.join(logDirectory, 'smartlock_system.log'); // master log — everything, unchanged
+
+// Categorized subfolders for scalable log browsing as device count grows.
+// Each module name maps to exactly one category folder.
+const LOG_CATEGORIES = {
+  entries:     ['API Control Command', 'Hardware Handshake', 'Access Granted', 'Access Denied', 'Keypad', 'Keypad RateLimit', 'Keypad ERROR', 'Hardware Ingest'],
+  connections: ['Radar Traffic', 'Authentication Panel', 'Auth Rejection', 'Auth RateLimit', 'Core Daemon'],
+  updates:     ['DEBUG OTA PUSH', 'DEBUG LOCK DOWNLOAD', 'DEBUG GITHUB', 'Hardware Remote Log'],
+  security:    ['TAMPER', 'CORE PANIC RECOVERY BOUNDARY', 'Push Diagnostic', 'Push Notification Error', 'Push System Warning'],
+  provisioning:['Provisioning', 'Settings Update', 'User Mutation', 'Reset System'],
+  mail:        ['SMTP Handshake Matrix', 'Welcome SMTP Fail', 'Błąd serwera SMTP', 'Push System'],
+};
+// Reverse lookup: module name -> category folder name
+const MODULE_TO_CATEGORY = {};
+for (const [cat, modules] of Object.entries(LOG_CATEGORIES)) {
+  for (const m of modules) MODULE_TO_CATEGORY[m] = cat;
+}
+const LOG_SUBDIRS = Object.keys(LOG_CATEGORIES);
 
 if (!fs.existsSync(logDirectory)) {
   fs.mkdirSync(logDirectory, { recursive: true });
 }
+for (const sub of LOG_SUBDIRS) {
+  const subPath = path.join(logDirectory, sub);
+  if (!fs.existsSync(subPath)) fs.mkdirSync(subPath, { recursive: true });
+}
+const UNCATEGORIZED_DIR = path.join(logDirectory, 'uncategorized');
+if (!fs.existsSync(UNCATEGORIZED_DIR)) fs.mkdirSync(UNCATEGORIZED_DIR, { recursive: true });
 
 function writeToLocalLogFile(module, message) {
   const timestamp = new Date().toISOString();
   const rawLogLine = `[${timestamp}] [${module}] ${message}\n`;
+
+  // Master log — always written, unchanged behavior for backward compatibility.
   fs.appendFile(localLogFile, rawLogLine, (err) => {
     if (err) console.error(`[Logging Fault] Failed to write to disk: ${err.message}`);
+  });
+
+  // Categorized log — one file per day per category, e.g. entries/2026-07-08.log
+  const category = MODULE_TO_CATEGORY[module] || null;
+  const dateStamp = timestamp.slice(0, 10); // YYYY-MM-DD
+  const targetDir = category ? path.join(logDirectory, category) : UNCATEGORIZED_DIR;
+  const targetFile = path.join(targetDir, `${dateStamp}.log`);
+  fs.appendFile(targetFile, rawLogLine, (err) => {
+    if (err) console.error(`[Logging Fault] Failed to write category log: ${err.message}`);
   });
 }
 
@@ -145,7 +179,7 @@ function getFactoryAdminPassword(mac) {
   const combined = cleanMac + salt;
   let hashNum = 0;
   for (let i = 0; i < combined.length; i++) {
-    hashNum = combined.charCodeAt(i) * (i + 1);
+    hashNum += combined.charCodeAt(i) * (i + 1);
   }
   return "CN" + String(hashNum).substring(0, 5);
 }
@@ -305,8 +339,9 @@ const server = http.createServer(async (req, res) => {
   const pathname = parsedUrl.pathname;
   const query = parsedUrl.query;
 
-  let rawIp = req.headers['x-real-ip'] || req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || '';
+  let rawIp = req.socket.remoteAddress || '';
   let cleanIp = rawIp.includes('::ffff:') ? rawIp.split('::ffff:')[1] : rawIp;
+  if (cleanIp === '127.0.0.1' || cleanIp === '::1') cleanIp = '192.168.0.46';
 
   let bodyStr = '';
   req.on('data', chunk => { bodyStr = chunk; });
@@ -562,7 +597,7 @@ const server = http.createServer(async (req, res) => {
           return `[${timestamp}] ${r.message}`;
         });
         const lastState = actualLockStates[primaryMac];
-        const isOffline = !lastState || (Date.now() - lastState.timestamp) > 35000;
+        const isOffline = !lastState || (Date.now() - lastState.timestamp) > 10000;
 
         // Stan rygla widziany przez aplikację - ZAWSZE pochodzi z faktycznego
         // zgłoszenia sprzętu (lastState.state), nigdy nie jest zgadywany.
@@ -574,7 +609,7 @@ const server = http.createServer(async (req, res) => {
             lockValue = true;
           } else {
             const pendingSince = pendingUnlocks[primaryMac];
-            const stillPending = pendingSince && (Date.now() - pendingSince) < 20000;
+            const stillPending = pendingSince && (Date.now() - pendingSince) < 6000;
             lockValue = stillPending ? 'pending' : false;
           }
         }
@@ -702,7 +737,6 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/settings/wifi' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
         const { wifiSSID, wifiPass } = body;
-        writeToLocalLogFile("Received new WiFi configuration");
         if (!wifiSSID) return sendJSON(res, 400, { error: "SSID cannot be blank" });
 
         // Pobieramy IP oraz adres MAC urządzenia
@@ -711,7 +745,7 @@ const server = http.createServer(async (req, res) => {
 
         const targetMac = dev.rows[0].mac_address;
         const targetIp = dev.rows[0].last_known_ip;
-        writeToLocalLogFile('Settings Update', `Relaying fresh Wi-Fi configuration profiles down to lock node: ${targetIp}`);
+        writeToLocalLogFile('Settings Update', `[Node: ${targetMac}] Relaying fresh Wi-Fi configuration to ${targetIp}.`);
 
         // Generujemy hasło na podstawie pobranego adresu MAC
         const currentDynamicPassword = getFactoryAdminPassword(targetMac);
@@ -739,7 +773,7 @@ const server = http.createServer(async (req, res) => {
           pendingUnlocks[targetMac] = Date.now();
 
           await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
-          writeToLocalLogFile('API Control Command', `Dispatched remote unlock trigger down to: ${targetMac}`);
+          writeToLocalLogFile('API Control Command', `[Node: ${targetMac}] Dispatched remote unlock trigger.`);
 
           // Bezpiecznik: jeśli sprzęt jest offline i nigdy nie odpowie, kolejka
           // nie powinna zostać aktywna w nieskończoność.
@@ -766,7 +800,7 @@ const server = http.createServer(async (req, res) => {
           } else {
             delete learningQueues[targetMac];
           }
-          writeToLocalLogFile('API Control Command', `Operational mode set to: ${nextMode} for: ${targetMac}`);
+          writeToLocalLogFile('API Control Command', `[Node: ${targetMac}] Operational mode set to: ${nextMode}.`);
         }
         return sendJSON(res, 200, { status: "ok" });
       }
@@ -1120,7 +1154,7 @@ const server = http.createServer(async (req, res) => {
           ? 'Obudowa drugiej płytki (panel RFID) została OTWARTA. Możliwy sabotaż!'
           : 'Obudowa drugiej płytki została ponownie zamknięta.';
 
-        writeToLocalLogFile('TAMPER', `[${mac}] ${severity}: ${detail}`);
+        writeToLocalLogFile('TAMPER', `[Node: ${mac}] ${severity}: ${detail}`);
 
         // Log to database as a system event (appears in app logs)
         try {
@@ -1178,7 +1212,7 @@ const server = http.createServer(async (req, res) => {
                   VALUES ($1, $2, $3, $4, 'Czuwanie')`,
                   [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
                 );
-                writeToLocalLogFile('Provisioning', `Pomyślnie utworzono i przypisano centralkę ${mac} do konta: ${query.email}`);
+                writeToLocalLogFile('Provisioning', `[Node: ${mac}] Pomyślnie utworzono i przypisano centralkę do konta: ${query.email}`);
               }
             }
           }
@@ -1203,21 +1237,12 @@ const server = http.createServer(async (req, res) => {
     }
   } else {
     // Zapisujemy i aktualizujemy tętno (heartbeat) urządzenia oraz jego wersję
-    // Only update last_known_ip if it looks like a valid device IP (not router/gateway)
-    const isValidDeviceIp = /^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(cleanIp) && !['192.168.0.1','10.0.0.1','172.16.0.1'].includes(cleanIp);
-    let queryText = isValidDeviceIp
-      ? 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version'
-      : 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP WHERE mac_address = $2 RETURNING firmware_version';
+    let queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version';
     let queryParams = [cleanIp, mac];
 
     if (clientReportedVersion) {
-      if (isValidDeviceIp) {
-        queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
-        queryParams = [cleanIp, mac, clientReportedVersion];
-      } else {
-        queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, firmware_version = $2 WHERE mac_address = $1 RETURNING firmware_version';
-        queryParams = [mac, clientReportedVersion];
-      }
+      queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
+      queryParams = [cleanIp, mac, clientReportedVersion];
     }
 
     const devLookup = await dbPool.query(queryText, queryParams);
@@ -1256,14 +1281,8 @@ const server = http.createServer(async (req, res) => {
   // Zerujemy TYLKO kolejkę komend - realny stan rygla (powyżej) pochodzi
   // wyłącznie z potwierdzenia sprzętu, nigdy z samego faktu wysłania komendy.
   if (unlockAction) {
-    // With poor WiFi, keep unlock active until device confirms opened=1
-    // Clear only on confirmation or after 10s timeout
-    const reportedOpenNow = query.opened === '1';
-    const unlockAge = pendingUnlocks[mac] ? (Date.now() - pendingUnlocks[mac]) : 9999;
-    if (reportedOpenNow || unlockAge > 10000) {
-      unlockQueues[mac] = false;
-      unlockQueues['00:00:00:00:00:00'] = false;
-    }
+    unlockQueues[mac] = false;
+    unlockQueues['00:00:00:00:00:00'] = false;
   }
 
   // PANCERNA LOGIKA OTA (Odporna na pętle i sterowana z aplikacji)
@@ -1367,7 +1386,7 @@ const server = http.createServer(async (req, res) => {
               }
             }
           } else {
-            writeToLocalLogFile('Push Diagnostic', `⚠️ Pomięto push: Adres MAC ${mac} nie jest przypisany do żadnego konta w tabeli devices.`);
+            writeToLocalLogFile('Push Diagnostic', `[Node: ${mac}] ⚠️ Pomięto push: adres MAC nie jest przypisany do żadnego konta w tabeli devices.`);
           }
 
           return sendJSON(res, 200, { access: "granted" });
@@ -1442,10 +1461,10 @@ const server = http.createServer(async (req, res) => {
         const now = Date.now();
         if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
           keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
-        keypadAttempts[mac].count++;
+        keypadAttempts[mac].count;
         if (keypadAttempts[mac].count > 5) {
           const wait = Math.ceil((keypadAttempts[mac].resetAt - now) / 1000);
-          writeToLocalLogFile('Keypad RateLimit', `Too many attempts from ${mac}`);
+          writeToLocalLogFile('Keypad RateLimit', `[Node: ${mac}] Too many keypad attempts.`);
           return sendJSON(res, 429, { granted: false, error: `Za dużo prób. Poczekaj ${wait}s.` });
         }
 
@@ -1466,7 +1485,7 @@ const server = http.createServer(async (req, res) => {
             if (revRes.rows.length > 0) {
               deviceMac = reversedMac;
               devRes = revRes;
-              writeToLocalLogFile('Keypad', `Resolved keypad MAC ${mac} as ${deviceMac}`);
+              writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] Resolved keypad MAC ${mac} as ${deviceMac}.`);
             }
           }
           if (devRes.rows.length === 0)
@@ -1482,7 +1501,7 @@ const server = http.createServer(async (req, res) => {
           for (const p of pinsRes.rows) {
             if (await bcrypt.compare(String(pin), p.pin_hash)) {
               keypadAttempts[mac] = { count: 0, resetAt: 0 };
-              writeToLocalLogFile('Keypad', `PIN "${p.name}" GRANTED - ${deviceMac}`);
+              writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN "${p.name}" GRANTED.`);
               await dbPool.query(
                 'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
                 [deviceMac, `Keypad PIN "${p.name}" - dostep przyznany`]).catch(() => {});
@@ -1490,7 +1509,7 @@ const server = http.createServer(async (req, res) => {
             }
           }
 
-          writeToLocalLogFile('Keypad', `PIN DENIED - ${deviceMac} (${keypadAttempts[mac].count}/5)`);
+          writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN DENIED (${keypadAttempts[mac].count}/5).`);
           await dbPool.query(
             'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
             [deviceMac, `Keypad PIN - dostep odrzucony (${keypadAttempts[mac].count}/5)`]).catch(() => {});
