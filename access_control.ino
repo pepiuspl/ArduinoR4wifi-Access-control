@@ -393,9 +393,9 @@ void renderSystemUI() {
     display.setCursor(4, 38);  display.print("jest OTWARTA!");
     display.setCursor(0, 48);  display.print("Zdalne odblokowanie");
     display.setCursor(12, 56); display.print("ZABLOKOWANE");
-  } else if (kpBuffer.length() > 0 || kpChecking) {
-    display.setCursor(28, 16); display.print("Wpisz PIN:");
-    display.setTextSize(2);    display.setCursor(10, 30);
+   } else if (kpBuffer.length() > 0 || kpChecking) {
+    display.setCursor(28, 14); display.print("Wpisz PIN:");
+    display.setTextSize(2);    display.setCursor(10, 26);
     if (kpChecking) {
       display.print("...");
     } else {
@@ -403,7 +403,7 @@ void renderSystemUI() {
       display.print("_");
     }
     display.setTextSize(1);
-    display.setCursor(4, 52);  display.print("# = OK      * = Czyszcz");
+    display.setCursor(4, 44);  display.print("# = OK    * = Czyszcz");
   } else { 
     display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
     display.fillCircle(25, 39, 2, SH110X_BLACK); 
