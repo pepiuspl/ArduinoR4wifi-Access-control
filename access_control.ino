@@ -403,7 +403,7 @@ void renderSystemUI() {
       display.print("_");
     }
     display.setTextSize(1);
-    display.setCursor(4, 44);  display.print("# = OK * = Czyszcz");
+    display.setCursor(4, 44);  display.print("# = OK * = Czyszczenie");
   } else { 
     display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
     display.fillCircle(25, 39, 2, SH110X_BLACK); 
@@ -1096,7 +1096,7 @@ void executeCloudSynchronization() {
       addLog("!! BLOKADA: zdalne otwarcie zablokowane (alarm sabotazu)!");
       sendTamperAlert(true);
     } else if (!doorOpen) {
-      openDoor("Otwarto zdalnie");
+      openDoor("Otwarte");
     }
   }  
   
