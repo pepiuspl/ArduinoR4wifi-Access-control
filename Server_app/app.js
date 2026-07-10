@@ -473,11 +473,17 @@ export default function App() {
         }
       })
       .catch(() => {
-  const dynamicIntervalTime = (lockState.lock === true || lockState.lock === 'pending') ? 500 : 3000;
+        setIsAuthenticating(false);
+        alert('Błąd sieci. Spróbuj ponownie.');
+      });
+  };
 
-  const interval = setInterval(fetchStatus, dynamicIntervalTime);
-  return () => clearInterval(interval);
-}, [isConfigured, accountId, isLocalMode, fetchStatus, lockState.lock]);
+  useEffect(() => {
+    const dynamicIntervalTime = (lockState.lock === true || lockState.lock === 'pending') ? 500 : 3000;
+
+    const interval = setInterval(fetchStatus, dynamicIntervalTime);
+    return () => clearInterval(interval);
+  }, [isConfigured, accountId, isLocalMode, fetchStatus, lockState.lock]);
 
   // 🌟 EKRAN POWITALNY: pokazujemy go zawsze przy starcie aplikacji, dopóki
   // (a) AsyncStorage nie skończy odczytu sesji ORAZ (b) animacja logo nie
@@ -1052,13 +1058,13 @@ export default function App() {
 
               {otaState === 'up-to-date' && (
                 <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#10b981' }]} onPress={handleCheckUpdate}>
-                  <Text style={styles.btnText}>✅ Jesteś na najnowszej wersji ({lockState.version})</Text>
+                  <Text style={styles.btnText}>✅ Jesteś na najnowszej wersji</Text>
                 </TouchableOpacity>
               )}
 
               {otaState === 'available' && (
                 <View style={{ marginTop: 8 }}>
-                  <Text style={[styles.learningAlertText, { marginBottom: 16 }]}>🚀 Wykryto nowszą wersję oprogramowania {latestVersion || 'v2.9.5'}</Text>
+                  <Text style={[styles.learningAlertText, { marginBottom: 16 }]}>🚀 Dostępna jest nowsza wersja oprogramowania</Text>
                   <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#e11d48', marginTop: 0 }]} onPress={handleExecuteUpdate}>
                     <Text style={styles.btnText}>Zaktualizuj oprogramowanie</Text>
                   </TouchableOpacity>
@@ -1067,7 +1073,7 @@ export default function App() {
 
               {otaState === 'downloading_server' && (
                 <TouchableOpacity style={[styles.actionTriggerBtn, { backgroundColor: '#f59e0b' }]} disabled>
-                  <Text style={styles.btnText}>📥 Pobieranie paczki {latestVersion || 'v2.9.5'} na serwer...</Text>
+                  <Text style={styles.btnText}>📥 Pobieranie aktualizacji na serwer...</Text>
                 </TouchableOpacity>
               )}
 

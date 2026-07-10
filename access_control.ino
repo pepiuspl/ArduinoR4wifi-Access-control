@@ -596,11 +596,11 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(RELAY_PIN, HIGH);  // new module: HIGH energizes -> unlocks
 }
 
 void relayDeactivate() {
-  digitalWrite(RELAY_PIN, HIGH);
+  digitalWrite(RELAY_PIN, LOW);   // new module: LOW deenergizes -> locks
 }
 
 void openDoor(String source) { 
@@ -706,7 +706,7 @@ void handleProvisioningServer() {
   client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>"); 
   client.println("<h2 style='text-align:center;'>⚙ CTRLABLE Node Setup</h2><div class='box'><form method='GET' action='/save_setup'>");
   client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
-  client.println("<input type='password' id='wifi_pass' name='p' value='" + String(pass) + "' placeholder='Password' required>");
+  client.println("<input type='password' id='wifi_pass' name='p' placeholder='Password' required>");  // never pre-fill saved password
   client.println("<label style='color:#aaa; font-size:14px; display:block; margin:-5px 0 15px 5px; cursor:pointer;'><input type='checkbox' onclick='togglePass()'> Pokaż hasło</label>");
   client.println("<script>function togglePass() { var x = document.getElementById('wifi_pass'); x.type = (x.type === 'password') ? 'text' : 'password'; }</script>");
   client.println("<input type='email' name='m' value='" + String(owner_email) + "' placeholder='Twój adres e-mail w aplikacji' required>");
@@ -1346,6 +1346,7 @@ void verifyKeypadPIN(const String& pin) {
 }
 
 void handleKeypress(char key) {
+  logKeypadEvent("DBG key=[" + String(key) + "]");  // TEMP: identify scratching source
   kpLastKey = millis();
   if (key == '#') {
     playSound(SND_KEY_SUBMIT);
@@ -1383,6 +1384,7 @@ void checkKeypad() {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);  // deenergize immediately -- locked at boot
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
