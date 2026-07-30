@@ -172,6 +172,22 @@ function writeToLocalLogFile(module, message) {
 
 // Generowanie unikalnego admin pass
 
+// Wybiera urządzenie docelowe dla danego konta: jeśli klient poda ?mac=
+// (lub w body dla POST), i to urządzenie należy do tego konta - używamy go.
+// W przeciwnym razie (stare wywołania z aplikacji bez wsparcia multi-device)
+// zachowujemy pełną wsteczną kompatybilność, wracając do pierwszego
+// urządzenia na koncie - dokładnie tak jak działało to wcześniej.
+async function resolveTargetDevice(accountId, requestedMac, columns = 'mac_address, last_known_ip') {
+  if (requestedMac) {
+    const exact = await dbPool.query(
+      `SELECT ${columns} FROM devices WHERE account_id = $1 AND mac_address = $2 LIMIT 1`,
+      [accountId, requestedMac.toUpperCase()]
+    );
+    if (exact.rows.length > 0) return exact;
+  }
+  return dbPool.query(`SELECT ${columns} FROM devices WHERE account_id = $1 ORDER BY id ASC LIMIT 1`, [accountId]);
+}
+
 function getFactoryAdminPassword(mac) {
   if (!mac) return 'admin';
   const cleanMac = mac.toUpperCase();
@@ -573,17 +589,32 @@ const server = http.createServer(async (req, res) => {
 
         const appAccountContext = { email: accountsRes.rows[0].email };
 
-        const devicesRes = await dbPool.query('SELECT d.* FROM devices d WHERE d.account_id = $1', [accountId]);
+        const devicesRes = await dbPool.query('SELECT d.* FROM devices d WHERE d.account_id = $1 ORDER BY d.id ASC', [accountId]);
         if (devicesRes.rows.length === 0) {
-          return sendJSON(res, 200, { auth: true, account: appAccountContext, mode: 'Czuwanie', lock: false, total: 0, users: [], logs: [] });
+          return sendJSON(res, 200, { auth: true, account: appAccountContext, mode: 'Czuwanie', lock: false, total: 0, users: [], logs: [], devices: [] });
         }
 
-        const primaryDevice = devicesRes.rows[0];
+        // Lista urządzeń dla przełącznika w aplikacji (multi-device).
+        const deviceList = devicesRes.rows.map(d => ({
+          mac: d.mac_address,
+          name: d.device_name || d.mac_address,
+          mode: d.operational_mode,
+          firmwareVersion: d.firmware_version,
+        }));
+
+        // Wybór aktywnego urządzenia: ?mac= z zapytania, jeśli należy do
+        // konta, w przeciwnym razie pierwsze urządzenie (stare zachowanie).
+        const requestedMac = (query.mac || '').toUpperCase();
+        const primaryDevice = devicesRes.rows.find(d => d.mac_address === requestedMac) || devicesRes.rows[0];
         const primaryMac = primaryDevice.mac_address;
 
         const usersRes = await dbPool.query('SELECT id, holder_name as name, is_active as active, card_uid as uid, hardware_slot_idx FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [primaryMac]);
         const logsRes = await dbPool.query('SELECT event_time, message FROM system_events WHERE mac_address = $1 ORDER BY event_time DESC LIMIT 30', [primaryMac]);
-        const kpPinsRes = await dbPool.query('SELECT id, name, active FROM keypad_pins WHERE account_id = $1 ORDER BY created_at ASC', [accountId]).catch(() => ({ rows: [] }));
+        const kpPinsRes = await dbPool.query(
+          `SELECT id, name, active, schedule_enabled, schedule_days, schedule_start_minutes,
+                  schedule_end_minutes, expires_at, max_uses, use_count, is_guest_code
+           FROM keypad_pins WHERE account_id = $1 ORDER BY created_at ASC`, [accountId]
+        ).catch(() => ({ rows: [] }));
 
         const processedUsersList = usersRes.rows.map(row => ({
           idx: row.hardware_slot_idx,
@@ -631,6 +662,8 @@ const server = http.createServer(async (req, res) => {
           deviceReleaseId: (actualLockStates[primaryMac]?.deviceReleaseId || 0),
           latestReleaseId: latestFirmwareReleaseId,
           keypad_pins: kpPinsRes.rows,
+          devices: deviceList,
+          activeMac: primaryMac,
         });
       }
 
@@ -639,8 +672,8 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/user/rename' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const { idx, name } = body;
-        const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        const { idx, name, mac: reqMac } = body;
+        const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
         const targetMac = dev.rows[0].mac_address;
@@ -668,8 +701,8 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/user/toggle_active' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const { idx } = body;
-        const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        const { idx, mac: reqMac } = body;
+        const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
         const targetMac = dev.rows[0].mac_address;
@@ -693,8 +726,8 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/user/delete' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const { idx } = body;
-        const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        const { idx, mac: reqMac } = body;
+        const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
         const targetMac = dev.rows[0].mac_address;
@@ -736,11 +769,11 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/settings/wifi' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const { wifiSSID, wifiPass } = body;
+        const { wifiSSID, wifiPass, mac: reqMac } = body;
         if (!wifiSSID) return sendJSON(res, 400, { error: "SSID cannot be blank" });
 
         // Pobieramy IP oraz adres MAC urządzenia
-        const dev = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 444, { error: "No system hardware linked" });
 
         const targetMac = dev.rows[0].mac_address;
@@ -756,9 +789,57 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       // ZDALNE WYWOŁANIE OTWARCIA Z APLIKACJI
       // =========================================================================
+      // =========================================================================
+      // LISTA URZĄDZEŃ NA KONCIE (multi-device)
+      // =========================================================================
+      if (pathname === '/api/devices/list' && req.method === 'GET') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const devicesRes = await dbPool.query('SELECT mac_address, device_name, operational_mode, firmware_version, last_heartbeat FROM devices WHERE account_id = $1 ORDER BY id ASC', [accountId]);
+        const devices = devicesRes.rows.map(d => ({
+          mac: d.mac_address,
+          name: d.device_name || d.mac_address,
+          mode: d.operational_mode,
+          firmwareVersion: d.firmware_version,
+          online: d.last_heartbeat && (Date.now() - new Date(d.last_heartbeat).getTime()) < 35000,
+        }));
+        return sendJSON(res, 200, { devices });
+      }
+
+      // =========================================================================
+      // ZMIANA NAZWY URZĄDZENIA (np. "Drzwi wejściowe", "Garaż")
+      // =========================================================================
+      if (pathname === '/api/devices/rename' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { mac, name } = body;
+        if (!mac || !name) return sendJSON(res, 400, { error: "Missing mac or name" });
+        const result = await dbPool.query(
+          'UPDATE devices SET device_name = $1 WHERE mac_address = $2 AND account_id = $3 RETURNING mac_address',
+          [name.trim(), mac.toUpperCase(), accountId]
+        );
+        if (result.rows.length === 0) return sendJSON(res, 404, { error: "Device not found on this account" });
+        writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Renamed to "${name.trim()}".`);
+        return sendJSON(res, 200, { status: "ok" });
+      }
+
+      // =========================================================================
+      // USUNIĘCIE URZĄDZENIA Z KONTA
+      // =========================================================================
+      if (pathname === '/api/devices/remove' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { mac } = body;
+        if (!mac) return sendJSON(res, 400, { error: "Missing mac" });
+        const result = await dbPool.query(
+          'DELETE FROM devices WHERE mac_address = $1 AND account_id = $2 RETURNING mac_address',
+          [mac.toUpperCase(), accountId]
+        );
+        if (result.rows.length === 0) return sendJSON(res, 404, { error: "Device not found on this account" });
+        writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Removed from account ${accountId}.`);
+        return sendJSON(res, 200, { status: "ok" });
+      }
+
       if (pathname === '/api/unlock' && req.method === 'GET') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const devRes = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        const devRes = await resolveTargetDevice(accountId, query.mac, 'mac_address');
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
 
@@ -790,7 +871,7 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/toggle_learn' && req.method === 'GET') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const devRes = await dbPool.query('SELECT mac_address, operational_mode FROM devices WHERE account_id = $1 LIMIT 1', [accountId]);
+        const devRes = await resolveTargetDevice(accountId, query.mac, 'mac_address, operational_mode');
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
           const nextMode = devRes.rows[0].operational_mode === 'Czuwanie' ? 'Uczenie' : 'Czuwanie';
@@ -1461,7 +1542,7 @@ const server = http.createServer(async (req, res) => {
         const now = Date.now();
         if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
           keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
-        keypadAttempts[mac].count;
+        keypadAttempts[mac].count++;
         if (keypadAttempts[mac].count > 5) {
           const wait = Math.ceil((keypadAttempts[mac].resetAt - now) / 1000);
           writeToLocalLogFile('Keypad RateLimit', `[Node: ${mac}] Too many keypad attempts.`);
@@ -1495,18 +1576,49 @@ const server = http.createServer(async (req, res) => {
 
           // Check all active PINs for this account
           const pinsRes = await dbPool.query(
-            `SELECT id, name, pin_hash FROM keypad_pins
+            `SELECT id, name, pin_hash, schedule_enabled, schedule_days, schedule_start_minutes,
+                    schedule_end_minutes, expires_at, max_uses, use_count
+             FROM keypad_pins
              WHERE account_id = $1 AND active = true`, [accountId]);
 
+          const nowDate = new Date();
+          const nowDayBit = 1 << nowDate.getDay();               // 0=Niedziela..6=Sobota
+          const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
+
           for (const p of pinsRes.rows) {
-            if (await bcrypt.compare(String(pin), p.pin_hash)) {
-              keypadAttempts[mac] = { count: 0, resetAt: 0 };
-              writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN "${p.name}" GRANTED.`);
-              await dbPool.query(
-                'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
-                [deviceMac, `Keypad PIN "${p.name}" - dostep przyznany`]).catch(() => {});
-              return sendJSON(res, 200, { granted: true, name: p.name });
+            if (!(await bcrypt.compare(String(pin), p.pin_hash))) continue;
+
+            // Kod gościnny wygasł (data ważności minęła)
+            if (p.expires_at && new Date(p.expires_at) < nowDate) {
+              writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN "${p.name}" DENIED — expired.`);
+              return sendJSON(res, 200, { granted: false, reason: 'expired' });
             }
+
+            // Limit użyć wyczerpany (jednorazowe/kilkurazowe kody gościnne)
+            if (p.max_uses !== null && p.use_count >= p.max_uses) {
+              writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN "${p.name}" DENIED — max uses reached.`);
+              return sendJSON(res, 200, { granted: false, reason: 'max_uses' });
+            }
+
+            // Harmonogram: dzień tygodnia i okno godzinowe
+            if (p.schedule_enabled) {
+              const dayOk = (p.schedule_days & nowDayBit) !== 0;
+              const timeOk = nowMinutes >= p.schedule_start_minutes && nowMinutes < p.schedule_end_minutes;
+              if (!dayOk || !timeOk) {
+                writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN "${p.name}" DENIED — outside schedule window.`);
+                return sendJSON(res, 200, { granted: false, reason: 'outside_schedule' });
+              }
+            }
+
+            keypadAttempts[mac] = { count: 0, resetAt: 0 };
+            if (p.max_uses !== null) {
+              await dbPool.query('UPDATE keypad_pins SET use_count = use_count + 1 WHERE id = $1', [p.id]).catch(() => {});
+            }
+            writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN "${p.name}" GRANTED.`);
+            await dbPool.query(
+              'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
+              [deviceMac, `Keypad PIN "${p.name}" - dostep przyznany`]).catch(() => {});
+            return sendJSON(res, 200, { granted: true, name: p.name });
           }
 
           writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN DENIED (${keypadAttempts[mac].count}/5).`);
@@ -1530,24 +1642,53 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/keypad/add' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const { name, pin } = body;
+        const {
+          name, pin,
+          scheduleEnabled = false, scheduleDays = 127,
+          scheduleStartMinutes = 0, scheduleEndMinutes = 1440,
+          expiresAt = null, maxUses = null, isGuestCode = false
+        } = body;
         if (!name || !name.trim()) return sendJSON(res, 400, { error: 'Podaj nazwę' });
         if (!pin || String(pin).length < 4 || String(pin).length > 8)
           return sendJSON(res, 400, { error: 'PIN musi mieć 4–8 cyfr' });
-        if (!/^\d$/.test(String(pin)))
+        if (!/^\d+$/.test(String(pin)))
           return sendJSON(res, 400, { error: 'PIN musi zawierać tylko cyfry' });
 
         const cnt = await dbPool.query(
           'SELECT COUNT(*) FROM keypad_pins WHERE account_id = $1', [accountId]);
-        if (parseInt(cnt.rows[0].count) >= 10)
-          return sendJSON(res, 400, { error: 'Limit 10 PINów osiągnięty' });
+        if (parseInt(cnt.rows[0].count) >= 20)
+          return sendJSON(res, 400, { error: 'Limit 20 PINów osiągnięty' });
 
         const hash = await bcrypt.hash(String(pin), 10);
         const ins = await dbPool.query(
-          'INSERT INTO keypad_pins (account_id, name, pin_hash) VALUES ($1,$2,$3) RETURNING id',
-          [accountId, name.trim(), hash]);
-        writeToLocalLogFile('Keypad', `PIN "${name.trim()}" added for account ${accountId}`);
+          `INSERT INTO keypad_pins
+             (account_id, name, pin_hash, schedule_enabled, schedule_days,
+              schedule_start_minutes, schedule_end_minutes, expires_at, max_uses, is_guest_code)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+          [accountId, name.trim(), hash, scheduleEnabled, scheduleDays,
+           scheduleStartMinutes, scheduleEndMinutes, expiresAt, maxUses, isGuestCode]);
+        writeToLocalLogFile('Keypad', `PIN "${name.trim()}" added for account ${accountId}${isGuestCode ? ' (guest code)' : ''}`);
         return sendJSON(res, 200, { success: true, id: ins.rows[0].id });
+      }
+
+      // KEYPAD PIN UPDATE SCHEDULE/EXPIRY  POST { id, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, expiresAt, maxUses }
+      if (pathname === '/api/keypad/update_schedule' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { id, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, expiresAt, maxUses } = body;
+        if (!id) return sendJSON(res, 400, { error: 'Missing id' });
+        const r = await dbPool.query(
+          `UPDATE keypad_pins SET
+             schedule_enabled = COALESCE($1, schedule_enabled),
+             schedule_days = COALESCE($2, schedule_days),
+             schedule_start_minutes = COALESCE($3, schedule_start_minutes),
+             schedule_end_minutes = COALESCE($4, schedule_end_minutes),
+             expires_at = $5,
+             max_uses = $6
+           WHERE id=$7 AND account_id=$8`,
+          [scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, expiresAt || null, maxUses || null, id, accountId]);
+        if (r.rowCount === 0) return sendJSON(res, 404, { error: 'Not found' });
+        writeToLocalLogFile('Keypad', `Schedule updated for PIN id=${id}, account ${accountId}`);
+        return sendJSON(res, 200, { success: true });
       }
 
       // KEYPAD PIN DELETE  POST { id }
@@ -1602,6 +1743,26 @@ mailTransport.verify((error, success) => {
     writeToLocalLogFile('SMTP Handshake Matrix', 'Handshake clear! Outbound Port 587 TLS channel is online.');
   }
 });
+
+// Migracja schematu: dodajemy kolumny dla harmonogramu dostępu i kodów
+// gościnnych do istniejącej tabeli keypad_pins. Bezpieczne do uruchamiania
+// przy każdym starcie serwera — IF NOT EXISTS pomija już istniejące kolumny.
+async function runSchemaMigrations() {
+  const alters = [
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS schedule_enabled BOOLEAN DEFAULT false`,
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS schedule_days INT DEFAULT 127`,        // bitmask: bit0=Niedziela..bit6=Sobota, 127=wszystkie dni
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS schedule_start_minutes INT DEFAULT 0`,   // minuty od północy
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS schedule_end_minutes INT DEFAULT 1440`,  // 1440 = 24:00
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT NULL`,      // NULL = nigdy nie wygasa
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS max_uses INT DEFAULT NULL`,              // NULL = bez limitu
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS use_count INT DEFAULT 0`,
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS is_guest_code BOOLEAN DEFAULT false`,    // do rozróżnienia w UI
+  ];
+  for (const sql of alters) {
+    await dbPool.query(sql).catch((e) => console.error('[Migration] Failed:', sql, e.message));
+  }
+}
+runSchemaMigrations();
 
 server.listen(3000, () => {
   console.log('⚡ Multi-Tenant SmartLock Engine live on port 3000. Writing local filesystem archives at /var/log/smartlock/');

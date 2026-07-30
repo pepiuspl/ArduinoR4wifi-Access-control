@@ -69,6 +69,9 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [accountId, setAccountId] = useState(null);    // kept for local-mode compat
+  const [devices, setDevices] = useState([]);           // multi-device: lista wszystkich centralek na koncie
+  const [selectedMac, setSelectedMac] = useState('');    // multi-device: aktualnie wybrana centralka
+  const [showDeviceSwitcher, setShowDeviceSwitcher] = useState(false);
   const [authToken, setAuthToken]  = useState(null);    // signed JWT from server
   const [isConfigured, setIsConfigured] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
@@ -88,6 +91,14 @@ export default function App() {
   const [kpNewCode, setKpNewCode]     = useState('');
   const [kpNewConfirm, setKpNewConfirm] = useState('');
   const [kpStatus, setKpStatus]       = useState('');
+  const [kpMode, setKpMode]           = useState('normal'); // 'normal' | 'guest'
+  const [kpGuestExpiryDays, setKpGuestExpiryDays] = useState('1'); // ile dni ważności kodu gościnnego
+  const [kpGuestMaxUses, setKpGuestMaxUses] = useState('');  // puste = bez limitu użyć
+  const [kpScheduleEditId, setKpScheduleEditId] = useState(null); // id PINu, którego harmonogram edytujemy
+  const [kpScheduleEnabled, setKpScheduleEnabled] = useState(false);
+  const [kpScheduleDays, setKpScheduleDays] = useState(127);      // bitmask: bit0=Nd..bit6=So, 127=wszystkie
+  const [kpScheduleStartText, setKpScheduleStartText] = useState('08:00');
+  const [kpScheduleEndText, setKpScheduleEndText] = useState('20:00');
   const [kpRenameId, setKpRenameId]   = useState(null);
   const [kpRenameName, setKpRenameName] = useState('');
   const [pushAlarms, setPushAlarms] = useState(true);
@@ -99,15 +110,30 @@ export default function App() {
     if (!kpNewName.trim())  { setKpStatus('Podaj nazwę'); return; }
     if (kpNewCode.length < 4) { setKpStatus('PIN musi mieć min. 4 cyfry'); return; }
     if (kpNewCode !== kpNewConfirm) { setKpStatus('PINy nie są identyczne'); return; }
+
+    const payload = { name: kpNewName.trim(), pin: kpNewCode };
+
+    if (kpMode === 'guest') {
+      const days = parseInt(kpGuestExpiryDays, 10);
+      if (!days || days < 1) { setKpStatus('Podaj liczbę dni ważności (min. 1)'); return; }
+      const expiryDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+      payload.isGuestCode = true;
+      payload.expiresAt = expiryDate.toISOString();
+      if (kpGuestMaxUses.trim()) {
+        const uses = parseInt(kpGuestMaxUses, 10);
+        if (uses > 0) payload.maxUses = uses;
+      }
+    }
+
     try {
       const r = await fetch(`${backendUrl}/api/keypad/add`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
-        body: JSON.stringify({ name: kpNewName.trim(), pin: kpNewCode }),
+        body: JSON.stringify(payload),
       });
       const d = await r.json();
       if (d.success) {
-        setKpNewName(''); setKpNewCode(''); setKpNewConfirm('');
+        setKpNewName(''); setKpNewCode(''); setKpNewConfirm(''); setKpGuestMaxUses('');
         setKpStatus('✓ Dodano: ' + kpNewName.trim());
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else { setKpStatus('✗ ' + (d.error || 'Błąd serwera')); }
@@ -142,6 +168,67 @@ export default function App() {
     });
     setKpRenameId(null); setKpRenameName('');
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
+  // ── Harmonogram dostępu (dni tygodnia + okno godzinowe) ────────────────────
+  const DAY_LABELS = ['Nd', 'Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So']; // indeks = getDay() JS (0=Niedziela)
+
+  const parseTimeToMinutes = (text) => {
+    const m = text.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const h = parseInt(m[1], 10), min = parseInt(m[2], 10);
+    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return h * 60 + min;
+  };
+
+  const minutesToTimeText = (mins) => {
+    const h = Math.floor(mins / 60).toString().padStart(2, '0');
+    const m = (mins % 60).toString().padStart(2, '0');
+    return `${h}:${m}`;
+  };
+
+  const openScheduleEditor = (kp) => {
+    setKpScheduleEditId(kp.id);
+    setKpScheduleEnabled(!!kp.schedule_enabled);
+    setKpScheduleDays(kp.schedule_days ?? 127);
+    setKpScheduleStartText(minutesToTimeText(kp.schedule_start_minutes ?? 0));
+    const endMinRaw = kp.schedule_end_minutes ?? 1440;
+    setKpScheduleEndText(minutesToTimeText(endMinRaw >= 1440 ? 1439 : endMinRaw));
+  };
+
+  const toggleScheduleDay = (dayIndex) => {
+    setKpScheduleDays(prev => prev ^ (1 << dayIndex));
+  };
+
+  const saveSchedule = async () => {
+    const startMin = parseTimeToMinutes(kpScheduleStartText);
+    const endMin = parseTimeToMinutes(kpScheduleEndText);
+    if (kpScheduleEnabled && (startMin === null || endMin === null)) {
+      Alert.alert('Błąd', 'Podaj godziny w formacie GG:MM (np. 08:00).');
+      return;
+    }
+    if (kpScheduleEnabled && startMin >= endMin) {
+      Alert.alert('Błąd', 'Godzina początkowa musi być wcześniejsza niż końcowa.');
+      return;
+    }
+    try {
+      await fetch(`${backendUrl}/api/keypad/update_schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
+        body: JSON.stringify({
+          id: kpScheduleEditId,
+          scheduleEnabled: kpScheduleEnabled,
+          scheduleDays: kpScheduleDays,
+          scheduleStartMinutes: startMin ?? 0,
+          scheduleEndMinutes: endMin ?? 1440,
+        }),
+      });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setKpScheduleEditId(null);
+      fetchStatus();
+    } catch {
+      Alert.alert('Błąd', 'Nie udało się zapisać harmonogramu.');
+    }
   };
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -245,6 +332,36 @@ export default function App() {
     setIsMenuOpen(false);
     menuAnimation.setValue(-width * 0.75);
   }, [menuAnimation]);
+
+  // Przy starcie aplikacji: przywracamy zapisaną sesję (tryb lokalny lub chmurowy)
+  // z pamięci urządzenia, a na końcu ZAWSZE zwalniamy ekran ładowania.
+  useEffect(() => {
+    (async () => {
+      try {
+        const storedLocalMode = await AsyncStorage.getItem('@lock_local_mode');
+        const storedLocalPass = await AsyncStorage.getItem('@lock_local_admin_pass');
+        if (storedLocalMode === '1' && storedLocalPass) {
+          setIsLocalMode(true);
+          setLocalAdminPass(storedLocalPass);
+          resetUiToDefault();
+          setIsConfigured(true);
+        } else {
+          const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
+          const storedToken     = await AsyncStorage.getItem('@lock_auth_token');
+          if (storedToken || storedAccountId) {
+            if (storedToken)     setAuthToken(storedToken);
+            if (storedAccountId) setAccountId(parseInt(storedAccountId, 10));
+            resetUiToDefault();
+            setIsConfigured(true);
+          }
+        }
+      } catch (e) {
+        console.error("Blad odczytu pamieci podrecznej:", e);
+      } finally {
+        setIsLoading(false);
+      }
+    })();
+  }, [resetUiToDefault]);
 
   const toggleBurgerMenu = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -475,6 +592,316 @@ export default function App() {
       .catch(() => {
         setIsAuthenticating(false);
         alert('Błąd sieci. Spróbuj ponownie.');
+      });
+  };
+
+  // Scala dane przychodzące z serwera/lokalnej centralki ze stanem UI.
+  const mergeLockState = useCallback((prev, data) => {
+    return { ...prev, ...data };
+  }, []);
+
+  // Główna funkcja odpytująca o aktualny stan zamka — działa zarówno
+  // w trybie chmurowym (backendUrl), jak i lokalnym (LOCAL_BASE_URL).
+  const fetchStatus = useCallback(() => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    const macParam = (!isLocalMode && selectedMac) ? `?mac=${encodeURIComponent(selectedMac)}` : '';
+    const url = isLocalMode
+      ? `${LOCAL_BASE_URL}/api/data?pass=${encodeURIComponent(localAdminPass)}`
+      : `${backendUrl}/api/data${macParam}`;
+    const headers = (!isLocalMode && authToken) ? { 'Authorization': `Bearer ${authToken}` } : {};
+
+    fetch(url, { signal: controller.signal, headers })
+      .then((res) => {
+        clearTimeout(timeoutId);
+        return res.json();
+      })
+      .then((data) => {
+        if (data.auth === false) {
+          setIsConfigured(false);
+          return;
+        }
+        setErrorMessage('');
+        setLockState(prev => ({ ...prev, _failCount: 0 }));
+        if (data.pushEntries !== undefined) setPushEntries(data.pushEntries);
+        if (data.pushAlarms  !== undefined) setPushAlarms(data.pushAlarms);
+        if (data.keypad_pins !== undefined) setKeypadPins(data.keypad_pins);
+        if (data.devices !== undefined) setDevices(data.devices);
+        if (data.activeMac && !selectedMac) setSelectedMac(data.activeMac);
+        setLockState(prevState => mergeLockState(prevState, data));
+      })
+      .catch((err) => {
+        clearTimeout(timeoutId);
+        const isPending = pendingUnlockSinceRef.current && (Date.now() - pendingUnlockSinceRef.current) < 20000;
+        setLockState(prevState => {
+          if (isPending || prevState.lock === 'pending' || prevState.lock === true) {
+            return prevState;
+          }
+          const fails = (prevState._failCount || 0) + 1;
+          if (fails < 3) {
+            return { ...prevState, _failCount: fails };
+          }
+          setErrorMessage('Brak połączenia z centralką (Offline)');
+          return { ...prevState, lock: 'offline', _failCount: 0 };
+        });
+        console.error("Fetch status error:", err.message);
+      });
+  }, [backendUrl, authToken, isLocalMode, localAdminPass, mergeLockState, selectedMac]);
+
+  // Wysyła komendę do centralki (odblokuj, przełącz użytkownika, itd.),
+  // obsługując zarówno tryb chmurowy jak i lokalny (AP centralki).
+  const executeCommand = (endpoint, payload = null) => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    if (endpoint === '/api/unlock') {
+      pendingUnlockSinceRef.current = Date.now();
+      setLockState(prevState => ({ ...prevState, lock: 'pending' }));
+    }
+    if (isLocalMode) {
+      const localUrl = buildLocalRequestUrl(endpoint, payload, localAdminPass);
+      fetch(localUrl)
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+          fetchStatus();
+        })
+        .catch(() => {
+          Alert.alert('Błąd', 'Nie udało się połączyć z centralką w trybie lokalnym.');
+        });
+    } else {
+      // W trybie multi-device dołączamy mac wybranej centralki: dla GET jako
+      // parametr URL, dla POST jako pole body — endpoint sam wybierze
+      // właściwe urządzenie (lub padnie na pierwsze, jeśli mac pominięty).
+      const isGet = !payload;
+      const url = isGet && selectedMac
+        ? `${backendUrl}${endpoint}${endpoint.includes('?') ? '&' : '?'}mac=${encodeURIComponent(selectedMac)}`
+        : `${backendUrl}${endpoint}`;
+      const finalPayload = (!isGet && selectedMac) ? { ...payload, mac: selectedMac } : payload;
+
+      fetch(url, {
+        method: isGet ? 'GET' : 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
+        },
+        body: finalPayload ? JSON.stringify(finalPayload) : undefined
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+          fetchStatus();
+        })
+        .catch(() => {
+          Alert.alert('Błąd', 'Nie udało się wysłać komendy do centralki.');
+        });
+    }
+  };
+
+  // --- Zarządzanie wieloma centralkami (multi-device) ---
+  const handleRenameDevice = (mac, currentName) => {
+    Alert.prompt(
+      'Zmień nazwę centralki',
+      'Podaj nową nazwę (np. "Drzwi wejściowe", "Garaż"):',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        { text: 'Zapisz', onPress: (newName) => {
+          if (!newName || !newName.trim()) return;
+          fetch(`${backendUrl}/api/devices/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+            body: JSON.stringify({ mac, name: newName.trim() })
+          })
+            .then((res) => { if (!res.ok) throw new Error(); fetchStatus(); })
+            .catch(() => Alert.alert('Błąd', 'Nie udało się zmienić nazwy centralki.'));
+        }}
+      ],
+      'plain-text',
+      currentName
+    );
+  };
+
+  const handleRemoveDevice = (mac, name) => {
+    Alert.alert(
+      'Usuń centralkę',
+      `Czy na pewno chcesz usunąć "${name}" z tego konta? Ta operacja nie kasuje ustawień samego urządzenia — będzie można je ponownie sparować.`,
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        { text: 'Usuń', style: 'destructive', onPress: () => {
+          fetch(`${backendUrl}/api/devices/remove`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+            body: JSON.stringify({ mac })
+          })
+            .then((res) => { if (!res.ok) throw new Error(); if (selectedMac === mac) setSelectedMac(''); fetchStatus(); })
+            .catch(() => Alert.alert('Błąd', 'Nie udało się usunąć centralki.'));
+        }}
+      ]
+    );
+  };
+
+  // --- Sprawdzanie i wykonywanie aktualizacji OTA ---
+  const handleCheckUpdate = () => {
+    setOtaState('checking');
+    fetch(`${backendUrl}/api/firmware/version`)
+      .then((res) => res.json())
+      .then((data) => {
+        setLatestVersion(data.latestVersion || '');
+        const latestId = data.releaseId || 0;
+        const deviceId = lockState.deviceReleaseId || 0;
+        const isUpToDate = (latestId > 0 && deviceId > 0)
+          ? (deviceId >= latestId)
+          : ((lockState.version || '').replace(/^v/, '') === (data.latestVersion || '').replace(/^v/, ''));
+        setOtaState(isUpToDate ? 'up-to-date' : 'available');
+      })
+      .catch(() => {
+        setOtaState('idle');
+        Alert.alert('Błąd', 'Nie udało się sprawdzić dostępności aktualizacji.');
+      });
+  };
+
+  const handleExecuteUpdate = () => {
+    setOtaState('downloading_server');
+    fetch(`${backendUrl}/api/ota/push`, {
+      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('OTA push failed');
+        setOtaState('flashing_device');
+        const checkInterval = setInterval(() => {
+          fetch(`${backendUrl}/api/data`, { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} })
+            .then((r) => r.json())
+            .then((data) => {
+              const deviceIdNow = data.deviceReleaseId || 0;
+              const latestReleaseId = data.latestReleaseId || 0;
+              if (latestReleaseId > 0 && deviceIdNow >= latestReleaseId) {
+                clearInterval(checkInterval);
+                setOtaState('success');
+                setTimeout(() => setOtaState('idle'), 5000);
+              }
+            })
+            .catch(() => {});
+        }, 2000);
+      })
+      .catch(() => {
+        setOtaState('available');
+        Alert.alert('Błąd', 'Nie udało się rozpocząć aktualizacji.');
+      });
+  };
+
+  // --- Zapis ustawień systemowych (zmiana Wi-Fi centralki) ---
+  const handleSaveSystemSettings = () => {
+    if (!settingsSsid) return Alert.alert('Błąd', 'Wprowadź nazwę sieci Wi-Fi.');
+    fetch(`${backendUrl}/api/settings/wifi`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ wifiSSID: settingsSsid, wifiPass: settingsWifiPass })
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Save failed');
+        Alert.alert('Zapisano', 'Centralka zrestartuje się i połączy z nową siecią Wi-Fi.');
+      })
+      .catch(() => Alert.alert('Błąd', 'Nie udało się zapisać ustawień.'));
+  };
+
+  // --- Tryb nauki nowej karty RFID ---
+  const handleToggleLearn = () => {
+    executeCommand('/api/toggle_learn');
+  };
+
+  // --- Zmiana nazwy użytkownika (karty RFID) ---
+  const promptUserRename = (idx, currentName) => {
+    Alert.prompt(
+      'Zmień nazwę',
+      'Wprowadź nową nazwę dla tej karty:',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        { text: 'Zapisz', onPress: (newName) => {
+          if (newName && newName.trim()) {
+            executeCommand('/api/user/rename', { idx, name: newName.trim() });
+          }
+        }}
+      ],
+      'plain-text',
+      currentName
+    );
+  };
+
+  // --- Rejestracja tokena push notifications ---
+  const registerForPushNotificationsAsync = async (aid) => {
+    try {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      if (finalStatus !== 'granted') return;
+
+      const tokenData = await Notifications.getExpoPushTokenAsync();
+      const token = tokenData.data;
+
+      await fetch(`${backendUrl}/api/auth/save_push_token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: aid, token })
+      });
+    } catch (e) {
+      console.error('Push registration error:', e.message);
+    }
+  };
+
+  // --- Krok 2: weryfikacja 6-cyfrowego kodu resetu hasła ---
+  const handleVerifyResetCode = () => {
+    if (!resetCode) return Alert.alert('Błąd', 'Wprowadź kod autoryzacyjny.');
+    setIsAuthenticating(true);
+    fetch(`${backendUrl}/api/auth/verify_reset_code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim(), code: resetCode.trim() })
+    })
+      .then((res) => res.json().then(data => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        setIsAuthenticating(false);
+        if (ok && data.valid) {
+          setResetStep(3);
+        } else {
+          Alert.alert('Błąd', data.error || 'Kod jest nieprawidłowy lub wygasł.');
+        }
+      })
+      .catch(() => {
+        setIsAuthenticating(false);
+        Alert.alert('Błąd sieci', 'Spróbuj ponownie.');
+      });
+  };
+
+  // --- Krok 3: zapis nowego hasła ---
+  const handleConfirmPasswordReset = () => {
+    if (!newPassword || newPassword.length < 6) {
+      return Alert.alert('Błąd', 'Hasło musi mieć co najmniej 6 znaków.');
+    }
+    if (newPassword !== confirmNewPassword) {
+      return Alert.alert('Błąd', 'Hasła nie są identyczne.');
+    }
+    setIsAuthenticating(true);
+    fetch(`${backendUrl}/api/auth/confirm_password_reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email.trim(), code: resetCode.trim(), newPassword })
+    })
+      .then((res) => res.json().then(data => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        setIsAuthenticating(false);
+        if (ok) {
+          Alert.alert('Sukces', 'Hasło zostało zmienione. Zaloguj się ponownie.');
+          setResetStep(1);
+          setResetCode('');
+          setNewPassword('');
+          setConfirmNewPassword('');
+        } else {
+          Alert.alert('Błąd', data.error || 'Nie udało się zmienić hasła.');
+        }
+      })
+      .catch(() => {
+        setIsAuthenticating(false);
+        Alert.alert('Błąd sieci', 'Spróbuj ponownie.');
       });
   };
 
@@ -857,6 +1284,22 @@ export default function App() {
             <ScrollView contentContainerStyle={styles.scrollWrapper}>
               <Text style={styles.screenHeaderText}>📱 Dashboard</Text>
 
+              {/* ── PRZEŁĄCZNIK CENTRALEK ── widoczny tylko gdy konto ma więcej niż 1 urządzenie */}
+              {!isLocalMode && devices.length > 1 && (
+                <TouchableOpacity
+                  style={{ backgroundColor: '#16161a', borderWidth: 1, borderColor: '#2a2a30', borderRadius: 10, padding: 12, marginBottom: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
+                  onPress={() => setShowDeviceSwitcher(true)}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 18, marginRight: 8 }}>🏠</Text>
+                    <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 15 }}>
+                      {devices.find(d => d.mac === selectedMac)?.name || 'Wybierz centralkę'}
+                    </Text>
+                  </View>
+                  <Text style={{ color: '#64b5f6', fontSize: 13, fontWeight: 'bold' }}>Zmień ›</Text>
+                </TouchableOpacity>
+              )}
+
               {/* ── TAMPER ALERT BANNER ── shown whenever the second-board enclosure is open */}
               {lockState.tamper && (
                 <View style={styles.tamperBanner}>
@@ -977,9 +1420,32 @@ export default function App() {
                     ) : (
                       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                         <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: kp.active ? '#81c784' : '#555', marginRight: 10 }} />
-                        <Text style={{ color: kp.active ? '#fff' : '#666', flex: 1, fontSize: 15 }}>{kp.name}</Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: kp.active ? '#fff' : '#666', fontSize: 15 }}>{kp.name}</Text>
+                          {(kp.is_guest_code || kp.expires_at || kp.schedule_enabled) && (
+                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginTop: 2 }}>
+                              {kp.is_guest_code && (
+                                <Text style={{ color: '#ffb300', fontSize: 10, marginRight: 8 }}>👤 Gość</Text>
+                              )}
+                              {kp.expires_at && (
+                                <Text style={{ color: new Date(kp.expires_at) < new Date() ? '#ef4444' : '#aaa', fontSize: 10, marginRight: 8 }}>
+                                  ⏱ {new Date(kp.expires_at) < new Date() ? 'Wygasł' : `do ${new Date(kp.expires_at).toLocaleDateString('pl-PL')}`}
+                                </Text>
+                              )}
+                              {kp.max_uses !== null && kp.max_uses !== undefined && (
+                                <Text style={{ color: '#aaa', fontSize: 10, marginRight: 8 }}>🔁 {kp.use_count || 0}/{kp.max_uses}</Text>
+                              )}
+                              {kp.schedule_enabled && (
+                                <Text style={{ color: '#64b5f6', fontSize: 10 }}>📅 Harmonogram</Text>
+                              )}
+                            </View>
+                          )}
+                        </View>
                         <TouchableOpacity onPress={() => { setKpRenameId(kp.id); setKpRenameName(kp.name); }} style={{ paddingHorizontal: 8 }}>
                           <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => openScheduleEditor(kp)} style={{ paddingHorizontal: 8 }}>
+                          <Text style={{ color: kp.schedule_enabled ? '#ffb300' : '#64b5f6', fontSize: 12 }}>📅</Text>
                         </TouchableOpacity>
                         <TouchableOpacity onPress={() => kpToggle(kp.id)} style={{ paddingHorizontal: 8 }}>
                           <Text style={{ color: '#64b5f6', fontSize: 12 }}>{kp.active ? 'Blok.' : 'Aktyw.'}</Text>
@@ -994,9 +1460,24 @@ export default function App() {
                 {keypadPins.length === 0 && (
                   <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginBottom: 12 }}>Brak skonfigurowanych PINów</Text>
                 )}
-                {keypadPins.length < 10 && (
+                {keypadPins.length < 20 && (
                   <>
-                    <Text style={[styles.inputLabelText, { marginTop: 8 }]}>Nazwa osoby</Text>
+                    <View style={{ flexDirection: 'row', marginTop: 8, marginBottom: 12, backgroundColor: '#0f0f11', borderRadius: 8, padding: 4 }}>
+                      <TouchableOpacity
+                        style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: kpMode === 'normal' ? '#1a3a5c' : 'transparent', alignItems: 'center' }}
+                        onPress={() => setKpMode('normal')}
+                      >
+                        <Text style={{ color: kpMode === 'normal' ? '#fff' : '#666', fontWeight: 'bold', fontSize: 13 }}>Stały PIN</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: kpMode === 'guest' ? '#5c33cf' : 'transparent', alignItems: 'center' }}
+                        onPress={() => setKpMode('guest')}
+                      >
+                        <Text style={{ color: kpMode === 'guest' ? '#fff' : '#666', fontWeight: 'bold', fontSize: 13 }}>👤 Kod gościnny</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <Text style={styles.inputLabelText}>Nazwa osoby</Text>
                     <TextInput style={styles.inputField} placeholder="np. Mama, Tata, Gość"
                       placeholderTextColor="#555" value={kpNewName} onChangeText={setKpNewName} />
                     <Text style={styles.inputLabelText}>PIN (4–8 cyfr)</Text>
@@ -1007,11 +1488,25 @@ export default function App() {
                     <TextInput style={styles.inputField} placeholder="••••" placeholderTextColor="#555"
                       keyboardType="numeric" secureTextEntry maxLength={8}
                       value={kpNewConfirm} onChangeText={setKpNewConfirm} />
+
+                    {kpMode === 'guest' && (
+                      <>
+                        <Text style={styles.inputLabelText}>Ważny przez (dni)</Text>
+                        <TextInput style={styles.inputField} placeholder="np. 3"
+                          placeholderTextColor="#555" keyboardType="number-pad"
+                          value={kpGuestExpiryDays} onChangeText={setKpGuestExpiryDays} />
+                        <Text style={styles.inputLabelText}>Limit użyć (opcjonalnie)</Text>
+                        <TextInput style={styles.inputField} placeholder="puste = bez limitu"
+                          placeholderTextColor="#555" keyboardType="number-pad"
+                          value={kpGuestMaxUses} onChangeText={setKpGuestMaxUses} />
+                      </>
+                    )}
+
                     {kpStatus ? (
                       <Text style={{ color: kpStatus.startsWith('✓') ? '#81c784' : '#ef4444', fontSize: 12, marginBottom: 8 }}>{kpStatus}</Text>
                     ) : null}
-                    <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#1a3a5c', width: '100%' }]} onPress={kpAdd}>
-                      <Text style={styles.btnText}>➕ Dodaj PIN</Text>
+                    <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: kpMode === 'guest' ? '#5c33cf' : '#1a3a5c', width: '100%' }]} onPress={kpAdd}>
+                      <Text style={styles.btnText}>{kpMode === 'guest' ? '👤 Utwórz kod gościnny' : '➕ Dodaj PIN'}</Text>
                     </TouchableOpacity>
                   </>
                 )}
@@ -1253,6 +1748,97 @@ export default function App() {
             <Text style={styles.btnText}>Wyloguj się</Text>
           </TouchableOpacity>
         </Animated.View>
+
+        {/* ── MODAL: HARMONOGRAM DOSTĘPU (dni tygodnia + okno godzinowe) ── */}
+        {kpScheduleEditId !== null && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', alignItems: 'center', zIndex: 999 }}>
+            <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20, width: '88%' }}>
+              <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17, marginBottom: 4 }}>Harmonogram dostępu</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 16 }}>
+                Ogranicz ten PIN do wybranych dni i godzin. Poza tym oknem PIN nie zadziała, nawet jeśli jest aktywny.
+              </Text>
+
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>Harmonogram włączony</Text>
+                <Switch value={kpScheduleEnabled} onValueChange={setKpScheduleEnabled} trackColor={{ true: '#5c33cf' }} />
+              </View>
+
+              {kpScheduleEnabled && (
+                <>
+                  <Text style={styles.inputLabelText}>Dni tygodnia</Text>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 }}>
+                    {DAY_LABELS.map((label, idx) => {
+                      const active = (kpScheduleDays & (1 << idx)) !== 0;
+                      return (
+                        <TouchableOpacity
+                          key={idx}
+                          onPress={() => toggleScheduleDay(idx)}
+                          style={{
+                            width: 38, height: 38, borderRadius: 19, justifyContent: 'center', alignItems: 'center',
+                            backgroundColor: active ? '#5c33cf' : '#0f0f11',
+                            borderWidth: 1, borderColor: active ? '#5c33cf' : '#333',
+                          }}
+                        >
+                          <Text style={{ color: active ? '#fff' : '#666', fontWeight: 'bold', fontSize: 12 }}>{label}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+
+                  <View style={{ flexDirection: 'row', gap: 12 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inputLabelText}>Od (GG:MM)</Text>
+                      <TextInput style={styles.inputField} placeholder="08:00" placeholderTextColor="#555"
+                        value={kpScheduleStartText} onChangeText={setKpScheduleStartText} maxLength={5} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inputLabelText}>Do (GG:MM)</Text>
+                      <TextInput style={styles.inputField} placeholder="20:00" placeholderTextColor="#555"
+                        value={kpScheduleEndText} onChangeText={setKpScheduleEndText} maxLength={5} />
+                    </View>
+                  </View>
+                </>
+              )}
+
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
+                <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#333' }]} onPress={() => setKpScheduleEditId(null)}>
+                  <Text style={styles.btnText}>Anuluj</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#5c33cf' }]} onPress={saveSchedule}>
+                  <Text style={styles.btnText}>Zapisz</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        )}
+
+        {/* ── MODAL: PRZEŁĄCZNIK CENTRALEK (multi-device) ── */}
+        {showDeviceSwitcher && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', alignItems: 'center', zIndex: 999 }}>
+            <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20, width: '85%', maxHeight: '70%' }}>
+              <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17, marginBottom: 16 }}>Twoje centralki</Text>
+              <ScrollView>
+                {devices.map((d) => (
+                  <View key={d.mac} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: d.mac === selectedMac ? '#1a3a5c' : '#0f0f11', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                    <TouchableOpacity style={{ flex: 1 }} onPress={() => { setSelectedMac(d.mac); setShowDeviceSwitcher(false); }}>
+                      <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 15 }}>{d.mac === selectedMac ? '✓ ' : ''}{d.name}</Text>
+                      <Text style={{ color: d.online ? '#81c784' : '#e57373', fontSize: 12, marginTop: 2 }}>{d.online ? '● Online' : '● Offline'} · {d.mode || '—'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRenameDevice(d.mac, d.name)}>
+                      <Text style={{ color: '#64b5f6', fontSize: 13 }}>✏️</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRemoveDevice(d.mac, d.name)}>
+                      <Text style={{ color: '#e57373', fontSize: 13 }}>🗑️</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </ScrollView>
+              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12 }]} onPress={() => setShowDeviceSwitcher(false)}>
+                <Text style={styles.btnText}>Zamknij</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
       </View>
     </SafeAreaView>
   );
