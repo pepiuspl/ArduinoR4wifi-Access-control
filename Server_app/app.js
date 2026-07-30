@@ -94,13 +94,16 @@ export default function App() {
   const [kpMode, setKpMode]           = useState('normal'); // 'normal' | 'guest'
   const [kpGuestExpiryDays, setKpGuestExpiryDays] = useState('1'); // ile dni ważności kodu gościnnego
   const [kpGuestMaxUses, setKpGuestMaxUses] = useState('');  // puste = bez limitu użyć
-  const [kpScheduleEditId, setKpScheduleEditId] = useState(null); // id PINu, którego harmonogram edytujemy
+  const [kpScheduleEditId, setKpScheduleEditId] = useState(null); // id PINu LUB idx karty, którego harmonogram edytujemy
+  const [kpScheduleTargetType, setKpScheduleTargetType] = useState('pin'); // 'pin' | 'card' — rozróżnia który endpoint wywołać
   const [kpScheduleEnabled, setKpScheduleEnabled] = useState(false);
   const [kpScheduleDays, setKpScheduleDays] = useState(127);      // bitmask: bit0=Nd..bit6=So, 127=wszystkie
   const [kpScheduleStartText, setKpScheduleStartText] = useState('08:00');
   const [kpScheduleEndText, setKpScheduleEndText] = useState('20:00');
   const [kpRenameId, setKpRenameId]   = useState(null);
   const [kpRenameName, setKpRenameName] = useState('');
+  const [cardRenameIdx, setCardRenameIdx] = useState(null); // inline edycja nazwy karty RFID (jak w PIN)
+  const [cardRenameName, setCardRenameName] = useState('');
   const [pushAlarms, setPushAlarms] = useState(true);
 
   // ── Keypad PIN management ────────────────────────────────────────────────────
@@ -171,7 +174,11 @@ export default function App() {
   };
 
   // ── Harmonogram dostępu (dni tygodnia + okno godzinowe) ────────────────────
-  const DAY_LABELS = ['Nd', 'Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So']; // indeks = getDay() JS (0=Niedziela)
+  // Wyświetlamy dni od poniedziałku, ale bitmaska w bazie MUSI pozostać
+  // zgodna z JS getDay() (0=Niedziela..6=Sobota) — DAY_DISPLAY_ORDER mapuje
+  // pozycję na ekranie na właściwy bit, więc "Pn" zawsze przełącza bit 1 itd.
+  const DAY_LABELS = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd'];
+  const DAY_DISPLAY_ORDER = [1, 2, 3, 4, 5, 6, 0]; // getDay() index dla każdej pozycji na ekranie
 
   const parseTimeToMinutes = (text) => {
     const m = text.match(/^(\d{1,2}):(\d{2})$/);
@@ -187,17 +194,19 @@ export default function App() {
     return `${h}:${m}`;
   };
 
-  const openScheduleEditor = (kp) => {
-    setKpScheduleEditId(kp.id);
-    setKpScheduleEnabled(!!kp.schedule_enabled);
-    setKpScheduleDays(kp.schedule_days ?? 127);
-    setKpScheduleStartText(minutesToTimeText(kp.schedule_start_minutes ?? 0));
-    const endMinRaw = kp.schedule_end_minutes ?? 1440;
+  const openScheduleEditor = (entity, type = 'pin') => {
+    setKpScheduleTargetType(type);
+    setKpScheduleEditId(type === 'pin' ? entity.id : entity.idx);
+    setKpScheduleEnabled(!!entity.schedule_enabled);
+    setKpScheduleDays(entity.schedule_days ?? 127);
+    setKpScheduleStartText(minutesToTimeText(entity.schedule_start_minutes ?? 0));
+    const endMinRaw = entity.schedule_end_minutes ?? 1440;
     setKpScheduleEndText(minutesToTimeText(endMinRaw >= 1440 ? 1439 : endMinRaw));
   };
 
-  const toggleScheduleDay = (dayIndex) => {
-    setKpScheduleDays(prev => prev ^ (1 << dayIndex));
+  const toggleScheduleDay = (displayIndex) => {
+    const jsDay = DAY_DISPLAY_ORDER[displayIndex];
+    setKpScheduleDays(prev => prev ^ (1 << jsDay));
   };
 
   const saveSchedule = async () => {
@@ -212,11 +221,15 @@ export default function App() {
       return;
     }
     try {
-      await fetch(`${backendUrl}/api/keypad/update_schedule`, {
+      const endpoint = kpScheduleTargetType === 'card'
+        ? '/api/user/update_schedule'
+        : '/api/keypad/update_schedule';
+      const idField = kpScheduleTargetType === 'card' ? { idx: kpScheduleEditId } : { id: kpScheduleEditId };
+      await fetch(`${backendUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
         body: JSON.stringify({
-          id: kpScheduleEditId,
+          ...idField,
           scheduleEnabled: kpScheduleEnabled,
           scheduleDays: kpScheduleDays,
           scheduleStartMinutes: startMin ?? 0,
@@ -806,22 +819,12 @@ export default function App() {
     executeCommand('/api/toggle_learn');
   };
 
-  // --- Zmiana nazwy użytkownika (karty RFID) ---
-  const promptUserRename = (idx, currentName) => {
-    Alert.prompt(
-      'Zmień nazwę',
-      'Wprowadź nową nazwę dla tej karty:',
-      [
-        { text: 'Anuluj', style: 'cancel' },
-        { text: 'Zapisz', onPress: (newName) => {
-          if (newName && newName.trim()) {
-            executeCommand('/api/user/rename', { idx, name: newName.trim() });
-          }
-        }}
-      ],
-      'plain-text',
-      currentName
-    );
+  // --- Zmiana nazwy użytkownika (karty RFID) — jednolity wzorzec z PIN-ami:
+  // edycja inline w wierszu, bez wyskakującego okienka.
+  const cardRename = () => {
+    if (!cardRenameName.trim()) return;
+    executeCommand('/api/user/rename', { idx: cardRenameIdx, name: cardRenameName.trim() });
+    setCardRenameIdx(null); setCardRenameName('');
   };
 
   // --- Rejestracja tokena push notifications ---
@@ -1380,15 +1383,41 @@ export default function App() {
     <View style={styles.card}>
       <Text style={styles.sectionHeader}>Zarejestrowane Karty ({lockState.total}/10)</Text>
               {lockState.users.map((user) => (
-                <View key={user.idx} style={styles.userRow}>
-                  <View style={{ flex: 1, paddingRight: 6 }}>
-                    <Text style={styles.userName}>{user.name}</Text>
-                  </View>
-                  <View style={styles.rowActions}>
-                    <TouchableOpacity style={{ padding: 4 }} onPress={() => promptUserRename(user.idx, user.name)}><Text style={{ color: '#64b5f6', marginRight: 16, fontWeight: 'bold', fontSize: 13 }}>✏️ Edytuj</Text></TouchableOpacity>
-                    <TouchableOpacity onPress={() => executeCommand('/api/user/toggle_active', { idx: user.idx })}><Text style={{ color: user.active ? '#81c784' : '#ffb300', marginRight: 16, fontWeight: 'bold', fontSize: 13 }}>{user.active ? 'Aktywny' : 'Zamrożony'}</Text></TouchableOpacity>
-                    <TouchableOpacity onPress={() => executeCommand('/api/user/delete', { idx: user.idx })}><Text style={{ color: '#e57373', fontWeight: 'bold', fontSize: 13 }}>❌ Usuń</Text></TouchableOpacity>
-                  </View>
+                <View key={user.idx} style={{ backgroundColor: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                  {cardRenameIdx === user.idx ? (
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <TextInput style={[styles.inputField, { flex: 1, marginBottom: 0 }]}
+                        value={cardRenameName} onChangeText={setCardRenameName}
+                        placeholder="Nowa nazwa" placeholderTextColor="#555" autoFocus />
+                      <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12 }]} onPress={cardRename}>
+                        <Text style={styles.btnText}>✓</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12, backgroundColor: '#333' }]} onPress={() => setCardRenameIdx(null)}>
+                        <Text style={styles.btnText}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: user.active ? '#fff' : '#666', fontSize: 15 }}>{user.name}</Text>
+                        {user.schedule_enabled && (
+                          <Text style={{ color: '#64b5f6', fontSize: 10, marginTop: 2 }}>📅 Harmonogram</Text>
+                        )}
+                      </View>
+                      <TouchableOpacity onPress={() => { setCardRenameIdx(user.idx); setCardRenameName(user.name); }} style={{ paddingHorizontal: 8 }}>
+                        <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => openScheduleEditor(user, 'card')} style={{ paddingHorizontal: 8 }}>
+                        <Text style={{ color: user.schedule_enabled ? '#ffb300' : '#64b5f6', fontSize: 12 }}>📅</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => executeCommand('/api/user/toggle_active', { idx: user.idx })} style={{ paddingHorizontal: 8 }}>
+                        <Text style={{ color: user.active ? '#81c784' : '#ffb300', fontWeight: 'bold', fontSize: 12 }}>{user.active ? 'Aktywny' : 'Zamrożony'}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => executeCommand('/api/user/delete', { idx: user.idx })} style={{ paddingHorizontal: 8 }}>
+                        <Text style={{ color: '#e57373', fontWeight: 'bold', fontSize: 12 }}>❌</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
               ))}
               {lockState.users.length === 0 ? <Text style={styles.subLabel}>Brak rekordów przypisanych do tego zamka.</Text> : null}
@@ -1444,7 +1473,7 @@ export default function App() {
                         <TouchableOpacity onPress={() => { setKpRenameId(kp.id); setKpRenameName(kp.name); }} style={{ paddingHorizontal: 8 }}>
                           <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity onPress={() => openScheduleEditor(kp)} style={{ paddingHorizontal: 8 }}>
+                        <TouchableOpacity onPress={() => openScheduleEditor(kp, 'pin')} style={{ paddingHorizontal: 8 }}>
                           <Text style={{ color: kp.schedule_enabled ? '#ffb300' : '#64b5f6', fontSize: 12 }}>📅</Text>
                         </TouchableOpacity>
                         <TouchableOpacity onPress={() => kpToggle(kp.id)} style={{ paddingHorizontal: 8 }}>
@@ -1768,7 +1797,7 @@ export default function App() {
                   <Text style={styles.inputLabelText}>Dni tygodnia</Text>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 }}>
                     {DAY_LABELS.map((label, idx) => {
-                      const active = (kpScheduleDays & (1 << idx)) !== 0;
+                      const active = (kpScheduleDays & (1 << DAY_DISPLAY_ORDER[idx])) !== 0;
                       return (
                         <TouchableOpacity
                           key={idx}

@@ -608,7 +608,10 @@ const server = http.createServer(async (req, res) => {
         const primaryDevice = devicesRes.rows.find(d => d.mac_address === requestedMac) || devicesRes.rows[0];
         const primaryMac = primaryDevice.mac_address;
 
-        const usersRes = await dbPool.query('SELECT id, holder_name as name, is_active as active, card_uid as uid, hardware_slot_idx FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [primaryMac]);
+        const usersRes = await dbPool.query(
+          `SELECT id, holder_name as name, is_active as active, card_uid as uid, hardware_slot_idx,
+                  schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
+           FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC`, [primaryMac]);
         const logsRes = await dbPool.query('SELECT event_time, message FROM system_events WHERE mac_address = $1 ORDER BY event_time DESC LIMIT 30', [primaryMac]);
         const kpPinsRes = await dbPool.query(
           `SELECT id, name, active, schedule_enabled, schedule_days, schedule_start_minutes,
@@ -620,7 +623,11 @@ const server = http.createServer(async (req, res) => {
           idx: row.hardware_slot_idx,
           name: row.name,
           active: row.active,
-          uid: row.uid
+          uid: row.uid,
+          schedule_enabled: row.schedule_enabled,
+          schedule_days: row.schedule_days,
+          schedule_start_minutes: row.schedule_start_minutes,
+          schedule_end_minutes: row.schedule_end_minutes,
         }));
 
         const localizedLogsFeed = logsRes.rows.map(r => {
@@ -694,6 +701,33 @@ const server = http.createServer(async (req, res) => {
         `/api/rename_user?idx=${idx}&name=${encodeURIComponent(name)}&pass=${currentDynamicPassword}`
         );
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
+      }
+
+      // =========================================================================
+      // AKTUALIZACJA HARMONOGRAMU KARTY RFID (dni + okno godzinowe)
+      // POST { idx, mac, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes }
+      // =========================================================================
+      if (pathname === '/api/user/update_schedule' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { idx, mac: reqMac, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes } = body;
+        const dev = await resolveTargetDevice(accountId, reqMac);
+        if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
+        const targetMac = dev.rows[0].mac_address;
+
+        const cards = await dbPool.query('SELECT id FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [targetMac]);
+        if (!cards.rows[idx]) return sendJSON(res, 400, { error: "Array index size exception" });
+
+        await dbPool.query(
+          `UPDATE card_credentials SET
+             schedule_enabled = COALESCE($1, schedule_enabled),
+             schedule_days = COALESCE($2, schedule_days),
+             schedule_start_minutes = COALESCE($3, schedule_start_minutes),
+             schedule_end_minutes = COALESCE($4, schedule_end_minutes)
+           WHERE id = $5`,
+          [scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, cards.rows[idx].id]
+        );
+        writeToLocalLogFile('User Mutation', `[Node: ${targetMac}] Schedule updated for card id=${cards.rows[idx].id}`);
+        return sendJSON(res, 200, { success: true });
       }
 
       // =========================================================================
@@ -1424,8 +1458,22 @@ const server = http.createServer(async (req, res) => {
           const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
           mac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
         }
-        const credentialRes = await dbPool.query('SELECT holder_name, is_active FROM card_credentials WHERE mac_address = $1 AND card_uid = $2', [mac, uid]);
-        if (credentialRes.rows.length > 0 && credentialRes.rows[0].is_active) {
+        const credentialRes = await dbPool.query(
+          `SELECT holder_name, is_active, schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
+           FROM card_credentials WHERE mac_address = $1 AND card_uid = $2`, [mac, uid]);
+
+        let scheduleBlocked = false;
+        if (credentialRes.rows.length > 0 && credentialRes.rows[0].is_active && credentialRes.rows[0].schedule_enabled) {
+          const nowDate = new Date();
+          const nowDayBit = 1 << nowDate.getDay();
+          const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
+          const c = credentialRes.rows[0];
+          const dayOk = (c.schedule_days & nowDayBit) !== 0;
+          const timeOk = nowMinutes >= c.schedule_start_minutes && nowMinutes < c.schedule_end_minutes;
+          if (!dayOk || !timeOk) scheduleBlocked = true;
+        }
+
+        if (credentialRes.rows.length > 0 && credentialRes.rows[0].is_active && !scheduleBlocked) {
           unlockQueues[mac] = true;
           await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Otwarto: ${credentialRes.rows[0].holder_name}`]);
           writeToLocalLogFile('Access Granted', `[Node: ${mac}] Matched name description: ${credentialRes.rows[0].holder_name}`);
@@ -1473,9 +1521,10 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, 200, { access: "granted" });
         } else {
           const nameLabel = credentialRes.rows.length > 0 ? credentialRes.rows[0].holder_name : 'Nieznany';
-          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Odmowa: ${nameLabel} [${uid}]`]);
-          writeToLocalLogFile('Access Denied', `[Node: ${mac}] Mismatch signature vector: ${uid}`);
-          return sendJSON(res, 200, { access: "denied" });
+          const reason = scheduleBlocked ? 'poza harmonogramem' : 'niezgodny podpis karty';
+          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Odmowa: ${nameLabel} [${uid}] (${reason})`]);
+          writeToLocalLogFile('Access Denied', `[Node: ${mac}] ${scheduleBlocked ? 'Outside schedule window' : 'Mismatch signature vector'}: ${uid}`);
+          return sendJSON(res, 200, { access: "denied", reason: scheduleBlocked ? 'outside_schedule' : 'no_match' });
         }
       }
 
@@ -1757,10 +1806,27 @@ async function runSchemaMigrations() {
     `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS max_uses INT DEFAULT NULL`,              // NULL = bez limitu
     `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS use_count INT DEFAULT 0`,
     `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS is_guest_code BOOLEAN DEFAULT false`,    // do rozróżnienia w UI
+    // Ten sam harmonogram (dni + okno godzinowe) co dla PINów, teraz też dla kart RFID.
+    // Karty nie mają expires_at/max_uses/is_guest_code — te pola są specyficzne dla PINów
+    // gościnnych i nie mają sensownego odpowiednika dla fizycznej karty.
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS schedule_enabled BOOLEAN DEFAULT false`,
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS schedule_days INT DEFAULT 127`,
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS schedule_start_minutes INT DEFAULT 0`,
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS schedule_end_minutes INT DEFAULT 1440`,
   ];
+  let successCount = 0;
   for (const sql of alters) {
-    await dbPool.query(sql).catch((e) => console.error('[Migration] Failed:', sql, e.message));
+    try {
+      await dbPool.query(sql);
+      successCount++;
+    } catch (e) {
+      // Najczęstsza przyczyna niepowodzenia: użytkownik DB (np. 'admin') nie jest
+      // właścicielem tabeli. Loguj GŁOŚNO do master logu, nie tylko do konsoli,
+      // żeby to nie zniknęło w tle jak poprzednio.
+      writeToLocalLogFile('Core Daemon', `[Migration] BŁĄD: ${e.message} — zapytanie: ${sql.slice(0, 80)}...`);
+    }
   }
+  writeToLocalLogFile('Core Daemon', `[Migration] Zakończono: ${successCount}/${alters.length} instrukcji wykonanych pomyślnie.`);
 }
 runSchemaMigrations();
 
