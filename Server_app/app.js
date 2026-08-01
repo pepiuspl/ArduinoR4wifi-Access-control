@@ -750,6 +750,126 @@ export default function App() {
     );
   };
 
+  // --- Wielu administratorów na jeden zamek: zaproszenie, akceptacja, zarządzanie ---
+  const handleInviteAdmin = (mac, deviceName) => {
+    Alert.prompt(
+      `Zaproś administratora do "${deviceName}"`,
+      'Podaj adres e-mail osoby, którą chcesz zaprosić. Otrzyma kod do wpisania w aplikacji.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        { text: 'Wyślij zaproszenie', onPress: (email) => {
+          if (!email || !email.trim()) return;
+          fetch(`${backendUrl}/api/devices/invite`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+            body: JSON.stringify({ mac, email: email.trim() })
+          })
+            .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+            .then(({ ok, d }) => {
+              if (ok) Alert.alert('Wysłano', `Zaproszenie wysłane na ${email.trim()}.`);
+              else Alert.alert('Błąd', d.error || 'Nie udało się wysłać zaproszenia.');
+            })
+            .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
+        }}
+      ],
+      'plain-text'
+    );
+  };
+
+  const handleAcceptInvite = () => {
+    Alert.prompt(
+      'Mam kod zaproszenia',
+      'Wpisz 6-cyfrowy kod otrzymany e-mailem, aby uzyskać dostęp do cudzej centralki.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        { text: 'Dołącz', onPress: (code) => {
+          if (!code || !code.trim()) return;
+          fetch(`${backendUrl}/api/devices/accept_invite`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+            body: JSON.stringify({ code: code.trim() })
+          })
+            .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+            .then(({ ok, d }) => {
+              if (ok) { Alert.alert('Sukces', 'Masz teraz dostęp do tej centralki.'); fetchStatus(); }
+              else Alert.alert('Błąd', d.error || 'Nieprawidłowy kod.');
+            })
+            .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
+        }}
+      ],
+      'plain-text'
+    );
+  };
+
+  const [sharedAdmins, setSharedAdmins] = useState([]);
+  const [showAdminsModal, setShowAdminsModal] = useState(null); // { mac, name } | null
+
+  // --- Filtrowanie/wyszukiwanie w logach ---
+  const [isLogSearchMode, setIsLogSearchMode] = useState(false);
+  const [logSearchQuery, setLogSearchQuery] = useState('');
+  const [logSearchCategory, setLogSearchCategory] = useState(''); // '' = wszystkie
+  const [logSearchFrom, setLogSearchFrom] = useState('');
+  const [logSearchTo, setLogSearchTo] = useState('');
+  const [logSearchResults, setLogSearchResults] = useState([]);
+  const [logSearchTotal, setLogSearchTotal] = useState(0);
+  const [logSearchLoading, setLogSearchLoading] = useState(false);
+
+  const LOG_CATEGORIES = [
+    { key: '', label: 'Wszystkie', color: '#666' },
+    { key: 'entries', label: '🚪 Wejścia', color: '#81c784' },
+    { key: 'security', label: '⚠️ Bezpieczeństwo', color: '#e57373' },
+    { key: 'provisioning', label: '⚙️ Konfiguracja', color: '#64b5f6' },
+    { key: 'connections', label: '📡 Połączenia', color: '#888' },
+  ];
+
+  const runLogSearch = (append = false) => {
+    setLogSearchLoading(true);
+    const params = new URLSearchParams();
+    if (selectedMac) params.set('mac', selectedMac);
+    if (logSearchQuery.trim()) params.set('q', logSearchQuery.trim());
+    if (logSearchCategory) params.set('category', logSearchCategory);
+    if (logSearchFrom.trim()) params.set('from', logSearchFrom.trim());
+    if (logSearchTo.trim()) params.set('to', logSearchTo.trim());
+    params.set('limit', '50');
+    params.set('offset', append ? String(logSearchResults.length) : '0');
+
+    fetch(`${backendUrl}/api/logs/search?${params.toString()}`, {
+      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+    })
+      .then((res) => res.json())
+      .then((d) => {
+        setLogSearchTotal(d.total || 0);
+        setLogSearchResults(append ? [...logSearchResults, ...(d.logs || [])] : (d.logs || []));
+        setLogSearchLoading(false);
+      })
+      .catch(() => setLogSearchLoading(false));
+  };
+
+  const openAdminsModal = (mac, name) => {
+    setShowAdminsModal({ mac, name });
+    fetch(`${backendUrl}/api/devices/shared_users?mac=${encodeURIComponent(mac)}`, {
+      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+    })
+      .then((res) => res.json())
+      .then((d) => setSharedAdmins(d.admins || []))
+      .catch(() => setSharedAdmins([]));
+  };
+
+  const handleRevokeAdmin = (mac, targetAccountId, email) => {
+    Alert.alert('Odbierz dostęp', `Czy na pewno chcesz odebrać dostęp administratorowi ${email}?`, [
+      { text: 'Anuluj', style: 'cancel' },
+      { text: 'Odbierz', style: 'destructive', onPress: () => {
+        fetch(`${backendUrl}/api/devices/revoke_share`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+          body: JSON.stringify({ mac, accountId: targetAccountId })
+        })
+          .then(() => openAdminsModal(mac, showAdminsModal?.name))
+          .catch(() => Alert.alert('Błąd', 'Nie udało się odebrać dostępu.'));
+      }}
+    ]);
+  };
+
   // --- Sprawdzanie i wykonywanie aktualizacji OTA ---
   const handleCheckUpdate = () => {
     setOtaState('checking');
@@ -1547,10 +1667,88 @@ export default function App() {
 
         {currentScreen === 'system' && (
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
-            <Text style={styles.screenHeaderText}>📋 Dziennik Zdarzeń (Real-Time)</Text>
-            <View style={styles.card}>
-              <ScrollView nestedScrollEnabled style={styles.internalLogBox}>{lockState.logs.map((log, index) => <Text key={index} style={styles.logText}>{log}</Text>)}</ScrollView>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <Text style={styles.screenHeaderText}>📋 {isLogSearchMode ? 'Wyszukiwanie w logach' : 'Dziennik Zdarzeń (Real-Time)'}</Text>
+              <TouchableOpacity onPress={() => { setIsLogSearchMode(!isLogSearchMode); if (!isLogSearchMode) runLogSearch(); }}>
+                <Text style={{ color: '#64b5f6', fontSize: 13, fontWeight: 'bold' }}>{isLogSearchMode ? '⏱ Na żywo' : '🔍 Szukaj'}</Text>
+              </TouchableOpacity>
             </View>
+
+            {!isLogSearchMode && (
+              <View style={styles.card}>
+                <ScrollView nestedScrollEnabled style={styles.internalLogBox}>{lockState.logs.map((log, index) => <Text key={index} style={styles.logText}>{log}</Text>)}</ScrollView>
+              </View>
+            )}
+
+            {isLogSearchMode && (
+              <>
+                <View style={styles.card}>
+                  <TextInput style={styles.inputField} placeholder="Szukaj w treści (np. imię, słowo kluczowe)..."
+                    placeholderTextColor="#555" value={logSearchQuery} onChangeText={setLogSearchQuery}
+                    onSubmitEditing={() => runLogSearch()} />
+
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 12 }}>
+                    {LOG_CATEGORIES.map((cat) => (
+                      <TouchableOpacity
+                        key={cat.key}
+                        onPress={() => setLogSearchCategory(cat.key)}
+                        style={{
+                          paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, marginRight: 8, marginBottom: 8,
+                          backgroundColor: logSearchCategory === cat.key ? cat.color : '#0f0f11',
+                          borderWidth: 1, borderColor: logSearchCategory === cat.key ? cat.color : '#333',
+                        }}
+                      >
+                        <Text style={{ color: logSearchCategory === cat.key ? '#000' : '#aaa', fontSize: 12, fontWeight: 'bold' }}>{cat.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inputLabelText}>Od (RRRR-MM-DD)</Text>
+                      <TextInput style={styles.inputField} placeholder="2026-01-01" placeholderTextColor="#555"
+                        value={logSearchFrom} onChangeText={setLogSearchFrom} maxLength={10} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inputLabelText}>Do (RRRR-MM-DD)</Text>
+                      <TextInput style={styles.inputField} placeholder="2026-12-31" placeholderTextColor="#555"
+                        value={logSearchTo} onChangeText={setLogSearchTo} maxLength={10} />
+                    </View>
+                  </View>
+
+                  <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 4 }]} onPress={() => runLogSearch()}>
+                    <Text style={styles.btnText}>{logSearchLoading ? 'Szukam...' : `🔍 Szukaj${logSearchTotal ? ` (${logSearchTotal} wyników)` : ''}`}</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.card}>
+                  {logSearchResults.length === 0 && !logSearchLoading ? (
+                    <Text style={{ color: '#666', fontSize: 13, textAlign: 'center', paddingVertical: 20 }}>
+                      Brak wyników — dostosuj filtry i spróbuj ponownie.
+                    </Text>
+                  ) : (
+                    logSearchResults.map((log, idx) => {
+                      const catInfo = LOG_CATEGORIES.find(c => c.key === log.category) || { color: '#666', label: log.category };
+                      const timeStr = new Date(log.time).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                      return (
+                        <View key={idx} style={{ paddingVertical: 8, borderBottomWidth: idx < logSearchResults.length - 1 ? 1 : 0, borderBottomColor: '#222' }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 2 }}>
+                            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: catInfo.color, marginRight: 6 }} />
+                            <Text style={{ color: '#888', fontSize: 11 }}>{timeStr}</Text>
+                          </View>
+                          <Text style={{ color: '#fff', fontSize: 13 }}>{log.message}</Text>
+                        </View>
+                      );
+                    })
+                  )}
+                  {logSearchResults.length > 0 && logSearchResults.length < logSearchTotal && (
+                    <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12, backgroundColor: '#333' }]} onPress={() => runLogSearch(true)}>
+                      <Text style={styles.btnText}>{logSearchLoading ? 'Ładowanie...' : `Załaduj więcej (${logSearchResults.length}/${logSearchTotal})`}</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </>
+            )}
           </ScrollView>
         )}
 
@@ -1848,21 +2046,72 @@ export default function App() {
               <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17, marginBottom: 16 }}>Twoje centralki</Text>
               <ScrollView>
                 {devices.map((d) => (
-                  <View key={d.mac} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: d.mac === selectedMac ? '#1a3a5c' : '#0f0f11', borderRadius: 10, padding: 12, marginBottom: 8 }}>
-                    <TouchableOpacity style={{ flex: 1 }} onPress={() => { setSelectedMac(d.mac); setShowDeviceSwitcher(false); }}>
-                      <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 15 }}>{d.mac === selectedMac ? '✓ ' : ''}{d.name}</Text>
-                      <Text style={{ color: d.online ? '#81c784' : '#e57373', fontSize: 12, marginTop: 2 }}>{d.online ? '● Online' : '● Offline'} · {d.mode || '—'}</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRenameDevice(d.mac, d.name)}>
-                      <Text style={{ color: '#64b5f6', fontSize: 13 }}>✏️</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRemoveDevice(d.mac, d.name)}>
-                      <Text style={{ color: '#e57373', fontSize: 13 }}>🗑️</Text>
+                  <View key={d.mac} style={{ backgroundColor: d.mac === selectedMac ? '#1a3a5c' : '#0f0f11', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <TouchableOpacity style={{ flex: 1 }} onPress={() => { setSelectedMac(d.mac); setShowDeviceSwitcher(false); }}>
+                        <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 15 }}>{d.mac === selectedMac ? '✓ ' : ''}{d.name}</Text>
+                        <Text style={{ color: d.online ? '#81c784' : '#e57373', fontSize: 12, marginTop: 2 }}>
+                          {d.online ? '● Online' : '● Offline'} · {d.mode || '—'}{!d.isOwner ? ' · Udostępnione Ci' : ''}
+                        </Text>
+                      </TouchableOpacity>
+                      {d.isOwner && (
+                        <>
+                          <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRenameDevice(d.mac, d.name)}>
+                            <Text style={{ color: '#64b5f6', fontSize: 13 }}>✏️</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRemoveDevice(d.mac, d.name)}>
+                            <Text style={{ color: '#e57373', fontSize: 13 }}>🗑️</Text>
+                          </TouchableOpacity>
+                        </>
+                      )}
+                    </View>
+                    {d.isOwner && (
+                      <View style={{ flexDirection: 'row', marginTop: 8, gap: 8 }}>
+                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8, backgroundColor: '#1a3a5c' }]} onPress={() => handleInviteAdmin(d.mac, d.name)}>
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>👥 Zaproś administratora</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8, backgroundColor: '#333' }]} onPress={() => openAdminsModal(d.mac, d.name)}>
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>Zarządzaj</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+                ))}
+              </ScrollView>
+              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12, backgroundColor: '#1a3a5c' }]} onPress={() => { setShowDeviceSwitcher(false); handleAcceptInvite(); }}>
+                <Text style={styles.btnText}>🔑 Mam kod zaproszenia</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 8 }]} onPress={() => setShowDeviceSwitcher(false)}>
+                <Text style={styles.btnText}>Zamknij</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {/* ── MODAL: ZARZĄDZANIE WSPÓŁADMINISTRATORAMI (tylko właściciel) ── */}
+        {showAdminsModal !== null && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', alignItems: 'center', zIndex: 999 }}>
+            <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20, width: '85%', maxHeight: '70%' }}>
+              <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17, marginBottom: 4 }}>Administratorzy</Text>
+              <Text style={{ color: '#888', fontSize: 12, marginBottom: 16 }}>{showAdminsModal.name}</Text>
+              <ScrollView>
+                {sharedAdmins.length === 0 ? (
+                  <Text style={{ color: '#666', fontSize: 13, textAlign: 'center', paddingVertical: 20 }}>
+                    Nikt jeszcze nie ma współdostępu do tej centralki.
+                  </Text>
+                ) : sharedAdmins.map((a) => (
+                  <View key={a.accountId} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#0f0f11', borderRadius: 10, padding: 12, marginBottom: 8 }}>
+                    <Text style={{ color: '#fff', fontSize: 14, flex: 1 }}>{a.email}</Text>
+                    <TouchableOpacity onPress={() => handleRevokeAdmin(showAdminsModal.mac, a.accountId, a.email)}>
+                      <Text style={{ color: '#e57373', fontSize: 12, fontWeight: 'bold' }}>Odbierz dostęp</Text>
                     </TouchableOpacity>
                   </View>
                 ))}
               </ScrollView>
-              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12 }]} onPress={() => setShowDeviceSwitcher(false)}>
+              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12, backgroundColor: '#1a3a5c' }]} onPress={() => handleInviteAdmin(showAdminsModal.mac, showAdminsModal.name)}>
+                <Text style={styles.btnText}>👥 Zaproś kolejnego</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 8 }]} onPress={() => setShowAdminsModal(null)}>
                 <Text style={styles.btnText}>Zamknij</Text>
               </TouchableOpacity>
             </View>

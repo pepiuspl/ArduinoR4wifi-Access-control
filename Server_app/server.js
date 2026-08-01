@@ -83,6 +83,7 @@ function isOriginAllowed(origin) {
 // Forgot-password: max 5 requests per 60 min per IP
 const loginAttempts   = {};   // { ip: { count, resetAt } }
 const forgotAttempts  = {};
+const inviteAttempts  = {};
 
 function checkRateLimit(store, ip, maxHits, windowMs) {
   const now = Date.now();
@@ -177,15 +178,23 @@ function writeToLocalLogFile(module, message) {
 // W przeciwnym razie (stare wywołania z aplikacji bez wsparcia multi-device)
 // zachowujemy pełną wsteczną kompatybilność, wracając do pierwszego
 // urządzenia na koncie - dokładnie tak jak działało to wcześniej.
+// Konto ma dostęp do urządzenia jeśli jest jego WŁAŚCICIELEM (devices.account_id)
+// LUB zostało ZAPROSZONE jako współadministrator (device_shares). Ten warunek
+// jest wklejany do każdego zapytania poniżej zamiast prostego "account_id = $1",
+// żeby zaproszeni administratorzy mieli te same możliwości odblokowywania,
+// zarządzania PIN-ami/kartami itd. co właściciel.
+const DEVICE_ACCESS_CONDITION = `(d.account_id = $1 OR d.mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1))`;
+
 async function resolveTargetDevice(accountId, requestedMac, columns = 'mac_address, last_known_ip') {
+  const cols = columns.split(',').map(c => `d.${c.trim()}`).join(', ');
   if (requestedMac) {
     const exact = await dbPool.query(
-      `SELECT ${columns} FROM devices WHERE account_id = $1 AND mac_address = $2 LIMIT 1`,
+      `SELECT ${cols} FROM devices d WHERE ${DEVICE_ACCESS_CONDITION} AND d.mac_address = $2 LIMIT 1`,
       [accountId, requestedMac.toUpperCase()]
     );
     if (exact.rows.length > 0) return exact;
   }
-  return dbPool.query(`SELECT ${columns} FROM devices WHERE account_id = $1 ORDER BY id ASC LIMIT 1`, [accountId]);
+  return dbPool.query(`SELECT ${cols} FROM devices d WHERE ${DEVICE_ACCESS_CONDITION} ORDER BY d.mac_address ASC LIMIT 1`, [accountId]);
 }
 
 function getFactoryAdminPassword(mac) {
@@ -589,7 +598,13 @@ const server = http.createServer(async (req, res) => {
 
         const appAccountContext = { email: accountsRes.rows[0].email };
 
-        const devicesRes = await dbPool.query('SELECT d.* FROM devices d WHERE d.account_id = $1 ORDER BY d.id ASC', [accountId]);
+        // Widoczne są zarówno urządzenia własne, jak i te udostępnione przez
+        // innego właściciela (wielu administratorów na jeden zamek).
+        const devicesRes = await dbPool.query(
+          `SELECT d.*, (d.account_id = $1) AS is_owner
+           FROM devices d
+           WHERE d.account_id = $1 OR d.mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1)
+           ORDER BY d.mac_address ASC`, [accountId]);
         if (devicesRes.rows.length === 0) {
           return sendJSON(res, 200, { auth: true, account: appAccountContext, mode: 'Czuwanie', lock: false, total: 0, users: [], logs: [], devices: [] });
         }
@@ -600,6 +615,7 @@ const server = http.createServer(async (req, res) => {
           name: d.device_name || d.mac_address,
           mode: d.operational_mode,
           firmwareVersion: d.firmware_version,
+          isOwner: d.is_owner,
         }));
 
         // Wybór aktywnego urządzenia: ?mac= z zapytania, jeśli należy do
@@ -826,15 +842,89 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       // LISTA URZĄDZEŃ NA KONCIE (multi-device)
       // =========================================================================
+      // =========================================================================
+      // WYSZUKIWANIE/FILTROWANIE LOGÓW — GET z parametrami:
+      //   mac      — konkretne urządzenie (opcjonalnie, domyślnie wszystkie widoczne dla konta)
+      //   category — entries | security | connections | provisioning | updates | mail
+      //   q        — szukany tekst (dopasowanie częściowe, bez uwzględniania wielkości liter)
+      //   from, to — zakres dat w formacie ISO (np. 2026-07-01)
+      //   limit, offset — paginacja (domyślnie 50 / 0, max limit 200)
+      // Widzi tylko zdarzenia z urządzeń, do których konto ma dostęp (właściciel LUB współadmin).
+      // =========================================================================
+      if (pathname === '/api/logs/search' && req.method === 'GET') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+
+        const params = [accountId];
+        let where = `mac_address IN (
+          SELECT mac_address FROM devices WHERE account_id = $1
+          UNION
+          SELECT mac_address FROM device_shares WHERE account_id = $1
+        )`;
+
+        if (query.mac) {
+          params.push(query.mac.toUpperCase());
+          where += ` AND mac_address = $${params.length}`;
+        }
+        if (query.category) {
+          params.push(query.category);
+          where += ` AND category = $${params.length}`;
+        }
+        if (query.q) {
+          params.push(`%${query.q}%`);
+          where += ` AND message ILIKE $${params.length}`;
+        }
+        if (query.from) {
+          params.push(query.from);
+          where += ` AND event_time >= $${params.length}`;
+        }
+        if (query.to) {
+          params.push(query.to);
+          where += ` AND event_time <= $${params.length}::date + INTERVAL '1 day'`;
+        }
+
+        const limit = Math.min(parseInt(query.limit) || 50, 200);
+        const offset = parseInt(query.offset) || 0;
+        params.push(limit, offset);
+
+        const rows = await dbPool.query(
+          `SELECT mac_address, event_time, message, category FROM system_events
+           WHERE ${where}
+           ORDER BY event_time DESC
+           LIMIT $${params.length - 1} OFFSET $${params.length}`,
+          params
+        );
+
+        const countRes = await dbPool.query(
+          `SELECT COUNT(*) FROM system_events WHERE ${where}`,
+          params.slice(0, -2)
+        );
+
+        return sendJSON(res, 200, {
+          logs: rows.rows.map(r => ({
+            mac: r.mac_address,
+            time: r.event_time,
+            message: r.message,
+            category: r.category || 'inne',
+          })),
+          total: parseInt(countRes.rows[0].count),
+          limit, offset,
+        });
+      }
+
       if (pathname === '/api/devices/list' && req.method === 'GET') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const devicesRes = await dbPool.query('SELECT mac_address, device_name, operational_mode, firmware_version, last_heartbeat FROM devices WHERE account_id = $1 ORDER BY id ASC', [accountId]);
+        const devicesRes = await dbPool.query(
+          `SELECT mac_address, device_name, operational_mode, firmware_version, last_heartbeat, (account_id = $1) AS is_owner
+           FROM devices
+           WHERE account_id = $1 OR mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1)
+           ORDER BY mac_address ASC`, [accountId]);
         const devices = devicesRes.rows.map(d => ({
           mac: d.mac_address,
           name: d.device_name || d.mac_address,
           mode: d.operational_mode,
           firmwareVersion: d.firmware_version,
           online: d.last_heartbeat && (Date.now() - new Date(d.last_heartbeat).getTime()) < 35000,
+          isOwner: d.is_owner,
         }));
         return sendJSON(res, 200, { devices });
       }
@@ -871,6 +961,128 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { status: "ok" });
       }
 
+      // =========================================================================
+      // ZAPROSZENIE WSPÓŁADMINISTRATORA (wielu administratorów na jeden zamek)
+      // Tylko WŁAŚCICIEL urządzenia (devices.account_id) może zapraszać.
+      // POST { mac, email }
+      // =========================================================================
+      if (pathname === '/api/devices/invite' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const waitSec = checkRateLimit(inviteAttempts, cleanIp, 10, 60 * 60 * 1000);
+        if (waitSec > 0) {
+          res.setHeader('Retry-After', String(waitSec));
+          return sendJSON(res, 429, { error: `Zbyt wiele zaproszeń. Spróbuj ponownie za ${Math.ceil(waitSec/60)} min.` });
+        }
+
+        const { mac, email } = body;
+        const cleanEmail = (email || '').trim().toLowerCase();
+        if (!mac || !cleanEmail) return sendJSON(res, 400, { error: 'Podaj adres e-mail' });
+
+        // Tylko właściciel może zapraszać — celowo NIE przez resolveTargetDevice
+        // (który wpuściłby też już zaproszonych administratorów).
+        const ownedDevice = await dbPool.query(
+          'SELECT mac_address, device_name FROM devices WHERE mac_address = $1 AND account_id = $2',
+          [mac.toUpperCase(), accountId]
+        );
+        if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może zapraszać administratorów.' });
+
+        const inviteCode = Math.floor(100000 + Math.random() * 900000).toString();
+        await dbPool.query(
+          `INSERT INTO device_invites (mac_address, invited_email, invite_code, invited_by, expires_at)
+           VALUES ($1, $2, $3, $4, NOW() + INTERVAL '48 hours')`,
+          [mac.toUpperCase(), cleanEmail, inviteCode, accountId]
+        );
+
+        const deviceName = ownedDevice.rows[0].device_name || mac.toUpperCase();
+        const inviteMailManifest = {
+          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          to: cleanEmail,
+          subject: `Zaproszenie do współadministrowania: ${deviceName}`,
+          html: `<h3>Zostałeś zaproszony do współadministrowania centralką „${deviceName}”.</h3>
+                 <p>Otwórz aplikację CTRLABLE, zaloguj się (lub załóż konto tym adresem e-mail),
+                 a następnie w ustawieniach wprowadź poniższy kod:</p>
+                 <h1 style="color:#0284c7; font-family:monospace; letter-spacing:2px;">${inviteCode}</h1>
+                 <p>Kod jest ważny przez 48 godzin.</p>`
+        };
+        mailTransport.sendMail(inviteMailManifest, (mailError) => {
+          if (mailError) writeToLocalLogFile('Błąd serwera SMTP', mailError.message);
+        });
+
+        writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Invite sent to ${cleanEmail} by account ${accountId}.`);
+        return sendJSON(res, 200, { status: 'ok' });
+      }
+
+      // =========================================================================
+      // AKCEPTACJA ZAPROSZENIA — POST { code }, wymaga zalogowania
+      // =========================================================================
+      if (pathname === '/api/devices/accept_invite' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { code } = body;
+        if (!code) return sendJSON(res, 400, { error: 'Podaj kod zaproszenia' });
+
+        const accRes = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
+        if (accRes.rows.length === 0) return sendJSON(res, 404, { error: 'Konto nie istnieje' });
+        const myEmail = accRes.rows[0].email.toLowerCase();
+
+        const inviteRes = await dbPool.query(
+          `SELECT id, mac_address, invited_email FROM device_invites
+           WHERE invite_code = $1 AND used = false AND expires_at > NOW()`,
+          [String(code).trim()]
+        );
+        if (inviteRes.rows.length === 0) return sendJSON(res, 400, { error: 'Kod nieprawidłowy lub wygasł.' });
+
+        const invite = inviteRes.rows[0];
+        if (invite.invited_email.toLowerCase() !== myEmail) {
+          return sendJSON(res, 403, { error: 'To zaproszenie zostało wysłane na inny adres e-mail.' });
+        }
+
+        await dbPool.query(
+          `INSERT INTO device_shares (mac_address, account_id, invited_by)
+           SELECT $1, $2, invited_by FROM device_invites WHERE id = $3
+           ON CONFLICT (mac_address, account_id) DO NOTHING`,
+          [invite.mac_address, accountId, invite.id]
+        );
+        await dbPool.query('UPDATE device_invites SET used = true WHERE id = $1', [invite.id]);
+
+        writeToLocalLogFile('Provisioning', `[Node: ${invite.mac_address}] Account ${accountId} accepted invite, now co-admin.`);
+        return sendJSON(res, 200, { status: 'ok', mac: invite.mac_address });
+      }
+
+      // =========================================================================
+      // LISTA WSPÓŁADMINISTRATORÓW — GET ?mac=X, tylko właściciel
+      // =========================================================================
+      if (pathname === '/api/devices/shared_users' && req.method === 'GET') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const mac = (query.mac || '').toUpperCase();
+        if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
+
+        const ownedDevice = await dbPool.query('SELECT 1 FROM devices WHERE mac_address = $1 AND account_id = $2', [mac, accountId]);
+        if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel widzi listę administratorów.' });
+
+        const sharesRes = await dbPool.query(
+          `SELECT ds.account_id, a.email, ds.created_at
+           FROM device_shares ds JOIN accounts a ON a.id = ds.account_id
+           WHERE ds.mac_address = $1 ORDER BY ds.created_at ASC`, [mac]
+        );
+        return sendJSON(res, 200, { admins: sharesRes.rows.map(r => ({ accountId: r.account_id, email: r.email, since: r.created_at })) });
+      }
+
+      // =========================================================================
+      // ODEBRANIE DOSTĘPU WSPÓŁADMINISTRATOROWI — POST { mac, accountId }, tylko właściciel
+      // =========================================================================
+      if (pathname === '/api/devices/revoke_share' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { mac, accountId: targetAccountId } = body;
+        if (!mac || !targetAccountId) return sendJSON(res, 400, { error: 'Missing mac or accountId' });
+
+        const ownedDevice = await dbPool.query('SELECT 1 FROM devices WHERE mac_address = $1 AND account_id = $2', [mac.toUpperCase(), accountId]);
+        if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może odbierać dostęp.' });
+
+        await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1 AND account_id = $2', [mac.toUpperCase(), targetAccountId]);
+        writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Access revoked for account ${targetAccountId} by owner ${accountId}.`);
+        return sendJSON(res, 200, { status: 'ok' });
+      }
+
       if (pathname === '/api/unlock' && req.method === 'GET') {
         const accountId = requireAuth(req, res); if (!accountId) return;
         const devRes = await resolveTargetDevice(accountId, query.mac, 'mac_address');
@@ -887,8 +1099,19 @@ const server = http.createServer(async (req, res) => {
           // faktycznie się fizycznie odblokuje.
           pendingUnlocks[targetMac] = Date.now();
 
-          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Zdalne wywołanie Mobile']);
+          await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [targetMac, 'Zdalne wywołanie Mobile', 'entries']);
           writeToLocalLogFile('API Control Command', `[Node: ${targetMac}] Dispatched remote unlock trigger.`);
+
+          // Powiadomienie push o zdalnym odblokowaniu z aplikacji — przydatne
+          // gdy w przyszłości konto będzie mieć więcej niż jednego administratora,
+          // oraz jako potwierdzenie/log aktywności dla samego właściciela.
+          dbPool.query('SELECT push_token, push_entries FROM accounts WHERE id = $1', [accountId])
+            .then((r) => {
+              if (r.rows.length > 0 && r.rows[0].push_token && r.rows[0].push_entries !== false) {
+                sendPushNotification(r.rows[0].push_token, "Drzwi odblokowane", "Zdalne odblokowanie z aplikacji mobilnej.");
+              }
+            })
+            .catch(() => {});
 
           // Bezpiecznik: jeśli sprzęt jest offline i nigdy nie odpowie, kolejka
           // nie powinna zostać aktywna w nieskończoność.
@@ -927,7 +1150,7 @@ const server = http.createServer(async (req, res) => {
         const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
         const targetMac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
 
-        await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, 'Naciśnięto przycisk fizyczny']);
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [targetMac, 'Naciśnięto przycisk fizyczny', 'entries']);
         writeToLocalLogFile('Hardware Handshake', `[Node: ${targetMac}] Local physical click recorded quietly.`);
 
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
@@ -951,8 +1174,8 @@ const server = http.createServer(async (req, res) => {
         writeToLocalLogFile('Hardware Remote Log', `[Node: ${eventMac}] ${msg}`);
         if (msg.length > 0) {
           await dbPool.query(
-            'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
-            [eventMac, msg]
+            'INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+            [eventMac, msg, 'connections']
           ).catch(() => {});
         }
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
@@ -1274,8 +1497,8 @@ const server = http.createServer(async (req, res) => {
         // Log to database as a system event (appears in app logs)
         try {
           await dbPool.query(
-            'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
-            [mac, `${severity}: ${detail}`]
+            'INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+            [mac, `${severity}: ${detail}`, 'security']
           );
         } catch (_) {}
 
@@ -1440,7 +1663,7 @@ const server = http.createServer(async (req, res) => {
         const targetMac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
 
         if (rawTelemetryLogString.length > 0) {
-          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [targetMac, rawTelemetryLogString]);
+          await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [targetMac, rawTelemetryLogString, 'connections']);
           writeToLocalLogFile('Hardware Ingest', `[Node: ${targetMac}] Telemetry: "${rawTelemetryLogString}"`);
         }
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
@@ -1475,7 +1698,7 @@ const server = http.createServer(async (req, res) => {
 
         if (credentialRes.rows.length > 0 && credentialRes.rows[0].is_active && !scheduleBlocked) {
           unlockQueues[mac] = true;
-          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Otwarto: ${credentialRes.rows[0].holder_name}`]);
+          await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [mac, `Otwarto: ${credentialRes.rows[0].holder_name}`, 'entries']);
           writeToLocalLogFile('Access Granted', `[Node: ${mac}] Matched name description: ${credentialRes.rows[0].holder_name}`);
 
           // SILNIK POWIADOMIEŃ PUSH: Sprawdzanie tokenu push i ustawień powiadomień dla właściciela konta
@@ -1522,7 +1745,7 @@ const server = http.createServer(async (req, res) => {
         } else {
           const nameLabel = credentialRes.rows.length > 0 ? credentialRes.rows[0].holder_name : 'Nieznany';
           const reason = scheduleBlocked ? 'poza harmonogramem' : 'niezgodny podpis karty';
-          await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Odmowa: ${nameLabel} [${uid}] (${reason})`]);
+          await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [mac, `Odmowa: ${nameLabel} [${uid}] (${reason})`, 'security']);
           writeToLocalLogFile('Access Denied', `[Node: ${mac}] ${scheduleBlocked ? 'Outside schedule window' : 'Mismatch signature vector'}: ${uid}`);
           return sendJSON(res, 200, { access: "denied", reason: scheduleBlocked ? 'outside_schedule' : 'no_match' });
         }
@@ -1547,7 +1770,7 @@ const server = http.createServer(async (req, res) => {
           [mac, uid, pendingLabel, slot]
         );
 
-        await dbPool.query('INSERT INTO system_events (mac_address, message) VALUES ($1, $2)', [mac, `Przypisano: ${pendingLabel} [${uid}]`]);
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [mac, `Przypisano: ${pendingLabel} [${uid}]`, 'provisioning']);
         writeToLocalLogFile('Hardware Registration', `[Node: ${mac}] Mapped card holder row to: ${pendingLabel} [${uid}] (EEPROM Slot: ${slot})`);
         delete learningQueues[mac];
         return sendJSON(res, 200, { status: "registered" });
@@ -1603,13 +1826,13 @@ const server = http.createServer(async (req, res) => {
           // so keypad auth should too.
           let deviceMac = mac;
           let devRes = await dbPool.query(
-            `SELECT a.id, a.push_token, a.push_alarms
+            `SELECT a.id, a.push_token, a.push_alarms, a.push_entries
              FROM accounts a JOIN devices d ON d.account_id = a.id
              WHERE d.mac_address = $1 LIMIT 1`, [mac]);
           if (devRes.rows.length === 0 && mac.includes(':')) {
             const reversedMac = mac.split(':').reverse().join(':');
             const revRes = await dbPool.query(
-              `SELECT a.id, a.push_token, a.push_alarms
+              `SELECT a.id, a.push_token, a.push_alarms, a.push_entries
                FROM accounts a JOIN devices d ON d.account_id = a.id
                WHERE d.mac_address = $1 LIMIT 1`, [reversedMac]);
             if (revRes.rows.length > 0) {
@@ -1665,15 +1888,24 @@ const server = http.createServer(async (req, res) => {
             }
             writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN "${p.name}" GRANTED.`);
             await dbPool.query(
-              'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
-              [deviceMac, `Keypad PIN "${p.name}" - dostep przyznany`]).catch(() => {});
+              'INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+              [deviceMac, `Keypad PIN "${p.name}" - dostep przyznany`, 'entries']).catch(() => {});
+            // Powiadomienie push o udanym wejściu — ten sam wzorzec co przy skanie karty RFID,
+            // korzysta z push_entries (powiadomienia o wejściach), nie push_alarms (te są dla
+            // zdarzeń bezpieczeństwa jak błędny PIN czy sabotaż).
+            if (devRes.rows.length > 0) {
+              const acc = devRes.rows[0];
+              if (acc.push_token && acc.push_entries !== false) {
+                sendPushNotification(acc.push_token, "Ktoś wszedł do domu", `${p.name} otworzył(a) drzwi kodem PIN.`);
+              }
+            }
             return sendJSON(res, 200, { granted: true, name: p.name });
           }
 
           writeToLocalLogFile('Keypad', `[Node: ${deviceMac}] PIN DENIED (${keypadAttempts[mac].count}/5).`);
           await dbPool.query(
-            'INSERT INTO system_events (mac_address, message) VALUES ($1, $2)',
-            [deviceMac, `Keypad PIN - dostep odrzucony (${keypadAttempts[mac].count}/5)`]).catch(() => {});
+            'INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+            [deviceMac, `Keypad PIN - dostep odrzucony (${keypadAttempts[mac].count}/5)`, 'security']).catch(() => {});
           if (push_token && push_alarms !== false)
             sendPushNotification(push_token, '⚠️ Błędny PIN na klawiaturze',
               `Nieprawidlowa proba PIN z urzadzenia ${deviceMac}`);
@@ -1813,9 +2045,43 @@ async function runSchemaMigrations() {
     `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS schedule_days INT DEFAULT 127`,
     `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS schedule_start_minutes INT DEFAULT 0`,
     `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS schedule_end_minutes INT DEFAULT 1440`,
+    // Kategoria zdarzenia (entries/security/connections/provisioning) — pozwala na
+    // filtrowanie logów w aplikacji bez konieczności parsowania treści wiadomości.
+    // Stare wpisy sprzed tej migracji będą miały category = NULL i pokażą się
+    // jako "Inne" w filtrach — to nie jest błąd, tylko naturalna konsekwencja
+    // dodania kolumny do istniejącej tabeli z danymi.
+    `ALTER TABLE system_events ADD COLUMN IF NOT EXISTS category VARCHAR(20) DEFAULT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_system_events_category ON system_events(category)`,
+    `CREATE INDEX IF NOT EXISTS idx_system_events_event_time ON system_events(event_time)`,
   ];
+  // Wielu administratorów na jedno urządzenie: konto-właściciel (devices.account_id)
+  // pozostaje jedynym uprawnionym do usuwania/zmiany WiFi/zapraszania innych,
+  // natomiast zaproszeni administratorzy (device_shares) mogą odblokowywać,
+  // zarządzać PIN-ami/kartami i widzieć logi — dokładnie jak właściciel,
+  // ale bez uprawnień "właścicielskich".
+  const creates = [
+    `CREATE TABLE IF NOT EXISTS device_shares (
+       id SERIAL PRIMARY KEY,
+       mac_address VARCHAR(17) NOT NULL REFERENCES devices(mac_address) ON DELETE CASCADE,
+       account_id INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+       invited_by INT REFERENCES accounts(id),
+       created_at TIMESTAMP DEFAULT NOW(),
+       UNIQUE(mac_address, account_id)
+     )`,
+    `CREATE TABLE IF NOT EXISTS device_invites (
+       id SERIAL PRIMARY KEY,
+       mac_address VARCHAR(17) NOT NULL REFERENCES devices(mac_address) ON DELETE CASCADE,
+       invited_email VARCHAR(255) NOT NULL,
+       invite_code VARCHAR(10) NOT NULL,
+       invited_by INT NOT NULL REFERENCES accounts(id),
+       created_at TIMESTAMP DEFAULT NOW(),
+       expires_at TIMESTAMP NOT NULL,
+       used BOOLEAN DEFAULT false
+     )`,
+  ];
+
   let successCount = 0;
-  for (const sql of alters) {
+  for (const sql of [...alters, ...creates]) {
     try {
       await dbPool.query(sql);
       successCount++;
@@ -1826,7 +2092,7 @@ async function runSchemaMigrations() {
       writeToLocalLogFile('Core Daemon', `[Migration] BŁĄD: ${e.message} — zapytanie: ${sql.slice(0, 80)}...`);
     }
   }
-  writeToLocalLogFile('Core Daemon', `[Migration] Zakończono: ${successCount}/${alters.length} instrukcji wykonanych pomyślnie.`);
+  writeToLocalLogFile('Core Daemon', `[Migration] Zakończono: ${successCount}/${alters.length + creates.length} instrukcji wykonanych pomyślnie.`);
 }
 runSchemaMigrations();
 
