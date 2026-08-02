@@ -597,11 +597,16 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  digitalWrite(RELAY_PIN, LOW);   // ten modul: LOW zalacza przekaznik -> odblokowuje
+  // Ten modul: floating (INPUT, wysoka impedancja) odblokowuje zamek.
+  // Zarowno HIGH jak i LOW aktywnie sterowane BLOKUJA - tylko brak
+  // zdefiniowanego sygnalu (floating) zwalnia przekaznik.
+  pinMode(RELAY_PIN, INPUT);
 }
 
 void relayDeactivate() {
-  digitalWrite(RELAY_PIN, HIGH);  // ten modul: HIGH zwalnia przekaznik -> blokuje
+  // HIGH (3.3V) aktywnie sterowane blokuje zamek - stabilny, zdefiniowany stan.
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
 }
 
 void openDoor(String source) { 
@@ -1398,7 +1403,7 @@ void checkKeypad() {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH);  // natychmiastowe zwolnienie przekaznika -- zablokowane od startu
+  digitalWrite(RELAY_PIN, HIGH);  // natychmiastowy stan HIGH -- zablokowane od startu (bezpieczny stan domyslny)
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
