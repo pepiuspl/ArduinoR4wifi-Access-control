@@ -597,6 +597,7 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
+  sendRemoteLog("DBG: relayActivate() wywolane - ustawiam INPUT (floating)");  // TYMCZASOWE
   // Ten modul: floating (INPUT, wysoka impedancja) odblokowuje zamek.
   // Zarowno HIGH jak i LOW aktywnie sterowane BLOKUJA - tylko brak
   // zdefiniowanego sygnalu (floating) zwalnia przekaznik.
@@ -604,6 +605,7 @@ void relayActivate() {
 }
 
 void relayDeactivate() {
+  sendRemoteLog("DBG: relayDeactivate() wywolane - ustawiam OUTPUT HIGH");  // TYMCZASOWE
   // HIGH (3.3V) aktywnie sterowane blokuje zamek - stabilny, zdefiniowany stan.
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
