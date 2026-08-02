@@ -1171,11 +1171,35 @@ const server = http.createServer(async (req, res) => {
             if (revDev.rows.length > 0) eventMac = reversedMac;
           }
         }
+        // Pełny, techniczny komunikat (rozmiar pliku, nagłówki, transmisja blokowa
+        // itd.) zawsze trafia do pliku logów na dysku — do debugowania.
         writeToLocalLogFile('Hardware Remote Log', `[Node: ${eventMac}] ${msg}`);
-        if (msg.length > 0) {
+
+        // Do bazy widocznej w aplikacji klienta trafiają TYLKO uproszczone,
+        // nietechniczne wersje komunikatów aktualizacji (bez słowa "OTA",
+        // bez rozmiaru pliku, bez szczegółów transmisji). Pośrednie etapy
+        // (nagłówki przeczytane, zakończono pobieranie) są celowo pomijane —
+        // klient widzi tylko 3 wpisy na cały cykl: start, w trakcie, sukces/błąd.
+        let clientMessage = null;
+        if (/\[OTA PULL\] Proba polaczenia/i.test(msg)) {
+          clientMessage = 'Próba nawiązania połączenia z serwerem w celu pobrania aktualizacji.';
+        } else if (/\[OTA PULL\] Start szybkiej transmisji/i.test(msg)) {
+          clientMessage = 'Aktualizacja w toku (wgrywanie pliku)...';
+        } else if (/\[OTA PULL SUCCESS\]/i.test(msg)) {
+          clientMessage = 'Aktualizacja zakończona pomyślnie ✅';
+        } else if (/\[OTA PULL ERR\]/i.test(msg)) {
+          clientMessage = 'Aktualizacja nie powiodła się. Spróbuj ponownie.';
+        } else if (!/\[OTA/i.test(msg)) {
+          // Komunikat spoza rodziny OTA (inna telemetria) — zapisujemy bez zmian.
+          clientMessage = msg;
+        }
+        // Pośrednie etapy OTA ("Naglowki przeczytane", "Zakonczono pobieranie")
+        // mają clientMessage === null i celowo NIE trafiają do system_events.
+
+        if (clientMessage) {
           await dbPool.query(
             'INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
-            [eventMac, msg, 'connections']
+            [eventMac, clientMessage, 'connections']
           ).catch(() => {});
         }
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });

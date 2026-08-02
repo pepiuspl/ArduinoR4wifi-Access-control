@@ -65,7 +65,7 @@ function buildLocalRequestUrl(endpoint, payload, adminPass) {
 }
 
 export default function App() {
-  let [backendUrl, setBackendUrl] = useState('http://192.168.0.199:3000');
+  let [backendUrl, setBackendUrl] = useState('https://node.ctrlable.pl');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [accountId, setAccountId] = useState(null);    // kept for local-mode compat
@@ -819,7 +819,7 @@ export default function App() {
     { key: 'entries', label: '🚪 Wejścia', color: '#81c784' },
     { key: 'security', label: '⚠️ Bezpieczeństwo', color: '#e57373' },
     { key: 'provisioning', label: '⚙️ Konfiguracja', color: '#64b5f6' },
-    { key: 'connections', label: '📡 Połączenia', color: '#888' },
+    { key: 'connections', label: '🔄 Aktualizacje', color: '#ffb300' }, // wyraźnie inny odcień niż szary "brak kategorii"
   ];
 
   const runLogSearch = (append = false) => {
