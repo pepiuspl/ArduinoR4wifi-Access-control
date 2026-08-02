@@ -19,6 +19,7 @@ unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
 int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
+unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane wartoscia z serwera przy kazdym pollu
 const char* app_version = "v3.0.1";
 
 struct User { 
@@ -596,17 +597,17 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  digitalWrite(RELAY_PIN, HIGH);  // new module: HIGH energizes -> unlocks
+  digitalWrite(RELAY_PIN, LOW);   // ten modul: LOW zalacza przekaznik -> odblokowuje
 }
 
 void relayDeactivate() {
-  digitalWrite(RELAY_PIN, LOW);   // new module: LOW deenergizes -> locks
+  digitalWrite(RELAY_PIN, HIGH);  // ten modul: HIGH zwalnia przekaznik -> blokuje
 }
 
 void openDoor(String source) { 
   doorOpen = true;  
   globalAnimFrame = 0;  
-  accessEndTime = millis() + 3000;
+  accessEndTime = millis() + autoLockDelayMs;
   globalDisplayInfo = source; 
   relayActivate();
   digitalWrite(LED_GREEN, LOW); 
@@ -1085,6 +1086,19 @@ void executeCloudSynchronization() {
     }
   }
 
+  // Konfigurowalne opoznienie auto-blokady - odczytywane z kazdej odpowiedzi
+  // pollu, zeby zmiana w aplikacji dzialala natychmiast, bez restartu urzadzenia.
+  int autoLockIdx = payloadResponse.indexOf("\"auto_lock_delay\":");
+  if (autoLockIdx != -1) {
+    autoLockIdx += 18;
+    int autoLockEnd = payloadResponse.indexOf(",", autoLockIdx);
+    if (autoLockEnd == -1) autoLockEnd = payloadResponse.indexOf("}", autoLockIdx);
+    if (autoLockEnd > autoLockIdx) {
+      unsigned long newDelay = payloadResponse.substring(autoLockIdx, autoLockEnd).toInt();
+      if (newDelay >= 1000 && newDelay <= 60000) autoLockDelayMs = newDelay;
+    }
+  }
+
   if (serverOtaSignal) {
     sendRemoteLog("[HARDWARE] Wykryto ota:true w pakiecie poll! Odpalam update.");
     performLocalFirmwareUpdate(); 
@@ -1384,7 +1398,7 @@ void checkKeypad() {
 
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);  // deenergize immediately -- locked at boot
+  digitalWrite(RELAY_PIN, HIGH);  // natychmiastowe zwolnienie przekaznika -- zablokowane od startu
   pinMode(LED_GREEN, OUTPUT); 
   Serial.begin(9600); 
   delay(1500);
