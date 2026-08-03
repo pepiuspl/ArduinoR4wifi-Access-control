@@ -12,7 +12,7 @@
 #include <time.h> 
 
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
-#define PROXMOX_SERVER "node.ctrlable.pl"
+#define PROXMOX_SERVER "192.168.0.199"  // LOKALNE IP - port 3000 nie jest przekierowany publicznie przez router!
 #define PROXMOX_PORT   3000
 
 unsigned long lastOtaCheck = 0;
@@ -597,7 +597,6 @@ void updateBuzzer() {
 }
 
 void relayActivate() {
-  sendRemoteLog("DBG: relayActivate() wywolane - ustawiam INPUT (floating)");  // TYMCZASOWE
   // Ten modul: floating (INPUT, wysoka impedancja) odblokowuje zamek.
   // Zarowno HIGH jak i LOW aktywnie sterowane BLOKUJA - tylko brak
   // zdefiniowanego sygnalu (floating) zwalnia przekaznik.
@@ -605,7 +604,6 @@ void relayActivate() {
 }
 
 void relayDeactivate() {
-  sendRemoteLog("DBG: relayDeactivate() wywolane - ustawiam OUTPUT HIGH");  // TYMCZASOWE
   // HIGH (3.3V) aktywnie sterowane blokuje zamek - stabilny, zdefiniowany stan.
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
@@ -1097,7 +1095,7 @@ void executeCloudSynchronization() {
   // pollu, zeby zmiana w aplikacji dzialala natychmiast, bez restartu urzadzenia.
   int autoLockIdx = payloadResponse.indexOf("\"auto_lock_delay\":");
   if (autoLockIdx != -1) {
-    autoLockIdx += 18;
+    autoLockIdx += 19;
     int autoLockEnd = payloadResponse.indexOf(",", autoLockIdx);
     if (autoLockEnd == -1) autoLockEnd = payloadResponse.indexOf("}", autoLockIdx);
     if (autoLockEnd > autoLockIdx) {
@@ -1695,10 +1693,12 @@ void loop() {
           } else { 
             addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
             playSound(SND_ACCESS_DENIED); 
+            for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
           } 
         } else { 
           addLog("Odmowa: Nieznany [" + uidStr + "]");
           playSound(SND_ACCESS_DENIED); 
+          for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
         } 
       } 
       rfid.PICC_HaltA();
