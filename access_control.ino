@@ -12,7 +12,7 @@
 #include <time.h> 
 
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
-#define PROXMOX_SERVER "192.168.0.199"  // LOKALNE IP - port 3000 nie jest przekierowany publicznie przez router!
+#define PROXMOX_SERVER "node.ctrlable.pl"
 #define PROXMOX_PORT   3000
 
 unsigned long lastOtaCheck = 0;
@@ -319,6 +319,10 @@ void forceHardwareRFIDReset() {
   digitalWrite(RST_PIN, HIGH); 
   delay(30); 
   rfid.PCD_Init();
+  // Maksymalne wzmocnienie odbiornika anteny (48dB) - domyślna wartość
+  // biblioteki jest zachowawcza. Pomaga przy słabszych tagach (breloki)
+  // lub gdy czytnik jest fizycznie osłonięty (np. za obudową klawiatury).
+  rfid.PCD_SetAntennaGain(rfid.RxGain_max);
   Serial.println("RFID INIT");
   byte v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   Serial.printf("MFRC522 version: 0x%02X\n", v);
