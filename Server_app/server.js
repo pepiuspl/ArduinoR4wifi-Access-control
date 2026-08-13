@@ -4,9 +4,21 @@ const https = require('https');
 const url = require('url');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
+
+// Publiczny adres bazowy serwera (przez NPM/HTTPS) — używany do budowania
+// linków zaproszeń współadministratorów wysyłanych mailem. Ten sam host, co
+// backendUrl aplikacji. Nadpisywalny zmienną środowiskową PUBLIC_BASE_URL.
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://node.ctrlable.pl';
+
+// Linki prawne pokazywane na stronie zaproszenia (/invite). Strony jeszcze nie
+// istnieją — to placeholdery, podmień na docelowe adresy (lub ustaw przez env),
+// gdy Regulamin i Polityka Prywatności zostaną opublikowane.
+const TERMS_URL   = process.env.TERMS_URL   || 'https://ctrlable.pl/regulamin.html';
+const PRIVACY_URL = process.env.PRIVACY_URL || 'https://ctrlable.pl/polityka-prywatnosci.html';
 
 // ─── Security packages ────────────────────────────────────────────────────────
 // Install once on the server:
@@ -197,6 +209,13 @@ async function resolveTargetDevice(accountId, requestedMac, columns = 'mac_addre
   return dbPool.query(`SELECT ${cols} FROM devices d WHERE ${DEVICE_ACCESS_CONDITION} ORDER BY d.mac_address ASC LIMIT 1`, [accountId]);
 }
 
+// Fragment SQL: zbiór MAC-ów, do których dane konto ma dostęp jako właściciel LUB
+// współadmin. `param` to numer placeholdera (np. '$2'). Używane do autoryzacji
+// operacji na PIN-ach po MAC-u urządzenia zamiast po koncie twórcy PIN-u.
+function macAccessSubquery(param) {
+  return `(SELECT mac_address FROM devices WHERE account_id=${param} UNION SELECT mac_address FROM device_shares WHERE account_id=${param})`;
+}
+
 function getFactoryAdminPassword(mac) {
   if (!mac) return 'admin';
   const cleanMac = mac.toUpperCase();
@@ -220,6 +239,13 @@ const learningQueues = {};
 // hardware has not yet confirmed. Lets ANY connected client show a "pending"
 // state until the lock reports back that it has actually opened.
 const pendingUnlocks = {};
+
+// Deregistracja (twarde odłączenie centralki): tylko właściciel, potwierdzane
+// kodem z maila. deregisterCodes[mac] = { code, accountId, expiresAt } — kod z maila.
+// deregisterQueues[mac] = timestamp do kiedy komenderujemy urządzeniu wipe EEPROM
+// (factory reset) i blokujemy jego automatyczną ponowną rejestrację w pollu.
+const deregisterCodes = {};
+const deregisterQueues = {};
 
 function _sendJSON(res, statusCode, data, origin) {
   // Only echo the Origin back if it's on the allowlist — never '*' in production
@@ -339,6 +365,92 @@ function getLatestFirmwareContext() {
 
 // Rate-limit store for keypad PIN attempts { mac: {count, resetAt} }
 const keypadAttempts = {};
+
+// Minimalne escapowanie HTML — treści wstawiane do strony /invite (nazwa
+// urządzenia, e-mail) pochodzą od użytkownika, więc nie mogą zepsuć znaczników.
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Strona akceptacji zaproszenia współadministratora otwierana z linku w mailu.
+// Renderowana po stronie serwera (działa w każdej przeglądarce, bez deep-linku
+// do aplikacji). Po utworzeniu konta użytkownik loguje się w aplikacji CTRLABLE.
+function renderInvitePage(opts) {
+  const { error, token, email, deviceName } = opts || {};
+  const head = `<!doctype html><html lang="pl"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CTRLABLE — Zaproszenie</title>
+    <style>
+      *{box-sizing:border-box} body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+        background:#0f172a; color:#e2e8f0; margin:0; min-height:100vh; display:flex;
+        align-items:center; justify-content:center; padding:20px}
+      .card{background:#1e293b; border-radius:16px; padding:28px; max-width:420px; width:100%;
+        box-shadow:0 10px 40px rgba(0,0,0,.4)}
+      h1{font-size:20px; margin:0 0 6px} .sub{color:#94a3b8; font-size:14px; margin:0 0 20px}
+      label{display:block; font-size:13px; color:#94a3b8; margin:14px 0 6px}
+      input{width:100%; padding:12px; border-radius:8px; border:1px solid #334155;
+        background:#0f172a; color:#e2e8f0; font-size:15px}
+      input[readonly]{opacity:.7}
+      .pwwrap{position:relative}
+      .pweye{position:absolute; right:12px; top:12px; color:#38bdf8; font-weight:bold; font-size:13px; cursor:pointer; user-select:none}
+      a.legal{color:#38bdf8; text-decoration:underline}
+      .store{margin-top:20px; padding-top:16px; border-top:1px solid #334155; font-size:12px; color:#64748b; text-align:center}
+      .row{display:flex; align-items:flex-start; gap:8px; margin:16px 0; font-size:13px; color:#cbd5e1}
+      button{width:100%; margin-top:20px; padding:13px; border:none; border-radius:8px;
+        background:#0284c7; color:#fff; font-size:16px; font-weight:bold; cursor:pointer}
+      button:disabled{opacity:.5}
+      .msg{margin-top:16px; padding:12px; border-radius:8px; font-size:14px; display:none}
+      .ok{background:#064e3b; color:#6ee7b7} .err{background:#7f1d1d; color:#fecaca; display:block}
+      .dev{color:#38bdf8; font-weight:bold}
+    </style></head><body><div class="card">`;
+  const foot = `</div></body></html>`;
+
+  if (error) {
+    return head + `<h1>Zaproszenie</h1><div class="msg err">${escapeHtml(error)}</div>` + foot;
+  }
+  return head + `
+    <h1>Dołącz do zarządzania centralką</h1>
+    <p class="sub">Zostałeś zaproszony jako administrator urządzenia <span class="dev">${escapeHtml(deviceName)}</span>. Utwórz konto, aby uzyskać dostęp.</p>
+    <label>Adres e-mail</label>
+    <input type="email" value="${escapeHtml(email)}" readonly>
+    <label>Ustaw hasło (min. 6 znaków)</label>
+    <div class="pwwrap">
+      <input id="pw" type="password" autocomplete="new-password" placeholder="Twoje hasło" style="padding-right:64px">
+      <span class="pweye" id="pweye" onclick="togglePw()">Pokaż</span>
+    </div>
+    <div class="row">
+      <input id="rodo" type="checkbox" style="width:auto; margin-top:2px">
+      <label for="rodo" style="margin:0">Akceptuję <a class="legal" href="${escapeHtml(PRIVACY_URL)}" target="_blank" rel="noopener">Politykę Prywatności</a> oraz <a class="legal" href="${escapeHtml(TERMS_URL)}" target="_blank" rel="noopener">Regulamin</a> i przetwarzanie moich danych.</label>
+    </div>
+    <button id="go" onclick="submitAccept()">Utwórz konto i przyjmij zaproszenie</button>
+    <div id="msg" class="msg"></div>
+    <div class="store">📱 Aplikacja CTRLABLE — wkrótce w App Store i Google Play</div>
+    <script>
+      var TOKEN=${JSON.stringify(token)};
+      function togglePw(){var i=document.getElementById('pw');var e=document.getElementById('pweye');if(i.type==='password'){i.type='text';e.textContent='Ukryj';}else{i.type='password';e.textContent='Pokaż';}}
+      function show(cls,text){var m=document.getElementById('msg');m.className='msg '+cls;m.style.display='block';m.textContent=text;}
+      async function submitAccept(){
+        var pw=document.getElementById('pw').value;
+        var rodo=document.getElementById('rodo').checked;
+        if(pw.length<6){show('err','Hasło musi mieć co najmniej 6 znaków.');return;}
+        if(!rodo){show('err','Zaznacz akceptację polityki prywatności.');return;}
+        var btn=document.getElementById('go');btn.disabled=true;
+        try{
+          var r=await fetch('/api/devices/accept_via_web',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({token:TOKEN,password:pw,privacy_policy_accepted:true})});
+          var d=await r.json();
+          if(r.ok&&d.status==='ok'){
+            show('ok', d.existed
+              ? 'Dostęp przyznany! Masz już konto na tym adresie — zaloguj się w aplikacji CTRLABLE swoim dotychczasowym hasłem.'
+              : 'Konto utworzone i dostęp przyznany! Zaloguj się teraz w aplikacji CTRLABLE.');
+            btn.style.display='none';
+          } else { show('err', d.error||'Nie udało się przyjąć zaproszenia.'); btn.disabled=false; }
+        }catch(e){ show('err','Błąd połączenia z serwerem.'); btn.disabled=false; }
+      }
+    </script>` + foot;
+}
 
 const server = http.createServer(async (req, res) => {
   const reqOrigin = req.headers['origin'] || '';
@@ -632,7 +744,7 @@ const server = http.createServer(async (req, res) => {
         const kpPinsRes = await dbPool.query(
           `SELECT id, name, active, schedule_enabled, schedule_days, schedule_start_minutes,
                   schedule_end_minutes, expires_at, max_uses, use_count, is_guest_code
-           FROM keypad_pins WHERE account_id = $1 ORDER BY created_at ASC`, [accountId]
+           FROM keypad_pins WHERE mac_address = $1 ORDER BY created_at ASC`, [primaryMac]
         ).catch(() => ({ rows: [] }));
 
         const processedUsersList = usersRes.rows.map(row => ({
@@ -962,6 +1074,76 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
+      // DEREGISTRACJA — KROK 1: właściciel prosi o kod potwierdzający (mail)
+      // POST { mac } — tylko właściciel. Twarde odłączenie centralki.
+      // =========================================================================
+      if (pathname === '/api/devices/deregister_request' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const mac = String(body.mac || '').toUpperCase();
+        if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
+
+        const owned = await dbPool.query(
+          `SELECT d.device_name, a.email FROM devices d JOIN accounts a ON a.id = d.account_id
+           WHERE d.mac_address = $1 AND d.account_id = $2`, [mac, accountId]);
+        if (owned.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może odłączyć centralkę.' });
+
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        deregisterCodes[mac] = { code, accountId, expiresAt: Date.now() + 15 * 60 * 1000 };
+
+        const deviceName = owned.rows[0].device_name || mac;
+        mailTransport.sendMail({
+          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          to: owned.rows[0].email,
+          subject: `Potwierdzenie odłączenia centralki: ${deviceName}`,
+          html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; color:#333;">
+                 <h3>Prośba o odłączenie centralki „${escapeHtml(deviceName)}"</h3>
+                 <p>Aby potwierdzić <b>trwałe odłączenie i reset</b> tej centralki, wpisz w aplikacji poniższy kod:</p>
+                 <h1 style="color:#0284c7; font-family:monospace; letter-spacing:2px;">${code}</h1>
+                 <p>Po potwierdzeniu centralka wyczyści swoją konfigurację (WiFi, konto, karty RFID) i wróci do trybu
+                 konfiguracji. Ponowne połączenie będzie wymagać skonfigurowania jej od nowa (CTRLABLE_SETUP).</p>
+                 <p style="font-size:12px; color:#888;">Kod jest ważny 15 minut. Jeśli to nie Ty, zignoruj tę wiadomość — nic się nie stanie.</p>
+                 </div>`
+        }, (err) => { if (err) writeToLocalLogFile('Błąd serwera SMTP', err.message); });
+
+        writeToLocalLogFile('Provisioning', `[Node: ${mac}] Deregister code requested by owner ${accountId}.`);
+        return sendJSON(res, 200, { status: 'ok' });
+      }
+
+      // =========================================================================
+      // DEREGISTRACJA — KROK 2: potwierdzenie kodem → usunięcie danych + komenda wipe
+      // POST { mac, code } — tylko właściciel.
+      // =========================================================================
+      if (pathname === '/api/devices/deregister_confirm' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const mac = String(body.mac || '').toUpperCase();
+        const code = String(body.code || '').trim();
+        if (!mac || !code) return sendJSON(res, 400, { error: 'Missing mac or code' });
+
+        const entry = deregisterCodes[mac];
+        if (!entry || entry.accountId !== accountId || entry.code !== code || Date.now() > entry.expiresAt) {
+          return sendJSON(res, 400, { error: 'Kod nieprawidłowy lub wygasł.' });
+        }
+        const owned = await dbPool.query('SELECT 1 FROM devices WHERE mac_address = $1 AND account_id = $2', [mac, accountId]);
+        if (owned.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może odłączyć centralkę.' });
+
+        // Usuwamy dane powiązane jawnie (na wypadek braku ON DELETE CASCADE), potem centralkę.
+        await dbPool.query('DELETE FROM keypad_pins WHERE mac_address = $1', [mac]).catch(() => {});
+        await dbPool.query('DELETE FROM card_credentials WHERE mac_address = $1', [mac]).catch(() => {});
+        await dbPool.query('DELETE FROM system_events WHERE mac_address = $1', [mac]).catch(() => {});
+        await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1', [mac]).catch(() => {});
+        await dbPool.query('DELETE FROM device_invites WHERE mac_address = $1', [mac]).catch(() => {});
+        await dbPool.query('DELETE FROM devices WHERE mac_address = $1 AND account_id = $2', [mac, accountId]);
+
+        // Komenda wipe dla urządzenia + krótka blokada auto-rejestracji (okno na odebranie
+        // komendy; urządzenie pyta co ~1 s). Krótkie, by nie blokować późniejszego re-prowizjonowania.
+        deregisterQueues[mac] = Date.now() + 120 * 1000;
+        delete deregisterCodes[mac];
+
+        writeToLocalLogFile('Provisioning', `[Node: ${mac}] Deregistered by owner ${accountId} — device wipe commanded.`);
+        return sendJSON(res, 200, { status: 'ok' });
+      }
+
+      // =========================================================================
       // ZAPROSZENIE WSPÓŁADMINISTRATORA (wielu administratorów na jeden zamek)
       // Tylko WŁAŚCICIEL urządzenia (devices.account_id) może zapraszać.
       // POST { mac, email }
@@ -987,22 +1169,36 @@ const server = http.createServer(async (req, res) => {
         if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może zapraszać administratorów.' });
 
         const inviteCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const inviteToken = crypto.randomBytes(24).toString('hex');   // 48-znakowy token linku
         await dbPool.query(
-          `INSERT INTO device_invites (mac_address, invited_email, invite_code, invited_by, expires_at)
-           VALUES ($1, $2, $3, $4, NOW() + INTERVAL '48 hours')`,
-          [mac.toUpperCase(), cleanEmail, inviteCode, accountId]
+          `INSERT INTO device_invites (mac_address, invited_email, invite_code, invite_token, invited_by, expires_at)
+           VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '48 hours')`,
+          [mac.toUpperCase(), cleanEmail, inviteCode, inviteToken, accountId]
         );
 
         const deviceName = ownedDevice.rows[0].device_name || mac.toUpperCase();
+        const inviteLink = `${PUBLIC_BASE_URL}/invite?token=${inviteToken}`;
         const inviteMailManifest = {
           from: '"CTRLABLE Node System" <node@ctrlable.pl>',
           to: cleanEmail,
           subject: `Zaproszenie do współadministrowania: ${deviceName}`,
-          html: `<h3>Zostałeś zaproszony do współadministrowania centralką „${deviceName}”.</h3>
-                 <p>Otwórz aplikację CTRLABLE, zaloguj się (lub załóż konto tym adresem e-mail),
-                 a następnie w ustawieniach wprowadź poniższy kod:</p>
-                 <h1 style="color:#0284c7; font-family:monospace; letter-spacing:2px;">${inviteCode}</h1>
-                 <p>Kod jest ważny przez 48 godzin.</p>`
+          html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; color:#333;">
+                 <h3>Zostałeś zaproszony do współadministrowania centralką „${escapeHtml(deviceName)}”.</h3>
+                 <p>Kliknij poniższy przycisk, aby utworzyć konto i uzyskać dostęp:</p>
+                 <p style="margin:24px 0;">
+                   <a href="${inviteLink}" style="background:#0284c7; color:#fff; text-decoration:none;
+                      padding:12px 24px; border-radius:8px; font-weight:bold; display:inline-block;">
+                      Przyjmij zaproszenie
+                   </a>
+                 </p>
+                 <p style="font-size:12px; color:#888;">Jeśli przycisk nie działa, skopiuj ten adres do przeglądarki:<br>
+                   <span style="font-family:monospace;">${inviteLink}</span></p>
+                 <hr style="border:none; border-top:1px solid #eee; margin:20px 0;">
+                 <p style="font-size:12px; color:#888;">Masz już konto CTRLABLE na tym adresie? Zaloguj się w aplikacji
+                   i w zakładce „Zespół" użyj kodu:
+                   <b style="font-family:monospace; letter-spacing:1px;">${inviteCode}</b></p>
+                 <p style="font-size:12px; color:#888;">Zaproszenie jest ważne przez 48 godzin.</p>
+                 </div>`
         };
         mailTransport.sendMail(inviteMailManifest, (mailError) => {
           if (mailError) writeToLocalLogFile('Błąd serwera SMTP', mailError.message);
@@ -1081,6 +1277,81 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1 AND account_id = $2', [mac.toUpperCase(), targetAccountId]);
         writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Access revoked for account ${targetAccountId} by owner ${accountId}.`);
         return sendJSON(res, 200, { status: 'ok' });
+      }
+
+      // =========================================================================
+      // STRONA AKCEPTACJI ZAPROSZENIA (link z maila) — GET /invite?token=...
+      // Renderowana po stronie serwera, otwierana w przeglądarce. Bez JWT.
+      // =========================================================================
+      if (pathname === '/invite' && req.method === 'GET') {
+        const token = String(query.token || '');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        if (!token) { res.end(renderInvitePage({ error: 'Brak tokenu zaproszenia w adresie.' })); return; }
+        try {
+          const inv = await dbPool.query(
+            `SELECT di.mac_address, di.invited_email, di.used, di.expires_at, d.device_name
+             FROM device_invites di JOIN devices d ON d.mac_address = di.mac_address
+             WHERE di.invite_token = $1`, [token]);
+          if (inv.rows.length === 0) { res.end(renderInvitePage({ error: 'Zaproszenie nie istnieje lub zostało odwołane.' })); return; }
+          const row = inv.rows[0];
+          if (row.used) { res.end(renderInvitePage({ error: 'To zaproszenie zostało już wykorzystane.' })); return; }
+          if (new Date(row.expires_at) < new Date()) { res.end(renderInvitePage({ error: 'To zaproszenie wygasło.' })); return; }
+          res.end(renderInvitePage({ token, email: row.invited_email, deviceName: row.device_name || row.mac_address }));
+        } catch (err) {
+          writeToLocalLogFile('Invite Page ERROR', String(err));
+          res.end(renderInvitePage({ error: 'Wewnętrzny błąd serwera.' }));
+        }
+        return;
+      }
+
+      // =========================================================================
+      // AKCEPTACJA ZAPROSZENIA PRZEZ STRONĘ WWW — POST /api/devices/accept_via_web
+      // { token, password, privacy_policy_accepted }
+      // Tworzy konto (jeśli nie istnieje) i nadaje współadministrację (device_shares).
+      // =========================================================================
+      if (pathname === '/api/devices/accept_via_web' && req.method === 'POST') {
+        const { token, password, privacy_policy_accepted } = body;
+        if (!token || !password) return sendJSON(res, 400, { error: 'Brak danych.' });
+        if (!privacy_policy_accepted) return sendJSON(res, 400, { error: 'Wymagana akceptacja polityki prywatności.' });
+        if (String(password).length < 6) return sendJSON(res, 400, { error: 'Hasło musi mieć co najmniej 6 znaków.' });
+
+        try {
+          const inv = await dbPool.query(
+            `SELECT id, mac_address, invited_email FROM device_invites
+             WHERE invite_token = $1 AND used = false AND expires_at > NOW()`, [String(token)]);
+          if (inv.rows.length === 0) return sendJSON(res, 400, { error: 'Zaproszenie nieprawidłowe lub wygasłe.' });
+          const invite = inv.rows[0];
+          const email = invite.invited_email.toLowerCase();
+
+          // Konto na tym adresie może już istnieć — wtedy NIE zmieniamy hasła,
+          // tylko nadajemy dostęp (użytkownik loguje się dotychczasowym hasłem).
+          const existing = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [email]);
+          let targetAccountId;
+          const alreadyExisted = existing.rows.length > 0;
+          if (alreadyExisted) {
+            targetAccountId = existing.rows[0].id;
+          } else {
+            const hash = await bcrypt.hash(String(password), 10);
+            const insAcc = await dbPool.query(
+              'INSERT INTO accounts (email, password_hash, privacy_policy_accepted_at) VALUES ($1, $2, NOW()) RETURNING id',
+              [email, hash]);
+            targetAccountId = insAcc.rows[0].id;
+          }
+
+          await dbPool.query(
+            `INSERT INTO device_shares (mac_address, account_id, invited_by)
+             SELECT $1, $2, invited_by FROM device_invites WHERE id = $3
+             ON CONFLICT (mac_address, account_id) DO NOTHING`,
+            [invite.mac_address, targetAccountId, invite.id]);
+          await dbPool.query('UPDATE device_invites SET used = true WHERE id = $1', [invite.id]);
+
+          writeToLocalLogFile('Provisioning',
+            `[Node: ${invite.mac_address}] Web-accept: account ${targetAccountId} (${email}) is now co-admin${alreadyExisted ? ' (existing account)' : ' (new account)'}.`);
+          return sendJSON(res, 200, { status: 'ok', existed: alreadyExisted });
+        } catch (err) {
+          writeToLocalLogFile('Accept Web ERROR', String(err));
+          return sendJSON(res, 500, { error: 'Wewnętrzny błąd serwera.' });
+        }
       }
 
       if (pathname === '/api/unlock' && req.method === 'GET') {
@@ -1555,6 +1826,14 @@ const server = http.createServer(async (req, res) => {
         let mac = query.mac;
         if (mac) mac = mac.toUpperCase();
 
+        // Deregistracja: jeśli ta centralka jest w oknie wyrejestrowania, komenderujemy
+        // jej wyczyszczenie (deregister:true) i NIE pozwalamy się ponownie zarejestrować.
+        let deregActive = false;
+        if (mac && deregisterQueues[mac]) {
+          if (Date.now() < deregisterQueues[mac]) deregActive = true;
+          else delete deregisterQueues[mac];
+        }
+
         // Jeśli system nie znajdzie takiego adresu MAC w bazie, automatycznie odwracamy bajty,
         // aby zapytania SQL idealnie trafiły w zarejestrowane urządzenie.
         if (mac && mac.includes(':')) {
@@ -1565,7 +1844,7 @@ const server = http.createServer(async (req, res) => {
 
             if (checkDevRev.rows.length > 0) {
               mac = reversedMac;
-            } else if (query.email) {
+            } else if (query.email && !deregActive) {
               // PROVISIONING: Automatyczne dodanie nowej centralki do bazy danych
               const accountRes = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [query.email.trim().toLowerCase()]);
               if (accountRes.rows.length > 0) {
@@ -1673,6 +1952,7 @@ const server = http.createServer(async (req, res) => {
     learn: isLearning,
     username: learningQueues[mac] || '',
     ota: otaUpdateTrigger,
+    deregister: deregActive,
     latest_release_id: latestFirmwareReleaseId,
     latest_version: latestFw.version
   });
@@ -1870,12 +2150,13 @@ const server = http.createServer(async (req, res) => {
 
           const { id: accountId, push_token, push_alarms } = devRes.rows[0];
 
-          // Check all active PINs for this account
+          // Sprawdzamy WYŁĄCZNIE aktywne PIN-y przypisane do TEJ centralki (mac),
+          // niezależnie od tego, które konto (właściciel czy współadmin) je utworzyło.
           const pinsRes = await dbPool.query(
             `SELECT id, name, pin_hash, schedule_enabled, schedule_days, schedule_start_minutes,
                     schedule_end_minutes, expires_at, max_uses, use_count
              FROM keypad_pins
-             WHERE account_id = $1 AND active = true`, [accountId]);
+             WHERE mac_address = $1 AND active = true`, [deviceMac]);
 
           const nowDate = new Date();
           const nowDayBit = 1 << nowDate.getDay();               // 0=Niedziela..6=Sobota
@@ -1948,7 +2229,7 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/keypad/add' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
         const {
-          name, pin,
+          name, pin, mac: reqMac,
           scheduleEnabled = false, scheduleDays = 127,
           scheduleStartMinutes = 0, scheduleEndMinutes = 1440,
           expiresAt = null, maxUses = null, isGuestCode = false
@@ -1959,20 +2240,27 @@ const server = http.createServer(async (req, res) => {
         if (!/^\d+$/.test(String(pin)))
           return sendJSON(res, 400, { error: 'PIN musi zawierać tylko cyfry' });
 
+        // PIN należy do konkretnej centralki. Autoryzacja jak wszędzie: właściciel
+        // LUB współadmin danego urządzenia (resolveTargetDevice). Bez mac w body
+        // wybieramy pierwszą dostępną centralkę konta (stare zachowanie).
+        const kpDev = await resolveTargetDevice(accountId, reqMac);
+        if (kpDev.rows.length === 0) return sendJSON(res, 403, { error: 'Brak dostępu do tej centralki' });
+        const kpMac = kpDev.rows[0].mac_address;
+
         const cnt = await dbPool.query(
-          'SELECT COUNT(*) FROM keypad_pins WHERE account_id = $1', [accountId]);
+          'SELECT COUNT(*) FROM keypad_pins WHERE mac_address = $1', [kpMac]);
         if (parseInt(cnt.rows[0].count) >= 20)
-          return sendJSON(res, 400, { error: 'Limit 20 PINów osiągnięty' });
+          return sendJSON(res, 400, { error: 'Limit 20 PINów na centralkę osiągnięty' });
 
         const hash = await bcrypt.hash(String(pin), 10);
         const ins = await dbPool.query(
           `INSERT INTO keypad_pins
-             (account_id, name, pin_hash, schedule_enabled, schedule_days,
+             (account_id, mac_address, name, pin_hash, schedule_enabled, schedule_days,
               schedule_start_minutes, schedule_end_minutes, expires_at, max_uses, is_guest_code)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-          [accountId, name.trim(), hash, scheduleEnabled, scheduleDays,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+          [accountId, kpMac, name.trim(), hash, scheduleEnabled, scheduleDays,
            scheduleStartMinutes, scheduleEndMinutes, expiresAt, maxUses, isGuestCode]);
-        writeToLocalLogFile('Keypad', `PIN "${name.trim()}" added for account ${accountId}${isGuestCode ? ' (guest code)' : ''}`);
+        writeToLocalLogFile('Keypad', `PIN "${name.trim()}" added for [Node: ${kpMac}] by account ${accountId}${isGuestCode ? ' (guest code)' : ''}`);
         return sendJSON(res, 200, { success: true, id: ins.rows[0].id });
       }
 
@@ -1989,7 +2277,7 @@ const server = http.createServer(async (req, res) => {
              schedule_end_minutes = COALESCE($4, schedule_end_minutes),
              expires_at = $5,
              max_uses = $6
-           WHERE id=$7 AND account_id=$8`,
+           WHERE id=$7 AND mac_address IN ${macAccessSubquery('$8')}`,
           [scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, expiresAt || null, maxUses || null, id, accountId]);
         if (r.rowCount === 0) return sendJSON(res, 404, { error: 'Not found' });
         writeToLocalLogFile('Keypad', `Schedule updated for PIN id=${id}, account ${accountId}`);
@@ -2002,9 +2290,9 @@ const server = http.createServer(async (req, res) => {
         const { id } = body;
         if (!id) return sendJSON(res, 400, { error: 'Missing id' });
         const r = await dbPool.query(
-          'DELETE FROM keypad_pins WHERE id=$1 AND account_id=$2', [id, accountId]);
+          `DELETE FROM keypad_pins WHERE id=$1 AND mac_address IN ${macAccessSubquery('$2')}`, [id, accountId]);
         if (r.rowCount === 0) return sendJSON(res, 404, { error: 'Not found' });
-        writeToLocalLogFile('Keypad', `PIN id=${id} deleted from account ${accountId}`);
+        writeToLocalLogFile('Keypad', `PIN id=${id} deleted by account ${accountId}`);
         return sendJSON(res, 200, { success: true });
       }
 
@@ -2013,9 +2301,10 @@ const server = http.createServer(async (req, res) => {
         const accountId = requireAuth(req, res); if (!accountId) return;
         const { id, name } = body;
         if (!id || !name || !name.trim()) return sendJSON(res, 400, { error: 'Missing id or name' });
-        await dbPool.query(
-          'UPDATE keypad_pins SET name=$1 WHERE id=$2 AND account_id=$3',
+        const rr = await dbPool.query(
+          `UPDATE keypad_pins SET name=$1 WHERE id=$2 AND mac_address IN ${macAccessSubquery('$3')}`,
           [name.trim(), id, accountId]);
+        if (rr.rowCount === 0) return sendJSON(res, 404, { error: 'Not found' });
         return sendJSON(res, 200, { success: true });
       }
 
@@ -2025,7 +2314,7 @@ const server = http.createServer(async (req, res) => {
         const { id } = body;
         if (!id) return sendJSON(res, 400, { error: 'Missing id' });
         const r = await dbPool.query(
-          'UPDATE keypad_pins SET active = NOT active WHERE id=$1 AND account_id=$2 RETURNING active',
+          `UPDATE keypad_pins SET active = NOT active WHERE id=$1 AND mac_address IN ${macAccessSubquery('$2')} RETURNING active`,
           [id, accountId]);
         if (r.rowCount === 0) return sendJSON(res, 404, { error: 'Not found' });
         return sendJSON(res, 200, { success: true, active: r.rows[0].active });
@@ -2062,6 +2351,13 @@ async function runSchemaMigrations() {
     `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS max_uses INT DEFAULT NULL`,              // NULL = bez limitu
     `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS use_count INT DEFAULT 0`,
     `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS is_guest_code BOOLEAN DEFAULT false`,    // do rozróżnienia w UI
+    // PIN-y per centralka: dowiązanie PIN-u do konkretnego urządzenia (mac_address),
+    // a nie tylko do konta. Backfill przypina istniejące PIN-y do centralki ich
+    // właściciela (idempotentnie — tylko wiersze bez mac_address). Naprawia #3/#4:
+    // PIN działał na wszystkich centralkach konta, a PIN współadmina nie działał wcale.
+    `ALTER TABLE keypad_pins ADD COLUMN IF NOT EXISTS mac_address VARCHAR(17)`,
+    `UPDATE keypad_pins kp SET mac_address = (SELECT d.mac_address FROM devices d WHERE d.account_id = kp.account_id ORDER BY d.mac_address ASC LIMIT 1) WHERE kp.mac_address IS NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_keypad_pins_mac ON keypad_pins(mac_address)`,
     // Ten sam harmonogram (dni + okno godzinowe) co dla PINów, teraz też dla kart RFID.
     // Karty nie mają expires_at/max_uses/is_guest_code — te pola są specyficzne dla PINów
     // gościnnych i nie mają sensownego odpowiednika dla fizycznej karty.
@@ -2077,6 +2373,10 @@ async function runSchemaMigrations() {
     `ALTER TABLE system_events ADD COLUMN IF NOT EXISTS category VARCHAR(20) DEFAULT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_system_events_category ON system_events(category)`,
     `CREATE INDEX IF NOT EXISTS idx_system_events_event_time ON system_events(event_time)`,
+    // Token linku zaproszenia współadministratora (akceptacja przez stronę www,
+    // obok istniejącego 6-cyfrowego invite_code używanego w aplikacji).
+    `ALTER TABLE device_invites ADD COLUMN IF NOT EXISTS invite_token VARCHAR(64)`,
+    `CREATE INDEX IF NOT EXISTS idx_device_invites_token ON device_invites(invite_token)`,
   ];
   // Wielu administratorów na jedno urządzenie: konto-właściciel (devices.account_id)
   // pozostaje jedynym uprawnionym do usuwania/zmiany WiFi/zapraszania innych,
@@ -2097,6 +2397,7 @@ async function runSchemaMigrations() {
        mac_address VARCHAR(17) NOT NULL REFERENCES devices(mac_address) ON DELETE CASCADE,
        invited_email VARCHAR(255) NOT NULL,
        invite_code VARCHAR(10) NOT NULL,
+       invite_token VARCHAR(64),
        invited_by INT NOT NULL REFERENCES accounts(id),
        created_at TIMESTAMP DEFAULT NOW(),
        expires_at TIMESTAMP NOT NULL,

@@ -72,6 +72,14 @@ export default function App() {
   const [devices, setDevices] = useState([]);           // multi-device: lista wszystkich centralek na koncie
   const [selectedMac, setSelectedMac] = useState('');    // multi-device: aktualnie wybrana centralka
   const [showDeviceSwitcher, setShowDeviceSwitcher] = useState(false);
+  const [renameDeviceMac, setRenameDeviceMac] = useState(null); // MAC aktualnie zmienianej centralki | null
+  const [renameDeviceInput, setRenameDeviceInput] = useState('');
+  const [acceptCodeVisible, setAcceptCodeVisible] = useState(false); // modal "Mam kod zaproszenia"
+  const [acceptCodeInput, setAcceptCodeInput] = useState('');
+  const [deregVisible, setDeregVisible] = useState(false);   // modal deregistracji centralki
+  const [deregStep, setDeregStep] = useState('request');     // 'request' → 'code'
+  const [deregCodeInput, setDeregCodeInput] = useState('');
+  const [deregBusy, setDeregBusy] = useState(false);
   const [authToken, setAuthToken]  = useState(null);    // signed JWT from server
   const [isConfigured, setIsConfigured] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
@@ -115,6 +123,9 @@ export default function App() {
     if (kpNewCode !== kpNewConfirm) { setKpStatus('PINy nie są identyczne'); return; }
 
     const payload = { name: kpNewName.trim(), pin: kpNewCode };
+    // PIN-y są per centralka — dołączamy MAC aktualnie wybranego urządzenia, żeby
+    // serwer zapisał kod dla właściwej centralki (bez tego trafiłby na pierwszą).
+    if (!isLocalMode && selectedMac) payload.mac = selectedMac;
 
     if (kpMode === 'guest') {
       const days = parseInt(kpGuestExpiryDays, 10);
@@ -709,100 +720,101 @@ export default function App() {
   };
 
   // --- Zarządzanie wieloma centralkami (multi-device) ---
+  // Zmiana nazwy przez własny modal z TextInput (nie Alert.prompt, który działa
+  // tylko na iOS). Klient może nazwać każdą centralkę dowolnie, np. "Garaż".
   const handleRenameDevice = (mac, currentName) => {
-    Alert.prompt(
-      'Zmień nazwę centralki',
-      'Podaj nową nazwę (np. "Drzwi wejściowe", "Garaż"):',
-      [
-        { text: 'Anuluj', style: 'cancel' },
-        { text: 'Zapisz', onPress: (newName) => {
-          if (!newName || !newName.trim()) return;
-          fetch(`${backendUrl}/api/devices/rename`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
-            body: JSON.stringify({ mac, name: newName.trim() })
-          })
-            .then((res) => { if (!res.ok) throw new Error(); fetchStatus(); })
-            .catch(() => Alert.alert('Błąd', 'Nie udało się zmienić nazwy centralki.'));
-        }}
-      ],
-      'plain-text',
-      currentName
-    );
+    setRenameDeviceInput(currentName || '');
+    setRenameDeviceMac(mac);
   };
 
-  const handleRemoveDevice = (mac, name) => {
-    Alert.alert(
-      'Usuń centralkę',
-      `Czy na pewno chcesz usunąć "${name}" z tego konta? Ta operacja nie kasuje ustawień samego urządzenia — będzie można je ponownie sparować.`,
-      [
-        { text: 'Anuluj', style: 'cancel' },
-        { text: 'Usuń', style: 'destructive', onPress: () => {
-          fetch(`${backendUrl}/api/devices/remove`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
-            body: JSON.stringify({ mac })
-          })
-            .then((res) => { if (!res.ok) throw new Error(); if (selectedMac === mac) setSelectedMac(''); fetchStatus(); })
-            .catch(() => Alert.alert('Błąd', 'Nie udało się usunąć centralki.'));
-        }}
-      ]
-    );
+  const submitRenameDevice = () => {
+    const newName = renameDeviceInput.trim();
+    if (!newName) { Alert.alert('Błąd', 'Podaj nazwę centralki.'); return; }
+    fetch(`${backendUrl}/api/devices/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ mac: renameDeviceMac, name: newName })
+    })
+      .then((res) => { if (!res.ok) throw new Error(); setRenameDeviceMac(null); setRenameDeviceInput(''); fetchStatus(); })
+      .catch(() => Alert.alert('Błąd', 'Nie udało się zmienić nazwy centralki.'));
   };
 
-  // --- Wielu administratorów na jeden zamek: zaproszenie, akceptacja, zarządzanie ---
-  const handleInviteAdmin = (mac, deviceName) => {
-    Alert.prompt(
-      `Zaproś administratora do "${deviceName}"`,
-      'Podaj adres e-mail osoby, którą chcesz zaprosić. Otrzyma kod do wpisania w aplikacji.',
-      [
-        { text: 'Anuluj', style: 'cancel' },
-        { text: 'Wyślij zaproszenie', onPress: (email) => {
-          if (!email || !email.trim()) return;
-          fetch(`${backendUrl}/api/devices/invite`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
-            body: JSON.stringify({ mac, email: email.trim() })
-          })
-            .then((res) => res.json().then(d => ({ ok: res.ok, d })))
-            .then(({ ok, d }) => {
-              if (ok) Alert.alert('Wysłano', `Zaproszenie wysłane na ${email.trim()}.`);
-              else Alert.alert('Błąd', d.error || 'Nie udało się wysłać zaproszenia.');
-            })
-            .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
-        }}
-      ],
-      'plain-text'
-    );
+  // --- Deregistracja centralki: twarde odłączenie + reset (tylko właściciel,
+  //     potwierdzane kodem z maila). Działa na aktualnie wybranej centralce. ---
+  const startDeregister = () => {
+    setDeregCodeInput('');
+    setDeregStep('request');
+    setDeregVisible(true);
   };
 
+  const requestDeregisterCode = () => {
+    if (!selectedMac) return;
+    setDeregBusy(true);
+    fetch(`${backendUrl}/api/devices/deregister_request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ mac: selectedMac })
+    })
+      .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+      .then(({ ok, d }) => {
+        setDeregBusy(false);
+        if (ok) setDeregStep('code');
+        else Alert.alert('Błąd', d.error || 'Nie udało się wysłać kodu.');
+      })
+      .catch(() => { setDeregBusy(false); Alert.alert('Błąd', 'Brak połączenia.'); });
+  };
+
+  const submitDeregisterConfirm = () => {
+    const code = deregCodeInput.trim();
+    if (!code) { Alert.alert('Błąd', 'Wpisz kod z maila.'); return; }
+    setDeregBusy(true);
+    fetch(`${backendUrl}/api/devices/deregister_confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ mac: selectedMac, code })
+    })
+      .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+      .then(({ ok, d }) => {
+        setDeregBusy(false);
+        if (ok) {
+          setDeregVisible(false); setDeregCodeInput('');
+          if (selectedMac) setSelectedMac('');
+          Alert.alert('Odłączono', 'Centralka została odłączona i zresetowana. Wróci do trybu konfiguracji CTRLABLE_SETUP — aby użyć jej ponownie, skonfiguruj ją od nowa.');
+          fetchStatus();
+        } else Alert.alert('Błąd', d.error || 'Nieprawidłowy kod.');
+      })
+      .catch(() => { setDeregBusy(false); Alert.alert('Błąd', 'Brak połączenia.'); });
+  };
+
+  // --- Wielu administratorów na jeden zamek (zapraszanie: zakładka Zespół) ---
+  // Akceptacja zaproszenia kodem — modal z TextInput (cross-platform). Główną
+  // ścieżką jest link z maila, ale istniejące konta wpisują kod tutaj.
   const handleAcceptInvite = () => {
-    Alert.prompt(
-      'Mam kod zaproszenia',
-      'Wpisz 6-cyfrowy kod otrzymany e-mailem, aby uzyskać dostęp do cudzej centralki.',
-      [
-        { text: 'Anuluj', style: 'cancel' },
-        { text: 'Dołącz', onPress: (code) => {
-          if (!code || !code.trim()) return;
-          fetch(`${backendUrl}/api/devices/accept_invite`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
-            body: JSON.stringify({ code: code.trim() })
-          })
-            .then((res) => res.json().then(d => ({ ok: res.ok, d })))
-            .then(({ ok, d }) => {
-              if (ok) { Alert.alert('Sukces', 'Masz teraz dostęp do tej centralki.'); fetchStatus(); }
-              else Alert.alert('Błąd', d.error || 'Nieprawidłowy kod.');
-            })
-            .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
-        }}
-      ],
-      'plain-text'
-    );
+    setAcceptCodeInput('');
+    setAcceptCodeVisible(true);
   };
 
-  const [sharedAdmins, setSharedAdmins] = useState([]);
-  const [showAdminsModal, setShowAdminsModal] = useState(null); // { mac, name } | null
+  const submitAcceptCode = () => {
+    const code = acceptCodeInput.trim();
+    if (!code) { Alert.alert('Błąd', 'Wpisz kod zaproszenia.'); return; }
+    fetch(`${backendUrl}/api/devices/accept_invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ code })
+    })
+      .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+      .then(({ ok, d }) => {
+        if (ok) { setAcceptCodeVisible(false); setAcceptCodeInput(''); Alert.alert('Sukces', 'Masz teraz dostęp do tej centralki.'); fetchStatus(); }
+        else Alert.alert('Błąd', d.error || 'Nieprawidłowy kod.');
+      })
+      .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
+  };
+
+  // --- Zakładka "Zespół": zarządzanie współadministratorami per centralka ---
+  const [teamByMac, setTeamByMac] = useState({});       // { MAC: [ {accountId, email, since} ] }
+  const [inviteEmails, setInviteEmails] = useState({}); // { MAC: 'wpisywany e-mail' }
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamBusyMac, setTeamBusyMac] = useState('');   // MAC, dla którego trwa wysyłka zaproszenia
 
   // --- Filtrowanie/wyszukiwanie w logach ---
   const [isLogSearchMode, setIsLogSearchMode] = useState(false);
@@ -845,18 +857,59 @@ export default function App() {
       .catch(() => setLogSearchLoading(false));
   };
 
-  const openAdminsModal = (mac, name) => {
-    setShowAdminsModal({ mac, name });
-    fetch(`${backendUrl}/api/devices/shared_users?mac=${encodeURIComponent(mac)}`, {
-      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
-    })
-      .then((res) => res.json())
-      .then((d) => setSharedAdmins(d.admins || []))
-      .catch(() => setSharedAdmins([]));
+  // Pobiera listę współadministratorów dla wszystkich centralek, których jestem
+  // WŁAŚCICIELEM (tylko właściciel widzi/zarządza adminami danego urządzenia).
+  const loadTeam = () => {
+    const owned = (devices || []).filter((d) => d.isOwner);
+    if (owned.length === 0) { setTeamByMac({}); return; }
+    setTeamLoading(true);
+    Promise.all(owned.map((d) =>
+      fetch(`${backendUrl}/api/devices/shared_users?mac=${encodeURIComponent(d.mac)}`, {
+        headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+      })
+        .then((res) => res.json())
+        .then((j) => ({ mac: d.mac, admins: j.admins || [] }))
+        .catch(() => ({ mac: d.mac, admins: [] }))
+    ))
+      .then((results) => {
+        const map = {};
+        results.forEach((r) => { map[r.mac] = r.admins; });
+        setTeamByMac(map);
+        setTeamLoading(false);
+      })
+      .catch(() => setTeamLoading(false));
   };
 
-  const handleRevokeAdmin = (mac, targetAccountId, email) => {
-    Alert.alert('Odbierz dostęp', `Czy na pewno chcesz odebrać dostęp administratorowi ${email}?`, [
+  // Wysyła zaproszenie e-mailem (serwer generuje link). Prawdziwy TextInput,
+  // nie Alert.prompt — ten ostatni działa tylko na iOS.
+  const submitInvite = (mac) => {
+    const emailToInvite = (inviteEmails[mac] || '').trim();
+    if (!emailToInvite || !emailToInvite.includes('@')) {
+      Alert.alert('Błąd', 'Podaj prawidłowy adres e-mail.');
+      return;
+    }
+    setTeamBusyMac(mac);
+    fetch(`${backendUrl}/api/devices/invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ mac, email: emailToInvite })
+    })
+      .then((res) => res.json().then((d) => ({ ok: res.ok, d })))
+      .then(({ ok, d }) => {
+        setTeamBusyMac('');
+        if (ok) {
+          Alert.alert('Wysłano', `Zaproszenie wysłane na ${emailToInvite}. Osoba otrzyma link do utworzenia konta i uzyska dostęp po rejestracji.`);
+          setInviteEmails((prev) => ({ ...prev, [mac]: '' }));
+        } else {
+          Alert.alert('Błąd', d.error || 'Nie udało się wysłać zaproszenia.');
+        }
+      })
+      .catch(() => { setTeamBusyMac(''); Alert.alert('Błąd', 'Brak połączenia.'); });
+  };
+
+  // Odbiera dostęp adminowi i odświeża listę zespołu (zakładka Zespół).
+  const revokeFromTeam = (mac, targetAccountId, adminEmail) => {
+    Alert.alert('Odbierz dostęp', `Czy na pewno odebrać dostęp administratorowi ${adminEmail}?`, [
       { text: 'Anuluj', style: 'cancel' },
       { text: 'Odbierz', style: 'destructive', onPress: () => {
         fetch(`${backendUrl}/api/devices/revoke_share`, {
@@ -864,7 +917,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
           body: JSON.stringify({ mac, accountId: targetAccountId })
         })
-          .then(() => openAdminsModal(mac, showAdminsModal?.name))
+          .then(() => loadTeam())
           .catch(() => Alert.alert('Błąd', 'Nie udało się odebrać dostępu.'));
       }}
     ]);
@@ -1299,14 +1352,14 @@ export default function App() {
                   Oświadczam, że zapoznałem się i akceptuję{' '}
                   <Text
                     style={styles.hyperlinkText}
-                    onPress={() => Alert.alert("Placeholder", "Przekierowanie do: https://ctrlable.node/terms (Strona w budowie)")}
+                    onPress={() => Linking.openURL('https://ctrlable.pl/regulamin.html')}
                   >
                     Regulamin Serwisu
                   </Text>
                   {' '}oraz{' '}
                   <Text
                     style={styles.hyperlinkText}
-                    onPress={() => Alert.alert("Placeholder", "Przekierowanie do: https://ctrlable.node/privacy (Strona w budowie)")}
+                    onPress={() => Linking.openURL('https://ctrlable.pl/polityka-prywatnosci.html')}
                   >
                     Politykę Prywatności
                   </Text>
@@ -1407,8 +1460,8 @@ export default function App() {
             <ScrollView contentContainerStyle={styles.scrollWrapper}>
               <Text style={styles.screenHeaderText}>📱 Dashboard</Text>
 
-              {/* ── PRZEŁĄCZNIK CENTRALEK ── widoczny tylko gdy konto ma więcej niż 1 urządzenie */}
-              {!isLocalMode && devices.length > 1 && (
+              {/* ── PRZEŁĄCZNIK / ZARZĄDZANIE CENTRALKAMI ── widoczny, gdy konto ma co najmniej 1 urządzenie (żeby dało się nazwać nawet jedną centralkę) */}
+              {!isLocalMode && devices.length >= 1 && (
                 <TouchableOpacity
                   style={{ backgroundColor: '#16161a', borderWidth: 1, borderColor: '#2a2a30', borderRadius: 10, padding: 12, marginBottom: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
                   onPress={() => setShowDeviceSwitcher(true)}
@@ -1416,7 +1469,7 @@ export default function App() {
                   <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                     <Text style={{ fontSize: 18, marginRight: 8 }}>🏠</Text>
                     <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 15 }}>
-                      {devices.find(d => d.mac === selectedMac)?.name || 'Wybierz centralkę'}
+                      {devices.find(d => d.mac === selectedMac)?.name || devices[0]?.name || 'Wybierz centralkę'}
                     </Text>
                   </View>
                   <Text style={{ color: '#64b5f6', fontSize: 13, fontWeight: 'bold' }}>Zmień ›</Text>
@@ -1946,6 +1999,99 @@ export default function App() {
                 </View>
               )}
 
+              {/* STREFA ZAAWANSOWANA: trwałe odłączenie centralki (tylko właściciel) */}
+              {!isLocalMode && (devices.find(d => d.mac === selectedMac)?.isOwner) && (
+                <View style={[styles.card, { borderColor: '#5c1a1a', borderWidth: 1 }]}>
+                  <Text style={[styles.sectionHeader, { color: '#e57373' }]}>⚠️ Strefa zaawansowana</Text>
+                  <Text style={styles.inputLabelText}>
+                    Trwałe odłączenie tej centralki od konta. Urządzenie wyczyści swoją konfigurację (WiFi, konto, karty RFID) i wróci do trybu konfiguracji CTRLABLE_SETUP. Aby użyć jej ponownie, trzeba ją skonfigurować od nowa. Operacja wymaga potwierdzenia kodem wysłanym na Twój e-mail.
+                  </Text>
+                  <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#7f1d1d', width: '100%', marginTop: 12 }]} onPress={startDeregister}>
+                    <Text style={styles.btnText}>🔌 Odłącz i zresetuj centralkę</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+            </ScrollView>
+          </KeyboardAvoidingView>
+        )}
+
+        {/* ── EKRAN: ZESPÓŁ (współadministratorzy per centralka) — tylko online ── */}
+        {currentScreen === 'team' && (
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={{ flex: 1 }}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 100}
+          >
+            <ScrollView contentContainerStyle={styles.scrollWrapper} keyboardShouldPersistTaps="handled">
+              <Text style={styles.screenHeaderText}>🤝 Zespół — Administratorzy</Text>
+
+              <TouchableOpacity style={[styles.secondaryBtn, { width: '100%', marginBottom: 16, backgroundColor: '#1a3a5c' }]} onPress={handleAcceptInvite}>
+                <Text style={styles.btnText}>🔑 Mam kod zaproszenia</Text>
+              </TouchableOpacity>
+
+              {teamLoading && (
+                <Text style={{ color: '#64b5f6', textAlign: 'center', marginBottom: 12 }}>Wczytywanie…</Text>
+              )}
+
+              {(devices || []).filter((d) => d.isOwner).length === 0 ? (
+                <View style={styles.card}>
+                  <Text style={styles.sectionHeader}>Brak centralek do zarządzania</Text>
+                  <Text style={{ color: '#888', fontSize: 13, lineHeight: 19 }}>
+                    Administratorami może zarządzać tylko właściciel centralki. Nie jesteś właścicielem żadnego urządzenia — jeśli korzystasz z zaproszenia jako administrator, zarządza nim właściciel, który Cię zaprosił.
+                  </Text>
+                </View>
+              ) : (
+                (devices || []).filter((d) => d.isOwner).map((d) => {
+                  const admins = teamByMac[d.mac] || [];
+                  return (
+                    <View key={d.mac} style={styles.card}>
+                      <Text style={styles.sectionHeader}>{d.name}</Text>
+                      <Text style={{ color: '#666', fontSize: 11, marginTop: -6, marginBottom: 10 }}>{d.mac}</Text>
+
+                      {admins.length === 0 ? (
+                        <Text style={{ color: '#888', fontSize: 13, marginBottom: 8 }}>
+                          Brak zaproszonych administratorów — na razie tylko Ty (właściciel) zarządzasz tą centralką.
+                        </Text>
+                      ) : (
+                        admins.map((a) => (
+                          <View key={a.accountId} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#222' }}>
+                            <View style={{ flex: 1, paddingRight: 10 }}>
+                              <Text style={{ color: '#fff', fontSize: 14 }}>{a.email}</Text>
+                              <Text style={{ color: '#666', fontSize: 11 }}>Administrator · dostęp do tej centralki</Text>
+                            </View>
+                            <TouchableOpacity onPress={() => revokeFromTeam(d.mac, a.accountId, a.email)}>
+                              <Text style={{ color: '#e57373', fontWeight: 'bold', fontSize: 13 }}>Odbierz</Text>
+                            </TouchableOpacity>
+                          </View>
+                        ))
+                      )}
+
+                      <Text style={[styles.inputLabelText, { marginTop: 14 }]}>Zaproś administratora (e-mail):</Text>
+                      <TextInput
+                        style={styles.inputField}
+                        placeholder="np. jan.kowalski@email.com"
+                        placeholderTextColor="#555"
+                        autoCapitalize="none"
+                        keyboardType="email-address"
+                        value={inviteEmails[d.mac] || ''}
+                        onChangeText={(t) => setInviteEmails((prev) => ({ ...prev, [d.mac]: t }))}
+                      />
+                      <TouchableOpacity
+                        style={[styles.secondaryBtn, { backgroundColor: '#0284c7', width: '100%', marginTop: 10, opacity: teamBusyMac === d.mac ? 0.5 : 1 }]}
+                        disabled={teamBusyMac === d.mac}
+                        onPress={() => submitInvite(d.mac)}
+                      >
+                        <Text style={styles.btnText}>{teamBusyMac === d.mac ? 'Wysyłanie…' : '✉️ Wyślij zaproszenie'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })
+              )}
+
+              <TouchableOpacity style={[styles.secondaryBtn, { width: '100%', marginTop: 4 }]} onPress={loadTeam}>
+                <Text style={styles.btnText}>🔄 Odśwież listę</Text>
+              </TouchableOpacity>
             </ScrollView>
           </KeyboardAvoidingView>
         )}
@@ -1962,6 +2108,9 @@ export default function App() {
           </View>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Dashboard</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
+          {!isLocalMode && (
+            <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'team' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('team'); loadTeam(); }}><Text style={styles.menuItemLabelText}>🤝 Zespół (Administratorzy)</Text></TouchableOpacity>
+          )}
           {!isLocalMode && (
             <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'notifications' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('notifications')}><Text style={styles.menuItemLabelText}>🔔 Powiadomienia Push</Text></TouchableOpacity>
           )}
@@ -2054,24 +2203,14 @@ export default function App() {
                           {d.online ? '● Online' : '● Offline'} · {d.mode || '—'}{!d.isOwner ? ' · Udostępnione Ci' : ''}
                         </Text>
                       </TouchableOpacity>
-                      {d.isOwner && (
-                        <>
-                          <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRenameDevice(d.mac, d.name)}>
-                            <Text style={{ color: '#64b5f6', fontSize: 13 }}>✏️</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity style={{ padding: 8 }} onPress={() => handleRemoveDevice(d.mac, d.name)}>
-                            <Text style={{ color: '#e57373', fontSize: 13 }}>🗑️</Text>
-                          </TouchableOpacity>
-                        </>
-                      )}
                     </View>
                     {d.isOwner && (
                       <View style={{ flexDirection: 'row', marginTop: 8, gap: 8 }}>
-                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8, backgroundColor: '#1a3a5c' }]} onPress={() => handleInviteAdmin(d.mac, d.name)}>
-                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>👥 Zaproś administratora</Text>
+                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8 }]} onPress={() => handleRenameDevice(d.mac, d.name)}>
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>✏️ Zmień nazwę</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8, backgroundColor: '#333' }]} onPress={() => openAdminsModal(d.mac, d.name)}>
-                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>Zarządzaj</Text>
+                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8, backgroundColor: '#1a3a5c' }]} onPress={() => { setShowDeviceSwitcher(false); navigateTo('team'); loadTeam(); }}>
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>👥 Administratorzy</Text>
                         </TouchableOpacity>
                       </View>
                     )}
@@ -2088,35 +2227,121 @@ export default function App() {
           </View>
         )}
 
-        {/* ── MODAL: ZARZĄDZANIE WSPÓŁADMINISTRATORAMI (tylko właściciel) ── */}
-        {showAdminsModal !== null && (
-          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', alignItems: 'center', zIndex: 999 }}>
-            <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20, width: '85%', maxHeight: '70%' }}>
-              <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17, marginBottom: 4 }}>Administratorzy</Text>
-              <Text style={{ color: '#888', fontSize: 12, marginBottom: 16 }}>{showAdminsModal.name}</Text>
-              <ScrollView>
-                {sharedAdmins.length === 0 ? (
-                  <Text style={{ color: '#666', fontSize: 13, textAlign: 'center', paddingVertical: 20 }}>
-                    Nikt jeszcze nie ma współdostępu do tej centralki.
-                  </Text>
-                ) : sharedAdmins.map((a) => (
-                  <View key={a.accountId} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#0f0f11', borderRadius: 10, padding: 12, marginBottom: 8 }}>
-                    <Text style={{ color: '#fff', fontSize: 14, flex: 1 }}>{a.email}</Text>
-                    <TouchableOpacity onPress={() => handleRevokeAdmin(showAdminsModal.mac, a.accountId, a.email)}>
-                      <Text style={{ color: '#e57373', fontSize: 12, fontWeight: 'bold' }}>Odbierz dostęp</Text>
-                    </TouchableOpacity>
-                  </View>
-                ))}
-              </ScrollView>
-              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12, backgroundColor: '#1a3a5c' }]} onPress={() => handleInviteAdmin(showAdminsModal.mac, showAdminsModal.name)}>
-                <Text style={styles.btnText}>👥 Zaproś kolejnego</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 8 }]} onPress={() => setShowAdminsModal(null)}>
-                <Text style={styles.btnText}>Zamknij</Text>
-              </TouchableOpacity>
-            </View>
+        {/* ── MODAL: ZMIANA NAZWY CENTRALKI (cross-platform, TextInput) ── */}
+        {renameDeviceMac !== null && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '85%' }}>
+              <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20 }}>
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17, marginBottom: 6 }}>Nazwa centralki</Text>
+                <Text style={{ color: '#888', fontSize: 12, marginBottom: 14 }}>Nadaj własną nazwę, np. „Drzwi wejściowe", „Garaż", „Biuro".</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Nazwa centralki"
+                  placeholderTextColor="#555"
+                  value={renameDeviceInput}
+                  onChangeText={setRenameDeviceInput}
+                  autoFocus
+                  maxLength={40}
+                  returnKeyType="done"
+                  onSubmitEditing={submitRenameDevice}
+                />
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}>
+                  <TouchableOpacity style={[styles.secondaryBtn, { flex: 1 }]} onPress={() => { setRenameDeviceMac(null); setRenameDeviceInput(''); }}>
+                    <Text style={styles.btnText}>Anuluj</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#5c33cf' }]} onPress={submitRenameDevice}>
+                    <Text style={styles.btnText}>Zapisz</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </KeyboardAvoidingView>
           </View>
         )}
+
+        {/* ── MODAL: MAM KOD ZAPROSZENIA (cross-platform, TextInput) ── */}
+        {acceptCodeVisible && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '85%' }}>
+              <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20 }}>
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 17, marginBottom: 6 }}>Mam kod zaproszenia</Text>
+                <Text style={{ color: '#888', fontSize: 12, marginBottom: 14 }}>Wpisz 6-cyfrowy kod otrzymany e-mailem, aby uzyskać dostęp do udostępnionej centralki.</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="np. 482913"
+                  placeholderTextColor="#555"
+                  value={acceptCodeInput}
+                  onChangeText={setAcceptCodeInput}
+                  autoFocus
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  returnKeyType="done"
+                  onSubmitEditing={submitAcceptCode}
+                />
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}>
+                  <TouchableOpacity style={[styles.secondaryBtn, { flex: 1 }]} onPress={() => { setAcceptCodeVisible(false); setAcceptCodeInput(''); }}>
+                    <Text style={styles.btnText}>Anuluj</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#5c33cf' }]} onPress={submitAcceptCode}>
+                    <Text style={styles.btnText}>Dołącz</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </KeyboardAvoidingView>
+          </View>
+        )}
+
+        {/* ── MODAL: DEREGISTRACJA CENTRALKI (2 kroki, potwierdzenie kodem z maila) ── */}
+        {deregVisible && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '85%' }}>
+              <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20, borderColor: '#5c1a1a', borderWidth: 1 }}>
+                <Text style={{ color: '#e57373', fontWeight: 'bold', fontSize: 17, marginBottom: 6 }}>🔌 Odłączenie centralki</Text>
+                {deregStep === 'request' ? (
+                  <>
+                    <Text style={{ color: '#aaa', fontSize: 13, marginBottom: 16, lineHeight: 19 }}>
+                      To trwale odłączy i zresetuje centralkę: wyczyści jej WiFi, konto i karty RFID, po czym wróci do trybu CTRLABLE_SETUP. Wyślemy kod potwierdzający na Twój e-mail.
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <TouchableOpacity style={[styles.secondaryBtn, { flex: 1 }]} onPress={() => setDeregVisible(false)}>
+                        <Text style={styles.btnText}>Anuluj</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#7f1d1d', opacity: deregBusy ? 0.5 : 1 }]} disabled={deregBusy} onPress={requestDeregisterCode}>
+                        <Text style={styles.btnText}>{deregBusy ? 'Wysyłanie…' : 'Wyślij kod'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </>
+                ) : (
+                  <>
+                    <Text style={{ color: '#aaa', fontSize: 13, marginBottom: 12, lineHeight: 19 }}>
+                      Wpisz 6-cyfrowy kod wysłany na Twój e-mail, aby potwierdzić trwałe odłączenie centralki.
+                    </Text>
+                    <TextInput
+                      style={styles.inputField}
+                      placeholder="np. 482913"
+                      placeholderTextColor="#555"
+                      value={deregCodeInput}
+                      onChangeText={setDeregCodeInput}
+                      autoFocus
+                      keyboardType="number-pad"
+                      maxLength={6}
+                      returnKeyType="done"
+                      onSubmitEditing={submitDeregisterConfirm}
+                    />
+                    <View style={{ flexDirection: 'row', gap: 8, marginTop: 14 }}>
+                      <TouchableOpacity style={[styles.secondaryBtn, { flex: 1 }]} onPress={() => { setDeregVisible(false); setDeregCodeInput(''); }}>
+                        <Text style={styles.btnText}>Anuluj</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, backgroundColor: '#7f1d1d', opacity: deregBusy ? 0.5 : 1 }]} disabled={deregBusy} onPress={submitDeregisterConfirm}>
+                        <Text style={styles.btnText}>{deregBusy ? 'Odłączanie…' : 'Potwierdź odłączenie'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </>
+                )}
+              </View>
+            </KeyboardAvoidingView>
+          </View>
+        )}
+
       </View>
     </SafeAreaView>
   );

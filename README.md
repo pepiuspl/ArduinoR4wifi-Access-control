@@ -1,6 +1,6 @@
 # CTRLABLE Node — Full System Documentation
 
-**Last updated:** July 29, 2026
+**Last updated:** August 13, 2026
 
 ---
 
@@ -19,15 +19,14 @@
 │ (App.js)   │                         │  Docker container  │
 └────────────┘                         └───────────────────┘
       ▲
-      │ Tailscale VPN (private dev access)
-      │ or access.ctrlable.pl (public, toggle Access List)
+      │ Tailscale VPN (private dev access — default, no public exposure)
       ▼
   Metro Bundler (port 8081)
 ```
 
-- **ESP32** connects directly to `192.168.0.199:3000` on LAN (not through nginx)
-- **Phone app** connects via HTTPS through `node.ctrlable.pl` → NPM → `192.168.0.199:3000`
-- **Metro bundler** (Expo dev server) runs on port 8081 — reachable either via **Tailscale** (private, daily use) or via **access.ctrlable.pl** (public, demos only — toggle Access List)
+- **ESP32 → server:** connects to `node.ctrlable.pl` on port 3000 — see §5.2 for the critical port-forwarding requirement and known security caveat.
+- **Phone app → server:** HTTPS through `node.ctrlable.pl` (443) → NPM → `192.168.0.199:3000`. Always public, always encrypted — unaffected by anything below.
+- **Dev bundler (Metro):** reached via **Tailscale** (`100.72.102.40:8081`) for daily use. `access.ctrlable.pl` exists as a fallback public path for demos only, normally locked behind Basic Auth — see §6.2.
 
 ---
 
@@ -37,70 +36,51 @@
 
 | Name | IP | Role | OS |
 |---|---|---|---|
-| smartlock-backend | 192.168.0.199 (privileged LXC on Proxmox host, container ID varies) | Node.js server, PostgreSQL, pm2 | Debian |
+| smartlock-backend | 192.168.0.199 (privileged LXC on Proxmox host) | Node.js server, PostgreSQL, pm2, Tailscale | Debian |
 | Proxy | 192.168.0.102 | Nginx Proxy Manager (Docker) | Debian/Docker host |
-| ESP32 | 192.168.0.76 (DHCP) | Access control hardware | ESP32 DevKit |
+| ESP32 | 192.168.0.76 (DHCP) | Access control hardware | ESP32 DevKit (WROOM-32) |
 | Router | 192.168.0.1 | Gateway, DHCP, port forwarding | — |
 
 ### 2.2 Domains (DNS A records → 185.101.191.76)
 
 | Domain | Points to | Purpose |
 |---|---|---|
-| `node.ctrlable.pl` | NPM → 192.168.0.199:3000 | API server (HTTPS) — always public |
-| `access.ctrlable.pl` | NPM → 192.168.0.199:8081 | Expo Metro bundler — public **only when demoing**, otherwise use Tailscale |
-
-**DNS registrar note:** enter only `node` or `access` as the record name — the registrar appends `.ctrlable.pl` automatically.
+| `node.ctrlable.pl` | NPM → 192.168.0.199:3000 (HTTPS/443) | API server — always public, always HTTPS |
+| `node.ctrlable.pl:3000` | Router → 192.168.0.199:3000 (raw HTTP, **no TLS**) | ESP32 firmware connection — see §5.2, security caveat |
+| `access.ctrlable.pl` | NPM → 192.168.0.199:8081 | Expo Metro bundler — normally locked (Basic Auth), public only during demos |
 
 ### 2.3 Port forwarding (Router → LAN)
 
 | External port | Internal destination | Purpose |
 |---|---|---|
 | 80 | 192.168.0.102:80 | NPM HTTP (Let's Encrypt challenges) |
-| 443 | 192.168.0.102:443 | NPM HTTPS (covers both node. and access. subdomains) |
+| 443 | 192.168.0.102:443 | NPM HTTPS (node./access. subdomains) |
+| 3000 | 192.168.0.199:3000 | **ESP32 firmware connection — raw HTTP, unencrypted.** Required because firmware uses plain `WiFiClient`, not `WiFiClientSecure`. See §5.2 for the plan to eliminate this. |
 
 ### 2.4 Nginx Proxy Manager
 
-**URL:** `http://192.168.0.102:81`
-**Container name:** `nginx-proxy-manager`
-**Data path on host:** `/opt/npm/data` (mounted to `/data` in container)
+**URL:** `http://192.168.0.102:81` · **Container:** `nginx-proxy-manager` · **Data path:** `/opt/npm/data` (mounted to `/data`)
 
 #### Proxy host: node.ctrlable.pl
-
-- Scheme: `http`, Forward: `192.168.0.199:3000`, Websockets: ON
-- SSL: Let's Encrypt, Force SSL ON
+- Scheme `http`, Forward `192.168.0.199:3000`, Websockets ON, SSL Let's Encrypt + Force SSL
 - Advanced tab:
 ```nginx
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header Host $host;
-
 limit_req zone=api burst=10 nodelay;
 ```
-
-#### Rate limiting config (inside NPM container, http-level directive)
-
-```bash
-docker exec nginx-proxy-manager cat /etc/nginx/conf.d/rate_limit.conf
-# Should contain: limit_req_zone $binary_remote_addr zone=api:10m rate=120r/m;
-```
-If missing after a container restart, recreate it:
-```bash
-docker exec nginx-proxy-manager sh -c 'echo "limit_req_zone \$binary_remote_addr zone=api:10m rate=120r/m;" > /etc/nginx/conf.d/rate_limit.conf'
-docker exec nginx-proxy-manager nginx -t && docker exec nginx-proxy-manager nginx -s reload
-```
-120r/m (not the original 30r/m) — the app polls `/api/data` every 2s; a lower limit causes false "offline" flickers from 429 responses.
+- Rate limit config (`/etc/nginx/conf.d/rate_limit.conf` inside container): `limit_req_zone $binary_remote_addr zone=api:10m rate=120r/m;` — raised from an original 30r/m which caused false "offline" states in the app.
 
 #### Proxy host: access.ctrlable.pl
+- Scheme `http`, Forward `192.168.0.199:8081`, Websockets ON, SSL Let's Encrypt + Force SSL
+- **Access List:** kept on Basic Auth (`CTRLABLE Dev`) permanently. Not toggled anymore — see §6.2 for why.
 
-- Scheme: `http`, Forward: `192.168.0.199:8081`, Websockets: ON
-- SSL: Let's Encrypt, Force SSL ON
-- **Access List:** toggle between "Publicly Accessible" (for demos) and a Basic Auth list named `CTRLABLE Dev` (default/idle state) — see §6.2
-
-**KNOWN ISSUE:** deleting/recreating a proxy host in NPM sometimes fails to write the `.conf` file. After recreating, verify:
+**KNOWN NPM ISSUE:** recreating a proxy host sometimes fails to write the `.conf` file:
 ```bash
 docker exec nginx-proxy-manager grep -rl "node.ctrlable" /data/nginx/
+# empty → docker restart nginx-proxy-manager
 ```
-If nothing found: `docker restart nginx-proxy-manager`.
 
 ---
 
@@ -108,166 +88,142 @@ If nothing found: `docker restart nginx-proxy-manager`.
 
 ### 3.1 File locations
 
-| File | Path | Purpose |
-|---|---|---|
-| Server code | `/opt/smartlock-server/server.js` | Main API server |
-| Environment | `/opt/smartlock-server/.env` | All secrets and credentials |
-| App code | `/opt/smartlock-server/app/App.js` | React Native app |
-| App config | `/opt/smartlock-server/app/app.json` | Expo configuration |
-| OTA cache | `/opt/smartlock-server/updates/` | Cached firmware .bin files |
-| System logs (master) | `/var/log/smartlock/smartlock_system.log` | All server activity |
-| System logs (categorized) | `/var/log/smartlock/{entries,connections,updates,security,provisioning,mail}/YYYY-MM-DD.log` | Same events, split by category and day — see §3.6 |
+| File | Path |
+|---|---|
+| Server code | `/opt/smartlock-server/server.js` |
+| Environment | `/opt/smartlock-server/.env` |
+| App code | `/opt/smartlock-server/app/App.js` |
+| OTA cache | `/opt/smartlock-server/updates/` |
+| Master log | `/var/log/smartlock/smartlock_system.log` |
+| Categorized logs | `/var/log/smartlock/{entries,connections,updates,security,provisioning,mail}/YYYY-MM-DD.log` |
 
 ### 3.2 Environment file (.env)
-
 ```
 JWT_SECRET=<random 64-char hex>
-GITHUB_PAT=<GitHub personal access token with repo scope>
+GITHUB_PAT=<GitHub PAT with repo scope>
 DB_PASSWORD=<PostgreSQL password for admin user>
 DB_USER=admin
 DB_NAME=smartlock_db
 EXPO_TOKEN=<Expo access token for EAS CLI>
 ```
-
-Loaded with `require('dotenv').config({ path: '/opt/smartlock-server/.env', override: true })` — the `override: true` is essential; without it pm2's cached env wins over `.env` and credential rotation silently fails. Change credentials in `.env` only, then `pm2 restart ctrlable-server` — no need to touch pm2 directly.
+Loaded with `override: true` — essential, or pm2's cached env wins over `.env`.
 
 ### 3.3 pm2 processes
-
 | Name | Command | Working dir |
 |---|---|---|
 | ctrlable-server | `node server.js` | `/opt/smartlock-server` |
 | ctrlable-app | `npx expo start --lan --port 8081` | `/opt/smartlock-server/app` |
 
-**pm2 binary:** `/usr/local/bin/pm2`. **systemd service `ctrlable-server` is DISABLED** — pm2 only.
-
-#### Common commands
 ```bash
 pm2 list
 pm2 restart ctrlable-server         # picks up .env changes automatically
 pm2 logs ctrlable-server --lines 20 --nostream
-pm2 env 0
 pm2 save                            # persist across reboot
-pm2 resurrect                       # restore after reboot
-
-# Full app restart with hostname (choose ONE mode — see §3.7)
-pm2 delete ctrlable-app
-kill -9 $(lsof -t -i :8081) 2>/dev/null
-sleep 3
-cd /opt/smartlock-server/app
-REACT_NATIVE_PACKAGER_HOSTNAME=<hostname> \
-  pm2 start "npx expo start --lan --port 8081" --name ctrlable-app
-pm2 save
 ```
 
 ### 3.4 Known server.js bugs that recur on file replacement
-
-These bugs have reappeared **multiple times** across separate edits/uploads — always grep for them after any server.js change:
-
+Grep for these after **every** server.js edit — they have each reappeared multiple times across separate sessions:
 ```bash
-# 1. Infinite loops — must have i++ not i)
-grep "for (let i = 0; i <" /opt/smartlock-server/server.js
-# every hit must show: i++) {
-
-# 2. JWT regex — must capture full token
-grep "header.match" /opt/smartlock-server/server.js
-# must show: (.+)  NOT  (.)
-
-# 3. Keypad brute force counter — must increment
-grep "keypadAttempts\[mac\].count" /opt/smartlock-server/server.js
-# must show: count++  NOT  count;
-
-# 4. PIN validation regex — must allow multi-digit
-grep "test(String(pin))" /opt/smartlock-server/server.js
-# must show: /^\d+$/  NOT  /^\d$/
-
-# 5. getFactoryAdminPassword — server algorithm MUST match firmware exactly
-grep -A6 "function getFactoryAdminPassword" /opt/smartlock-server/server.js
-# must use hashNum += (accumulate), and return "CN" + first 5 digits of hashNum
-# (NOT hashNum = (overwrite), NOT a raw 6-digit number — these are two different
-#  historical bugs that both broke WiFi-change / local hardware auth)
-
-# 6. MAC declaration order in /api/auth/keypad
-# const { pin } and const mac MUST be declared BEFORE the `if (!mac || !pin)` check
-
-# 7. GitHub response chunking
-grep "githubRes.on('data'" /opt/smartlock-server/server.js
-# must show: data += chunk   NOT   data = chunk
-
-# 8. dotenv override
-grep "override" /opt/smartlock-server/server.js
-# must show: override: true
+grep "for (let i = 0; i <" server.js          # must show i++)
+grep "header.match" server.js                  # must show (.+) not (.)
+grep "keypadAttempts\[mac\].count" server.js    # must show count++ not count;
+grep "test(String(pin))" server.js              # must show /^\d+$/ not /^\d$/
+grep -A6 "function getFactoryAdminPassword" server.js  # must use hashNum += (accumulate), return "CN"+first 5 digits
+grep "githubRes.on('data'" server.js            # must show data += chunk
+grep "override" server.js                       # must show override: true
+grep "ORDER BY d\.id\|ORDER BY id ASC" server.js  # must be EMPTY — devices table has no 'id' column, only mac_address. card_credentials DOES have 'id', so hits there are fine.
 ```
 
-### 3.5 API Endpoints
+### 3.5 Database table ownership — recurring gotcha
+**Every new/altered table in this project has hit "must be owner of table" or "permission denied for schema public" at least once**, because the `admin` DB user isn't always the owner. After any migration failure, check and fix:
+```bash
+psql_smartlock_db -c "\dt+"    # look for Owner != admin
+su -l postgres -c "psql -d smartlock_db -c 'ALTER TABLE <name> OWNER TO admin;'"
+su -l postgres -c "psql -d smartlock_db -c 'GRANT CREATE ON SCHEMA public TO admin;'"  # if CREATE TABLE itself fails
+```
+Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `system_events`.
+
+### 3.6 API Endpoints (current, full list)
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | /api/auth/login | None | Login, returns JWT |
-| POST | /api/auth/register | None | Create account |
-| POST | /api/auth/forgot_password | None | Step 1 of password reset — sends 6-digit code |
-| POST | /api/auth/verify_reset_code | None | Step 2 — validates code |
-| POST | /api/auth/confirm_password_reset | None | Step 3 — sets new password |
-| GET | /api/data | JWT | Dashboard data (lock state, users, logs, devices list) |
-| GET | /api/unlock | JWT | Trigger remote unlock (`?mac=` optional, multi-device) |
-| GET | /api/toggle_learn | JWT | Toggle RFID learning mode (`?mac=` optional) |
-| POST | /api/settings/wifi | JWT | Change ESP32 WiFi credentials (`mac` in body, optional) |
-| POST | /api/settings/password | JWT | Change app account password |
-| GET | /api/firmware/version | None | Check latest GitHub release |
-| GET | /api/ota/push | JWT | Download .bin from GitHub and push OTA |
-| GET | /api/hardware/poll | None | ESP32 heartbeat/command poll |
-| GET | /api/hardware/log | None | ESP32 remote log submission |
-| GET | /api/hardware/log_button | None | ESP32 button press log |
-| POST | /api/auth/keypad | None | ESP32 keypad PIN verification (enforces schedule/expiry/max-uses) |
-| POST | /api/auth/save_push_token | JWT | Save Expo push notification token |
-| POST | /api/keypad/add | JWT | Add new keypad PIN (supports guest-code fields) |
-| POST | /api/keypad/delete | JWT | Delete keypad PIN |
-| POST | /api/keypad/toggle_active | JWT | Enable/disable keypad PIN |
-| POST | /api/keypad/rename | JWT | Rename keypad PIN |
-| POST | /api/keypad/update_schedule | JWT | Set/update day+time access window for a PIN |
-| GET | /api/devices/list | JWT | List all devices on the account (multi-device) |
-| POST | /api/devices/rename | JWT | Rename a device |
-| POST | /api/devices/remove | JWT | Remove a device from the account |
-| POST | /api/user/rename | JWT | Rename an RFID card holder |
-| POST | /api/user/toggle_active | JWT | Enable/disable an RFID card |
-| POST | /api/user/delete | JWT | Delete an RFID card |
-| GET | /api/lock/download-firmware | None | ESP32 downloads .bin during OTA |
+| POST | /api/auth/login | — | Login, returns JWT |
+| POST | /api/auth/register | — | Create account |
+| POST | /api/auth/forgot_password | — | Password reset step 1 |
+| POST | /api/auth/verify_reset_code | — | Password reset step 2 |
+| POST | /api/auth/confirm_password_reset | — | Password reset step 3 |
+| GET | /api/data | JWT | Dashboard data (lock state, users, logs, devices list, keypad_pins w/ schedule fields) |
+| GET | /api/unlock | JWT | Remote unlock (`?mac=` optional) |
+| GET | /api/toggle_learn | JWT | Toggle RFID learning mode |
+| POST | /api/settings/wifi | JWT | Change ESP32 WiFi credentials |
+| POST | /api/settings/auto_lock | JWT | Set auto-lock delay in seconds (1–60), takes effect on next poll, no restart |
+| GET | /api/firmware/version | — | Latest GitHub release check |
+| GET | /api/ota/push | JWT | Push OTA update |
+| GET | /api/hardware/poll | — | ESP32 heartbeat/command poll — carries `?email=<owner_email>` every cycle (used for auto-provisioning) and returns command flags incl. `unlock`, `ota`, and `deregister` (owner-triggered EEPROM wipe → CTRLABLE_SETUP) |
+| GET | /api/hardware/log | — | ESP32 remote log — **filters/simplifies OTA messages** before storing (raw detail stays in file log only, client sees 3 clean states: connecting/updating/success) |
+| GET | /api/hardware/log_button | — | Physical button press log |
+| POST | /api/hardware/scan | — | RFID scan reported by ESP32 — **this only logs/queues server-side; the actual unlock decision on RFID is made LOCALLY on the ESP32 from its own EEPROM, see §5.7.** |
+| POST | /api/auth/keypad | — | Keypad PIN verification — **fully server-side**, enforces schedule/expiry/max-uses |
+| POST | /api/auth/save_push_token | JWT | Save Expo push token |
+| POST | /api/keypad/add | JWT | Add PIN (supports `isGuestCode`, `expiresAt`, `maxUses`) |
+| POST | /api/keypad/delete / toggle_active / rename | JWT | Manage PINs |
+| POST | /api/keypad/update_schedule | JWT | Set day/time window for a PIN |
+| POST | /api/user/update_schedule | JWT | Set day/time window for an RFID card — **enforced only in `/api/hardware/scan`'s logging/queue decision, NOT in the ESP32's actual local unlock decision. See §5.7 — this is a known limitation.** |
+| GET/POST | /api/devices/list, rename, remove | JWT | Multi-device management. `remove` is a soft-delete (device auto-re-registers on next poll — see below); prefer `deregister_*` for a real removal |
+| POST | /api/devices/deregister_request | JWT | Owner-only, **hard** deregister step 1: emails a 6-digit confirm code |
+| POST | /api/devices/deregister_confirm | JWT | Owner-only step 2: verifies code → deletes device + all its data → commands the ESP32 to wipe its EEPROM (factory reset) via the poll's `deregister:true` flag, blocking auto-re-registration for 120 s |
+| POST | /api/devices/invite, accept_invite | JWT | Multi-admin: owner invites a co-admin by email; email now carries a **link** (`invite_token`) AND a 6-digit `invite_code` fallback. `accept_invite` still redeems the code in-app |
+| GET | /invite?token= | — | **Server-rendered HTML** invite-acceptance page (opened from the email link). Shows device name + locked email, collects password + RODO consent |
+| POST | /api/devices/accept_via_web | — | Redeems an `invite_token`: creates the account (if new) + `device_shares` row. Never resets an existing account's password |
+| GET | /api/devices/shared_users | JWT | Owner-only: list co-admins on a device |
+| POST | /api/devices/revoke_share | JWT | Owner-only: remove a co-admin |
+| GET | /api/logs/search | JWT | Filtered/paginated log search — `mac`, `category`, `q`, `from`, `to`, `limit`, `offset` |
+| POST | /api/user/rename / toggle_active / delete | JWT | Manage RFID cards **in the server's database** — see §5.8 for the EEPROM-sync caveat |
 
 ---
 
 ## 4. Database (PostgreSQL)
 
-### 4.1 Connection
-
 ```bash
-psql -h localhost -U admin smartlock_db    # interactive, works as root via /root/.pgpass
-psql_smartlock_db                          # alias, same thing
-psql -h localhost -U admin smartlock_db -c "SELECT * FROM devices;"
+psql_smartlock_db                          # alias, interactive session as admin
 ```
-`.pgpass` at `/root/.pgpass`: `localhost:5432:smartlock_db:admin:<password>` (chmod 600). Locale warnings are harmless (`export LC_ALL=C` is already in `~/.bashrc`).
 
-### 4.2 Key tables
+### 4.1 Key tables (as of this session)
 
 ```sql
--- Devices (multi-device: one account can own many rows here)
+-- Devices (multi-device: one account can own many; device_shares grants co-admin access)
 SELECT * FROM devices;
--- mac_address, account_id, device_name, last_known_ip, operational_mode, firmware_version, last_heartbeat
+-- mac_address (PK, no 'id' column!), account_id, device_name, last_known_ip,
+-- operational_mode, firmware_version, last_heartbeat, auto_lock_delay_ms
 
--- Accounts
-SELECT id, email, push_token FROM accounts;
+-- Multi-admin
+SELECT * FROM device_shares;   -- id, mac_address, account_id, invited_by, created_at
+SELECT * FROM device_invites;  -- id, mac_address, invited_email, invite_code, invite_token, invited_by, expires_at, used
 
--- Keypad PINs (now includes scheduling + guest-code columns)
+-- Convenience view: which device belongs to whom (owner email via JOIN,
+-- no denormalized column to drift). Created once, then: SELECT * FROM devices_owned;
+CREATE OR REPLACE VIEW devices_owned AS
+SELECT d.mac_address, a.email AS owner_email, d.account_id, d.device_name,
+       d.operational_mode, d.firmware_version, d.last_known_ip, d.last_heartbeat
+FROM devices d JOIN accounts a ON a.id = d.account_id;
+
+-- Keypad PINs (schedule + guest-code columns)
 SELECT * FROM keypad_pins;
--- id, account_id, name, pin_hash, active, created_at,
+-- id, account_id (creator), mac_address (device the PIN belongs to — per-centralka scoping),
+-- name, pin_hash, active, created_at,
 -- schedule_enabled, schedule_days (bitmask, bit0=Sun..bit6=Sat), schedule_start_minutes, schedule_end_minutes,
 -- expires_at, max_uses, use_count, is_guest_code
--- (columns auto-migrated on server startup via runSchemaMigrations(), safe to re-run)
 
--- Event log (now consistently tagged with [Node: MAC] in the message text)
+-- RFID cards (server-side record — see §5.7/5.8 for sync caveats with ESP32's own EEPROM)
+SELECT * FROM card_credentials;
+-- id, mac_address, holder_name, card_uid, is_active, hardware_slot_idx,
+-- schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
+
+-- Event log (category-tagged: entries/security/provisioning/connections)
 SELECT * FROM system_events ORDER BY event_time DESC LIMIT 20;
 ```
 
-### 4.3 Common fixes
-
+### 4.2 Common fixes
 ```bash
 # Fix device IP (if overwritten by gateway/hairpin-NAT IP)
 psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '192.168.0.76' WHERE mac_address = 'D4:E9:F4:78:08:60';"
@@ -277,69 +233,117 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 
 ## 5. Firmware (ESP32)
 
-### 5.1 Pin assignments (current — post relay-swap and tamper install)
+### 5.1 Pin assignments (current)
 
 | Function | GPIO | Notes |
 |---|---|---|
-| RELAY_PIN | 13 | **Active-HIGH module** (2nd/current relay board) — HIGH energizes/unlocks, LOW deenergizes/locks. Boot state = LOW immediately. |
+| RELAY_PIN | 13 | See §5.6 — **actively driven, no floating.** HIGH=unlock, LOW=lock (idle). |
 | BUTTON_PIN | 33 | INPUT_PULLUP |
 | LED_GREEN | 25 | |
-| LED_RED | 26 | |
+| LED_RED | 26 | Now also flashes 2× on RFID card denial (unknown or blocked card) |
 | BUZZER_PIN | 27 | |
 | RST_PIN (RFID) | 4 | |
 | SS_PIN (RFID) | 5 | |
-| TAMPER_PIN | 32 | INPUT_PULLUP, `TAMPER_INSTALLED = true` (physically installed) |
-| KP_ROW1 | 14 | INPUT_PULLUP |
-| KP_ROW2 | 15 | INPUT_PULLUP |
-| KP_ROW3 | 34 | INPUT_PULLUP (limited internal pull-up on input-only pin; external 10kΩ recommended) |
-| KP_ROW4 | 35 | same as ROW3 |
-| KP_COL1 | 16 | OUTPUT |
-| KP_COL2 | 17 | OUTPUT |
-| KP_COL3 | 12 | OUTPUT |
-| I2C SDA (OLED) | 21 | `Wire.begin()` default |
-| I2C SCL (OLED) | 22 | `Wire.begin()` default — do **not** wire anything else here |
+| TAMPER_PIN | 32 | INPUT_PULLUP, `TAMPER_INSTALLED = true` |
+| KP_ROW1–4 | 14, 15, 34, 35 | INPUT_PULLUP; 34/35 lack true internal pull-up (input-only pins) |
+| KP_COL1–3 | 16, 17, 12 | OUTPUT |
+| I2C SDA/SCL (OLED) | 21, 22 | `Wire.begin()` default |
+| RFID SPI (SCK/MOSI/MISO) | 18, 23, 19 | Default VSPI |
 
-**Relay history note:** the relay module was swapped mid-project. The *old* module was active-LOW (LOW=unlock). The *current/new* module is active-HIGH (HIGH=unlock). If you ever swap hardware again, `relayActivate()`/`relayDeactivate()` and the boot-state line in `setup()` all need to flip together — see git history or the mid-2026 conversation log for both variants.
-
-### 5.2 Server connection
-
+### 5.2 Server connection — architecture note (important)
 ```cpp
 #define PROXMOX_SERVER "node.ctrlable.pl"
 #define PROXMOX_PORT   3000
 ```
-Resolves via hairpin NAT through the router. UFW on the server allows port 3000 from `192.168.0.1` (hairpin NAT), `192.168.0.76` (direct), `192.168.0.102` (NPM).
+**Must stay as the domain name, not a local IP.** Devices will eventually be field-deployed at customer sites, not on this LAN — a hardcoded local IP would only work here and break everywhere else. This requires port 3000 forwarded on the router (§2.3).
+
+**Known security gap:** this connection is plain HTTP (`WiFiClient`, no TLS) over a port forwarded straight to the internet. Credentials, PINs, and JWTs for hardware endpoints currently travel unencrypted. **Planned fix:** migrate firmware from `WiFiClient` to `WiFiClientSecure` and connect via `node.ctrlable.pl:443` (through NPM, same as the app) instead of a raw port-forwarded 3000. This is a real firmware project on its own — not done yet, tracked here so it isn't forgotten before real customer deployments.
 
 ### 5.3 OTA update workflow
-
-1. Build `.bin`: Arduino IDE → Sketch → Export Compiled Binary (or let GitHub Actions auto-build on push)
-2. On GitHub: **do not edit an existing release's assets** — GitHub keeps the same `release.id`, which the OTA system uses for comparison, so silently editing assets means devices never see the "update available" state. Instead: delete the release (not the tag), then "Draft a new release" selecting the **existing tag**, attach the new `.bin`. This gives a fresh `release.id` while keeping the version string unchanged — lets you ship hotfixes under a stable version number like `v3.0.1` forever.
-3. Delete cached binary on server: `rm /opt/smartlock-server/updates/lock_*.bin`
+1. Build `.bin` (Arduino IDE or GitHub Actions auto-build on push)
+2. **Don't edit an existing release's assets** — delete the release (keep the tag), draft a new one on the same tag, attach the new `.bin`. Keeps version string stable while giving OTA logic a fresh `release.id`.
+3. `rm /opt/smartlock-server/updates/lock_*.bin` to clear cache
 4. Trigger from app: Firmware screen → Check for updates → Update
+5. **Client-facing OTA messages are now simplified** (server-side filtering in `/api/hardware/log`) — users see only 3 states: "Próba nawiązania połączenia...", "Aktualizacja w toku...", "Aktualizacja zakończona pomyślnie ✅". Raw technical detail (byte counts, headers) stays in the file log only.
 
 ### 5.4 EEPROM layout
-
 | Address | Data |
 |---|---|
 | 0 | totalCards |
-| 10+ | User structs (RFID uid + name) |
+| 10+ | User structs (RFID uid + name), 10 slots max |
+| 220+ | isCardActive flags, one byte per slot |
 | 260 | ssid |
 | 292 | pass |
 | 324 | owner_email |
-| 480 | installedReleaseId (GitHub release ID of currently flashed firmware — loaded at boot so device doesn't re-trigger OTA after every restart) |
+| 480 | installedReleaseId |
 
 ### 5.5 Compiling
-
 - Board: ESP32 Dev Module, core 3.3.10
-- `server.available()` deprecated → use `server.accept()`
+- `server.available()` deprecated → `server.accept()`
 - `setConnectTimeout()` renamed → `setConnectionTimeout()`
-- GPIO 34/35 input-only, `gpio 85 no internal PU` warning is harmless
-- GitHub Actions auto-compiles on push and creates a release tagged `build-<commit-hash>` — the app hides this raw string from users (shows generic "update available" text), server logs still capture it for debugging
+- GPIO 34/35 `gpio 85 no internal PU` warning is harmless
 
-### 5.6 Provisioning page security
+### 5.6 Relay — final resolved state (long debugging history, read before touching again)
+This relay module (the *current*, physically-swapped-in one — different from the original module used earlier in the project) does **not** behave like a simple active-HIGH or active-LOW device. Multimeter testing across several sessions established:
 
-The ESP32's local setup page (`http://192.168.4.1` when in `CTRLABLE_SETUP` AP mode) **no longer pre-fills the saved WiFi password** in the form — this was leaking the home WiFi password in plaintext to anyone who connected to the setup AP. Verify this fix is present if you ever regenerate the firmware from an old backup:
+| Pin IN state | Result |
+|---|---|
+| Actively driven HIGH (3.3V, `OUTPUT`+`digitalWrite(HIGH)`) | **Unlocks** (final, current config) |
+| Actively driven LOW (GND, `OUTPUT`+`digitalWrite(LOW)`) | **Locks** (final, current config, also the idle/boot state) |
+| Floating (`pinMode(INPUT)`) | Unreliable — **do not use.** Measured 3.96–4.38V (module's own internal pull-up racing against ESP32's ESD/leakage), not true high-Z. Gave ~20% reliability in testing. |
+
+**Current code (final):**
 ```cpp
-// Should NOT include value='...' with the saved password:
+void relayActivate() {   // unlock
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);
+}
+void relayDeactivate() { // lock (idle)
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+}
+// setup(): pinMode(RELAY_PIN, OUTPUT); digitalWrite(RELAY_PIN, LOW); // locked at boot
+```
+**If reliability issues return** (module swapped again, or this one degrades) — the diagnostic method that worked: multimeter directly on the relay's IN pin (not through the ESP32), testing 3.3V / GND / true-floating (bare wire, disconnected) as three separate conditions, observing the physical lock state (not just the relay board's own LEDs, which can be misleading). If GPIO-level 3.3V logic genuinely can't reach the module's actual energization threshold, the only real fix is a transistor buffer (NPN, base via 1kΩ from GPIO, collector to IN, emitter to GND, pull-up resistor from IN to the relay module's own supply rail) — this was scoped but not implemented, since the active-HIGH/LOW combination above tested as sufficient.
+
+### 5.7 RFID architecture — important correction
+**RFID card matching and the unlock decision happen LOCALLY on the ESP32, from its own EEPROM** (`memcmp` against `users[]` array) — **not** server-verified like keypad PINs. `transmitCardPayloadToCloud()` / `/api/hardware/scan` is a fire-and-forget report to the server for logging/push-notification purposes only; it does not gate the physical unlock.
+
+**Practical consequence:** the RFID scheduling feature (`/api/user/update_schedule`, enforced in `/api/hardware/scan`) only affects what the *server* logs and whether it queues a push notification — it does **not** actually block the physical door from opening if the card is a match in EEPROM. True RFID schedule enforcement would require the firmware to either sync schedule data locally and check it before calling `openDoor()`, or change the architecture so the ESP32 waits for server permission before opening (network-dependent, undesirable for offline reliability). **This is an open item, not yet built** — flagged in the missing-features PDF as "requires firmware changes."
+
+### 5.8 EEPROM ↔ database sync — known fragility
+Because RFID matching is local (§5.7), the ESP32's own EEPROM card list and the server's `card_credentials` table are **two independent copies** that can drift out of sync — confirmed to happen in practice (a card named "Tomasz 2" existed in EEPROM, fully functional for physical unlock, while completely absent from the server database and invisible in the app).
+
+Causes: learning a card while the server connection is down (EEPROM write succeeds, cloud registration silently fails); deleting/renaming via the app updates the database and *attempts* to relay to the ESP32's local endpoints, but if that relay fails, or if the `idx` used doesn't correspond to the same row on both sides (array-position-based addressing, not a stable ID), the two can end up different.
+
+**To inspect the ESP32's actual EEPROM state directly** (bypasses the cloud/database entirely):
+```bash
+curl -s 'http://192.168.0.76/api/data?pass=<factory-admin-password>'
+```
+Compute the factory admin password:
+```bash
+node -e "
+const mac = 'D4:E9:F4:78:08:60'; const salt = 'CTRLABLE_KEY_2026';
+const combined = mac.toUpperCase() + salt; let h = 0;
+for (let i=0;i<combined.length;i++) h += combined.charCodeAt(i)*(i+1);
+console.log('CN'+String(h).substring(0,5));
+"
+```
+To delete a stray local-only EEPROM entry directly:
+```bash
+curl -s 'http://192.168.0.76/api/delete_user?idx=<N>&pass=<factory-password>'
+```
+**Recommended clean-resync procedure** if the two get out of sync: clear the EEPROM entries via the local endpoint above, confirm `total:0`, then re-learn the card fresh through the app — this writes to both sides simultaneously and keeps them matched.
+
+### 5.9 RFID antenna gain
+```cpp
+rfid.PCD_SetAntennaGain(rfid.RxGain_max);  // in forceHardwareRFIDReset(), after PCD_Init()
+```
+Set to maximum (48dB) to help with weaker tags (keyfobs vs. cards). **Tested and did not resolve** a specific case of a keyfob failing to read behind a keyboard enclosure — that turned out to be a pure physical range limitation (small keyfob antenna + added plastic distance), not a gain/software issue. RC522's antenna is etched directly on the PCB (not a swappable/extendable coil), so options there are limited to: physically reducing the distance (machining a recess in the enclosure), or accepting cards-only in that specific mounting location.
+
+### 5.10 Provisioning page security
+The local setup page (`http://192.168.4.1` in `CTRLABLE_SETUP` AP mode) does **not** pre-fill the saved WiFi password anymore:
+```cpp
 client.println("<input type='password' id='wifi_pass' name='p' placeholder='Password' required>");
 ```
 
@@ -348,91 +352,93 @@ client.println("<input type='password' id='wifi_pass' name='p' placeholder='Pass
 ## 6. Mobile App (React Native / Expo)
 
 ### 6.1 Key configuration
-
 | Setting | Value |
 |---|---|
-| backendUrl | `https://node.ctrlable.pl` (always) |
+| backendUrl | `https://node.ctrlable.pl` (always — verify after every regeneration) |
 | SDK | Expo 54 |
 | Project ID | `f64190e7-e6e5-425c-8767-5638bddde8d7` |
 | Bundle ID | `com.pepiuspl.ctrlablelock` |
-| Expo account | `pepiuspl` |
 
-**CRITICAL:** verify `backendUrl` has `https://` after every App.js regeneration:
+### 6.2 Reaching Metro (dev bundler) — Tailscale is the default, permanently
+After repeated confusion/security concerns, this is now settled:
+
+- **Daily use (you):** Tailscale. `REACT_NATIVE_PACKAGER_HOSTNAME=100.72.102.40`, connect via `exp://100.72.102.40:8081` from the Tailscale app. No public exposure, ever.
+- **Demos (external viewer, not on your tailnet):** use Tailscale's **node-sharing** feature (login.tailscale.com → Machines → `smartlock-backend` → Share) to grant a specific person temporary access to just this one machine — not full tailnet access. Revoke after.
+- **`access.ctrlable.pl` stays locked behind Basic Auth permanently.** It is not toggled for demos anymore — Expo Go can't pass Basic Auth credentials through when fetching the bundle anyway, so it never actually worked for that purpose. Public exposure of this endpoint leaks the Expo project ID, bundle identifier, internal file paths, and Expo username — not secrets, but not meant to be public either.
+
 ```bash
-grep "backendUrl.*useState" /opt/smartlock-server/app/App.js
-```
-
-### 6.2 Two ways to reach Metro (dev bundler) — pick one at a time
-
-Metro can only advertise **one** hostname in its manifest at a time (`REACT_NATIVE_PACKAGER_HOSTNAME`). You cannot have both Tailscale and public access active simultaneously without restarting Metro.
-
-**A) Tailscale (default/daily use — private, no exposure)**
-```bash
-tailscale status   # note your server's 100.x.x.x address
-pm2 delete ctrlable-app
-kill -9 $(lsof -t -i :8081) 2>/dev/null
+pm2 delete ctrlable-app; kill -9 $(lsof -t -i :8081) 2>/dev/null; sleep 3
 cd /opt/smartlock-server/app
 REACT_NATIVE_PACKAGER_HOSTNAME=100.72.102.40 \
   pm2 start "npx expo start --lan --port 8081" --name ctrlable-app
 pm2 save
 ```
-On phone: install Tailscale app, log into same account, then Safari → `exp://100.72.102.40:8081`.
 
-**B) Public via access.ctrlable.pl (demos only)**
-```bash
-pm2 delete ctrlable-app
-kill -9 $(lsof -t -i :8081) 2>/dev/null
-cd /opt/smartlock-server/app
-REACT_NATIVE_PACKAGER_HOSTNAME=access.ctrlable.pl \
-  EXPO_PACKAGER_PROXY_URL=https://access.ctrlable.pl \
-  pm2 start "npx expo start --lan --port 8081" --name ctrlable-app
-pm2 save
+Tailscale on the server itself (privileged LXC) needed this one-time host-side config to get TUN device access:
 ```
-**Both env vars are required** — without `EXPO_PACKAGER_PROXY_URL`, the manifest advertises `:8081` explicitly, which isn't reachable through NPM's port-443-only public path, causing a blank screen / "could not connect" on the demo device.
-
-Before demoing: NPM → `access.ctrlable.pl` → Details → Access List → **Publicly Accessible**.
-After demoing: switch Access List back to `CTRLABLE Dev` (Basic Auth) to stop leaking the manifest (project ID, bundle identifier, file paths, Expo username) publicly, then switch back to mode A for your own use.
-
-**Note:** Expo Go cannot pass Basic Auth credentials through when fetching the bundle — the auth prompt only protects a browser viewing the raw manifest JSON, it does not let Expo Go authenticate. This is a known limitation, not a bug in our config.
-
-Verify which mode is currently active:
-```bash
-curl -s https://access.ctrlable.pl | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['launchAsset']['url'])"
+# On the Proxmox HOST, in /etc/pve/lxc/<CTID>.conf:
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/net dev/net none bind,create=dir
 ```
+Then `pct stop <CTID> && pct start <CTID>`.
 
-### 6.3 Dependencies
+### 6.3 Multi-device support
+- Device switcher appears on the dashboard **only when the account has more than one device**.
+- Adding a device needs **no firmware changes** — same `.ino`, provisioned via `CTRLABLE_SETUP`, registered to the same account email.
+- Rename/remove from the switcher modal.
 
+### 6.4 Multiple admins per lock
+Access is **per-device**, modeled entirely on `device_shares(mac_address, account_id)` — there is **no global account-level role**. "Owner" vs "admin" is derived from ownership/shares at query time, so one account can own device A and be a co-admin on device B. This is what lets an owner grant an admin access to just one of several centralki.
+
+- **Owner** (`devices.account_id`, set at provisioning via `owner_email`): full control — rename/remove device, invite/revoke co-admins, WiFi settings.
+- **Co-admin** (row in `device_shares`, invited by email): can unlock, manage keypad PINs/RFID cards, view logs. Cannot remove the device, change WiFi, or manage other admins (owner-only actions check `devices.account_id` directly).
+
+**Management UI — the "🤝 Zespół (Administratorzy)" screen** (`currentScreen === 'team'`, in the burger menu, online mode only). Always available — **not** gated behind the multi-device switcher (which was the old bug: invite/accept were buried in a modal that only opened with >1 device, so a single-lock owner couldn't invite and a fresh invitee with 0 devices couldn't accept). The screen lists, per owned device: current admins (email + revoke button) and an email invite form (real `TextInput`, not `Alert.prompt` — that is iOS-only).
+
+**Invite flow (link-based):**
+1. Owner opens **Zespół**, picks the device card, enters an email → `POST /api/devices/invite`.
+2. Server generates `invite_token` (48-hex) + `invite_code` (6-digit fallback), emails a link `PUBLIC_BASE_URL/invite?token=…` (reuses the password-reset SMTP channel).
+3. Invitee opens the link → server-rendered page (`GET /invite`, `renderInvitePage()`) with the device name and locked email → sets a password + accepts RODO → `POST /api/devices/accept_via_web` creates the account (if new) and the `device_shares` row. An **existing** account is only granted the share — its password is never reset.
+4. Invitee logs into the app → the shared device appears (`/api/data` returns owned + shared devices, each with an `isOwner` flag).
+
+Web-rendered (not a deep link) because the app runs on Expo Go, where custom-scheme deep-linking is unreliable. The in-app "🔑 Mam kod zaproszenia" (6-digit `accept_invite`) still exists as a fallback in the device switcher.
+
+### 6.5 Keypad scheduling & guest codes
+- Adding a PIN: **Stały PIN** (permanent) or **👤 Kod gościnny** (expiry days + optional max-use limit).
+- Any PIN, guest or permanent, can have a **📅 Harmonogram** (day-of-week + time window) via the calendar icon on its row.
+- Day picker displays Monday-first (Pn/Wt/Śr/Cz/Pt/So/Nd) but the underlying bitmask stays JS `getDay()`-compatible (bit0=Sunday) — display order and storage order are intentionally decoupled via a `DAY_DISPLAY_ORDER` mapping array.
+- Card rename now uses the same inline-edit pattern as PIN rename (was previously an `Alert.prompt` popup, inconsistent — fixed).
+- **Card scheduling exists in the UI and server, but does not actually gate physical access** — see §5.7. Flagged here so this isn't rediscovered as a "bug" later.
+
+### 6.6 Log filtering/search
+- Dashboard log screen has a **⏱ Na żywo / 🔍 Szukaj** toggle.
+- Search mode: free-text search, category chips (🚪 Wejścia, ⚠️ Bezpieczeństwo, ⚙️ Konfiguracja, 🔄 Aktualizacje), date range, pagination ("Załaduj więcej").
+- Old log entries predating the categorization migration show as uncategorized (grey dot) — expected, not a bug.
+
+### 6.7 Configurable auto-lock delay
+- Settings screen → "⏱ Opóźnienie auto-blokady" — numeric input (1–60s) + Save.
+- Takes effect on the ESP32's **next poll cycle** (≤1s), no device restart needed.
+- Firmware reads `auto_lock_delay` from every poll response; falls back to 3000ms default if absent/invalid.
+
+### 6.8 Push notifications
+- Now fire on **successful** unlock via all three paths (keypad PIN, RFID card, remote app unlock) — previously only fired on denied/failed attempts.
+- Uses `push_entries` (separate from `push_alarms`, which covers tamper/security events) — independently togglable in app settings.
+
+### 6.9 Dependencies
 ```bash
 cd /opt/smartlock-server/app
 npm install --legacy-peer-deps    # ALWAYS use this flag
-# NEVER run npm audit fix --force
+# NEVER run npm audit fix or npm audit fix --force — breaks Expo deps in this project
 ```
 
-### 6.4 SecureStore
-
-`expo-secure-store` installed but **disabled in Expo Go** (needs native EAS build). Currently falls back to AsyncStorage automatically via the `Storage` wrapper in App.js. Re-enable when you do the native build.
-
-### 6.5 EAS Update (JS bundle publishing — separate from the dev server, publishes to Expo's CDN)
-
-```bash
-cd /opt/smartlock-server/app
-EXPO_TOKEN=$(grep EXPO_TOKEN /opt/smartlock-server/.env | cut -d= -f2) \
-  npx eas-cli update --channel production --message "description" --non-interactive
+### 6.10 Running the app locally on a dev machine (Windows)
 ```
-**Known limitation:** Expo Go caches published bundles aggressively with no reliable cache-clear on iOS — users may need to delete and reinstall Expo Go to see a newly published update. For active development, the Tailscale/access.ctrlable.pl dev-server approach (§6.2) is more reliable than EAS Update.
-
-### 6.6 Multi-device support
-
-- App shows a device switcher on the dashboard **only when the account has more than one device** — invisible for single-device installs, zero behavior change.
-- Selecting a device in the switcher sets `selectedMac`, which is silently appended to every `executeCommand`/`fetchStatus` call from then on.
-- Adding a new physical device requires **no firmware changes** — flash the same `.ino`, provision it via `CTRLABLE_SETUP`, register with the same account email. It appears in the switcher automatically once it polls successfully.
-- Rename/remove devices from the switcher modal (✏️ / 🗑️ icons next to each entry).
-
-### 6.7 Keypad scheduling & guest codes
-
-- Adding a PIN offers two modes: **Stały PIN** (permanent) or **👤 Kod gościnny** (guest code with expiry days + optional max-use limit).
-- Every PIN (guest or permanent) can additionally have a **📅 Harmonogram** (day-of-week + time-window restriction) set via the calendar icon on its row — independent of whether it's a guest code.
-- All enforcement happens server-side in `/api/auth/keypad` — **no firmware changes needed**, since PIN verification was already server-mediated (unlike RFID, which is matched locally on-device from EEPROM and would need firmware changes to support the same scheduling).
+scp -r root@100.72.102.40:/opt/smartlock-server/app "C:\path\to\Server_app"
+cd "C:\path\to\Server_app"
+npm install --legacy-peer-deps    # ~700 packages is normal; if you see only 1-2, the copy failed
+npx expo start
+```
+Use `cmd.exe`, not PowerShell, if `npm` is blocked by execution policy. Press `w` for web (needs `npx expo install react-dom react-native-web` first), or scan the QR with Expo Go on a phone on the same WiFi.
 
 ---
 
@@ -441,130 +447,130 @@ EXPO_TOKEN=$(grep EXPO_TOKEN /opt/smartlock-server/.env | cut -d= -f2) \
 ### 7.1 Firewall (UFW on smartlock-backend)
 ```bash
 ufw status
-# 3000 ALLOW 192.168.0.102 (NPM) / 192.168.0.76 (ESP32 direct) / 192.168.0.1 (hairpin NAT)
-# 8081 ALLOW 192.168.0.102 (NPM, for access.ctrlable.pl mode)
-# 22   ALLOW 192.168.0.0/24 (SSH from LAN)
+# 3000 ALLOW from 192.168.0.102 (NPM) / 192.168.0.76 (ESP32) / 192.168.0.1 (hairpin NAT)
+# 8081 ALLOW from 192.168.0.102
+# 22   ALLOW from 192.168.0.0/24
 ```
+Note: port 3000 is now **also** forwarded from the router directly to the internet for field-deployed ESP32 devices (§2.3, §5.2) — this is outside UFW's LAN-only rules and is the known unencrypted-transport gap tracked for future HTTPS migration.
 
-### 7.2 Fail2ban (on Proxy machine, 192.168.0.102)
-Bans IPs hitting 15+ 404s within 5 minutes, 24h ban.
+### 7.2 Fail2ban (on Proxy, 192.168.0.102)
 ```bash
 fail2ban-client status nginx-4xx
 ```
-**KNOWN ISSUE:** jail config must point at the real log path (`/opt/npm/data/logs/*_access.log`, not a Docker volume UUID path) — if fail2ban fails to start with "Have not found any log file for nginx-4xx jail", check `/etc/fail2ban/jail.local` matches this path. Root cause: `docker inspect nginx-proxy-manager` to confirm the actual `/data` bind mount source if it ever changes.
+Jail config must point at `/opt/npm/data/logs/*_access.log` (the real bind-mount path), not a Docker volume UUID.
 
-### 7.3 Tailscale (VPN for private remote dev access)
+### 7.3 Tailscale
 ```bash
 tailscale status
-tailscale up   # if disconnected
 ```
-Runs inside a **privileged** LXC container. Required Proxmox host config for TUN device access (must be set on the **Proxmox host**, not inside the container):
-```
-# In /etc/pve/lxc/<CTID>.conf on the Proxmox host:
-lxc.cgroup2.devices.allow: c 10:200 rwm
-lxc.mount.entry: /dev/net dev/net none bind,create=dir
-```
-Then `pct stop <CTID> && pct start <CTID>`. Without this, tailscaled fails with `/dev/net/tun does not exist`.
+See §6.2 for the LXC host-side TUN config needed to run it inside this privileged container.
 
 ### 7.4 Rate limiting
-120 req/min per IP (raised from an initial 30r/m which caused false "offline" states from the app's own 2s polling interval). Config split across NPM Advanced tab (`limit_req`) and `/etc/nginx/conf.d/rate_limit.conf` inside the container (`limit_req_zone`).
+120 req/min per IP (NPM). See §2.4.
 
-### 7.5 IP detection
-Server reads real client IP from `X-Real-IP`/`X-Forwarded-For` (set by NPM). Gateway IPs (`192.168.0.1` etc.) are blocked from overwriting `last_known_ip` in the DB — prevents hairpin-NAT traffic from corrupting the device's known LAN address.
-
-### 7.6 Credential rotation
-All in `/opt/smartlock-server/.env`. Edit, then `pm2 restart ctrlable-server` — `override: true` in dotenv means no pm2-specific steps needed. For DB password, also run the `ALTER USER` SQL command. For GitHub PAT, revoke old / create new with `repo` scope at github.com/settings/tokens.
+### 7.5 Credential rotation
+All in `.env`. Edit, `pm2 restart ctrlable-server` — `override: true` means no other steps needed for the server to pick it up.
 
 ---
 
 ## 8. Troubleshooting
 
-### 8.1 Server not responding (curl hangs)
+### 8.1 Server not responding / 100% CPU
 ```bash
-pm2 list   # 100% CPU on ctrlable-server → infinite loop, see §3.4 item 1
+pm2 list   # 100% CPU → infinite loop, see §3.4 item 1
 pm2 restart ctrlable-server
 ```
 
 ### 8.2 App shows "offline" repeatedly
-Causes in order of likelihood: (a) nginx rate limit too low → returning 429 (see §7.4), (b) ESP32 WiFi disconnected (`ping -c3 192.168.0.76`), (c) ESP32 loop frozen (power cycle), (d) UFW blocking (§7.1), (e) server crashed.
+Check in order: (a) nginx rate limit (§2.4), (b) ESP32 WiFi (`ping -c3 192.168.0.76`), (c) ESP32 loop frozen (power cycle), (d) UFW, (e) server crashed.
 
-### 8.3 "Network response was not ok" / app stuck on loading screen
-Check for corrupted App.js — this has happened multiple times where entire functions (`fetchStatus`, `executeCommand`, etc.) silently vanished, leaving only their call sites. Symptom: Metro bundles successfully but the app hangs past the splash screen with no visible error, OR `pm2 logs` shows `ReferenceError: Property 'X' doesn't exist`.
+### 8.3 "[NET] Serwer Proxmox nie odpowiada" in Serial Monitor
+Means the ESP32 can't reach `PROXMOX_SERVER:PROXMOX_PORT`. Checklist:
+1. Is port 3000 actually forwarded on the router to `192.168.0.199:3000`? (§2.3) — this specific failure mode cost an entire debugging session because the forward wasn't in place while `PROXMOX_SERVER` correctly pointed at the domain.
+2. Is `pm2` running `ctrlable-server`? `pm2 list`
+3. Test from the server itself: `curl -s http://192.168.0.199:3000/api/hardware/poll?mac=test`
+4. **Do not** "fix" this by hardcoding a local LAN IP into `PROXMOX_SERVER` — that breaks every field-deployed device that isn't on this specific LAN. The domain name is correct; the router port-forward is what was missing.
+
+Symptom cascade when this is broken: button/keypad/RFID all appear non-functional, because (a) the button-check loop is nested inside the poll's connection-wait block and never executes if `httpCheck.connect()` fails immediately, (b) keypad PIN verification requires a live server round-trip, (c) any server-side unlock queueing (remote unlock from app) never reaches the device.
+
+### 8.4 App/App.js corruption — missing function definitions
+Has happened multiple times: entire functions (`fetchStatus`, `executeCommand`, `mergeLockState`, `handleVerifyResetCode`, etc.) silently vanish from App.js while their call sites remain, causing `ReferenceError` or a permanently-stuck loading screen with no visible error. Always verify after any App.js edit:
 ```bash
-# Quick brace-balance sanity check on the whole file:
 python3 -c "
 content = open('/opt/smartlock-server/app/App.js').read()
-# crude check — strip strings/comments properly for real use
 print('braces:', content.count('{'), content.count('}'))
 print('parens:', content.count('('), content.count(')'))
 "
 ```
-If balanced but the app still hangs, check that `isLoading` actually gets set to `false` somewhere in a mount-time `useEffect`, and that `fetchStatus`, `executeCommand`, `mergeLockState` are all genuinely defined (not just referenced) — grep for `const fetchStatus =` etc.
+Balanced braces/parens is necessary but not sufficient — also grep for `const fetchStatus =`, `const executeCommand =`, `const mergeLockState =` to confirm they're genuinely *defined*, not just referenced. A mount-time `useEffect` must also call `setIsLoading(false)` or the app hangs on the splash screen forever with a perfectly valid, syntactically-correct file.
 
-### 8.4 Port 3000 conflict (EADDRINUSE)
+### 8.5 Port 3000 / 8081 conflicts
 ```bash
 kill -9 $(lsof -t -i :3000) 2>/dev/null
 systemctl stop ctrlable-server 2>/dev/null; systemctl disable ctrlable-server 2>/dev/null
 pm2 restart ctrlable-server
 ```
+For 8081/Metro, prefer `--lan` over `--tunnel` (ngrok proved unreliable).
 
-### 8.5 Port 8081 conflict / Expo tunnel failures
-Prefer `--lan` mode over `--tunnel` (ngrok) — the tunnel proved unreliable ("failed to start tunnel", session closures). See §6.2 for the two supported LAN-based modes.
+### 8.6 Database migration silently fails ("permission denied")
+See §3.5 — table ownership. Always check the migration success count in the startup log after any server.js deploy that touches schema:
 ```bash
-pm2 delete ctrlable-app; kill -9 $(lsof -t -i :8081) 2>/dev/null; sleep 3
-# then restart with one of the two modes in §6.2
+grep "Migration" /var/log/smartlock/smartlock_system.log | tail -3
 ```
+Should read `N/N instrukcji wykonanych pomyślnie` with matching counts — if fewer succeeded than attempted, fix ownership and restart.
 
-### 8.6 NPM proxy returns 404 or empty
-```bash
-docker exec nginx-proxy-manager grep -rl "node.ctrlable" /data/nginx/
-# empty → delete and recreate proxy host in NPM, re-add Advanced config, then:
-docker restart nginx-proxy-manager
-```
-
-### 8.7 OTA serves stale firmware / shows "update available" forever after updating
+### 8.7 OTA serves stale firmware
 ```bash
 rm /opt/smartlock-server/updates/lock_*.bin
-pm2 restart ctrlable-server   # re-fetches latest release ID from GitHub on startup
+pm2 restart ctrlable-server
 ```
-Root cause if it recurs: you edited an existing GitHub release's assets instead of creating a fresh release under the same tag — see §5.3.
+Root cause if recurring: edited an existing GitHub release's assets instead of a fresh release under the same tag (§5.3).
 
-### 8.8 GitHub API returns 401
+### 8.8 GitHub API 401
 ```bash
-grep GITHUB_PAT /opt/smartlock-server/.env
 curl -s -H "Authorization: token <PAT>" https://api.github.com/repos/pepiuspl/ArduinoR4wifi-Access-control/releases/latest | grep tag_name
-# "Bad credentials" → regenerate PAT with "repo" scope, update .env, pm2 restart ctrlable-server
+# "Bad credentials" → regenerate PAT (repo scope), update .env, pm2 restart
 ```
 
-### 8.9 WiFi change from app does nothing / device doesn't restart
-Two independent causes, both fixed but worth re-checking if it regresses:
-1. `handleProvisioningServer()` must be called every loop iteration in firmware `loop()`, not only inside the provisioning-mode branch — otherwise the device never reads incoming `/api/save_settings` requests while online.
-2. Server's `getFactoryAdminPassword(mac)` **must byte-for-byte match** the firmware's algorithm (`"CN" + first 5 digits of accumulated hash`) — any mismatch causes the ESP32 to silently reject the settings-change request with no error. See §3.4 item 5.
+### 8.9 WiFi change from app does nothing
+1. `handleProvisioningServer()` must run every `loop()` iteration, not only in provisioning-mode branch.
+2. Server's `getFactoryAdminPassword(mac)` must byte-for-byte match firmware's algorithm — any drift silently rejects the request.
 
-### 8.10 Device IP overwritten to 192.168.0.1
+### 8.10 Relay stuck open / doesn't respond / flaky
+Re-read §5.6 in full before touching code — this was an extensive, multi-session diagnosis. Do not assume the old logic (floating-based) is still correct if the physical relay module has been swapped again; re-run the multimeter test sequence from scratch on real hardware rather than reasoning about it in the abstract, since this module's behavior turned out to be genuinely counter-intuitive (both driven HIGH *and* driven LOW initially appeared to "lock" in one round of testing, but a later, more careful test — wire fully connected through the GPIO the whole time, not manually touched — gave different, and ultimately correct, results). Trust freshly-measured data over remembered conclusions from earlier in the same debugging session.
+
+### 8.11 RFID/keypad "works but door doesn't open" vs "card unrecognized"
+First determine which failure mode you're actually looking at — they have completely different causes:
+- **Server logs "Odmowa: Nieznany" (unknown card)** → the card genuinely isn't in the *server's* database. Check if it's a stray EEPROM-only card (§5.8).
+- **Server logs "Otwarto: <name>" but the physical lock never moves** → this is a relay hardware issue (§5.6), not an RFID/keypad software issue — the access-granted decision and logging both succeeded; only the physical actuation failed.
+- **Card works with door but is invisible/undeletable in the app** → EEPROM/database desync (§5.8).
+
+### 8.12 Buzzer "scratching" sound
+Historically traced to phantom keypad reads from floating GPIO34/35 (no true internal pull-up on ESP32 input-only pins) — check physical pull-up resistors first if this recurs after any physical rework near the keypad.
+
+### 8.13 App won't start — `Unable to resolve "../../App"` (filename casing)
+The Metro/Expo entry (`package.json` main = `expo/AppEntry.js`) does `import App from '../../App'`. On the **case-sensitive Linux server** the entry file MUST be `App.js` (capital A) — the repo stores it lowercase as `app.js`, so deploying that name verbatim breaks the bundle. Symptom is a misleading code frame pointing at the `import App` line (looks like a syntax error, isn't one).
 ```bash
-psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '192.168.0.76' WHERE mac_address = 'D4:E9:F4:78:08:60';"
+cd /opt/smartlock-server/app
+ls -la App.js app.js          # if only lowercase exists:
+cp app.js App.js              # restore the capital-A entry
 ```
-
-### 8.11 Buzzer "scratching" sound every ~1 second
-Historically traced to phantom keypad reads from GPIO34/35 floating (no true internal pull-up on ESP32 input-only pins) — usually reappears after physical rework near the keypad/OLED/tamper wiring loosens the external pull-up resistors. Check physical connections first; a temporary debug log in `handleKeypress()` (`logKeypadEvent("DBG key=[...]")`) can confirm which key is phantom-firing before you go looking at wiring.
-
-### 8.12 Relay stuck open / stuck closed / fires at boot
-Always re-verify against the *current* physical relay module — active-HIGH vs active-LOW behavior differs by module and has been swapped once already in this project (§5.1). Test empirically: bridge the IN pin directly to 3.3V and to GND (bypassing the ESP32) and observe which state fires the relay, then match `relayActivate()`/`relayDeactivate()`/boot-state accordingly — don't assume from a previous session's notes without re-testing if the hardware changed.
+Verify a clean build without a phone (also catches real JS syntax errors as HTTP 500 with file:line):
+```bash
+curl -s -o /tmp/bundle.txt -w "HTTP %{http_code}\n" "http://localhost:8081/node_modules/expo/AppEntry.bundle?platform=android&dev=true&minify=false"
+tail -c 400 /tmp/bundle.txt   # only needed if not 200
+```
+Going forward, deploy the app entry directly as `App.js`. Also ensure the pm2 process runs `--lan` (never `--tunnel` — ngrok fails; see §6.2/§8.5).
 
 ---
 
-## 9. Accounts & Credentials Reference
+## 9. Known Open Items (not yet built — see also the standalone roadmap PDF)
 
-| Service | Account | Where stored |
-|---|---|---|
-| Expo | pepiuspl | expo.dev login |
-| GitHub | pepiuspl | github.com |
-| Tailscale | pepiuspl | tailscale.com, shared tailnet with iPhone |
-| Email (device) | ctrlablenode@gmail.com | DB accounts table (id=4) |
-| PostgreSQL | admin | `/root/.pgpass` and `.env` |
-
-**Primary device:** MAC `D4:E9:F4:78:08:60`, account_id=4, IP `192.168.0.76`
+- **RFID schedule/expiry enforcement doesn't actually gate physical access** (§5.7) — the UI and server-side plumbing exist, but the ESP32 makes its own local decision from EEPROM regardless. Needs either firmware-side schedule sync + local enforcement, or an architecture change to make RFID server-mediated like keypad (network-dependency tradeoff).
+- **ESP32 firmware transport is unencrypted HTTP over a directly-port-forwarded connection** (§5.2, §7.1) — needs `WiFiClientSecure` migration before real customer deployments, not just this dev/test setup.
+- **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
+- ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
+- Other roadmap items (2FA, data export/deletion, activity-log-triggered features beyond current search, etc.) — see the separate features PDF generated earlier.
 
 ---
 
@@ -578,37 +584,45 @@ pm2 list
 pm2 logs ctrlable-server
 pm2 logs ctrlable-app
 
-# Database quick access
+# Database
 psql_smartlock_db
 
-# Device status / recent events
-psql -h localhost -U admin smartlock_db -c "SELECT mac_address, device_name, last_known_ip, firmware_version, last_heartbeat FROM devices;"
-psql -h localhost -U admin smartlock_db -c "SELECT event_time, message FROM system_events ORDER BY event_time DESC LIMIT 10;"
+# Device status
+psql -h localhost -U admin smartlock_db -c "SELECT mac_address, device_name, last_known_ip, firmware_version, auto_lock_delay_ms, last_heartbeat FROM devices;"
 
-# Or by category (post-scaling, once you have several devices):
+# Device status WITH owner email (needs the devices_owned view from §4.1)
+psql -h localhost -U admin smartlock_db -c "SELECT mac_address, owner_email, device_name, last_known_ip, last_heartbeat FROM devices_owned;"
+
+# Recent events by category
 tail -50 /var/log/smartlock/entries/$(date +%F).log
 
 # Test server health
 curl -s https://node.ctrlable.pl/api/hardware/poll?mac=test
 
 # Test with auth
-TOKEN=$(curl -s -X POST https://node.ctrlable.pl/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"ctrlablenode@gmail.com","password":"YOUR_PASSWORD"}' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','MISSING'))")
+TOKEN=$(curl -s -X POST https://node.ctrlable.pl/api/auth/login -H "Content-Type: application/json" -d '{"email":"ctrlablenode@gmail.com","password":"YOUR_PASSWORD"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','MISSING'))")
 curl -s https://node.ctrlable.pl/api/data -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 
+# Inspect ESP32's own EEPROM directly (bypasses cloud/DB — see §5.8)
+curl -s 'http://192.168.0.76/api/data?pass=<factory-admin-password>'
+
 # Push OTA update
-rm -f /opt/smartlock-server/updates/lock_*.bin
-pm2 restart ctrlable-server
+rm -f /opt/smartlock-server/updates/lock_*.bin && pm2 restart ctrlable-server
 # then trigger from app
 
-# Publish EAS JS bundle update
+# Dev bundler (Tailscale mode, the default)
+pm2 delete ctrlable-app; kill -9 $(lsof -t -i :8081) 2>/dev/null; sleep 3
 cd /opt/smartlock-server/app
-EXPO_TOKEN=$(grep EXPO_TOKEN /opt/smartlock-server/.env | cut -d= -f2) \
-  npx eas-cli update --channel production --message "description" --non-interactive
-
-# Switch dev-server mode (see §6.2 for full commands)
-tailscale status                       # → mode A (private, default)
-# vs. toggle Access List in NPM        # → mode B (public, demo only)
+REACT_NATIVE_PACKAGER_HOSTNAME=100.72.102.40 pm2 start "npx expo start --lan --port 8081" --name ctrlable-app
+pm2 save
 ```
+
+## 11. Accounts & Credentials Reference
+
+| Service | Account |
+|---|---|
+| Expo / GitHub / Tailscale | pepiuspl |
+| Email (device account) | ctrlablenode@gmail.com (DB accounts.id=4) |
+| PostgreSQL | admin (see `.env` / `.pgpass`) |
+
+**Primary test device:** MAC `D4:E9:F4:78:08:60`, account_id=4, IP `192.168.0.76`

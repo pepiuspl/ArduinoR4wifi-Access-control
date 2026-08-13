@@ -1080,8 +1080,9 @@ void executeCloudSynchronization() {
   httpCheck.stop();  
   
   bool serverUnlockSignal = (payloadResponse.indexOf("\"unlock\":true") != -1);
-  bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1); 
+  bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1);
   bool serverOtaSignal    = (payloadResponse.indexOf("\"ota\":true") != -1);
+  bool serverDeregisterSignal = (payloadResponse.indexOf("\"deregister\":true") != -1);
   
   int ridIdx = payloadResponse.indexOf("\"latest_release_id\":");
   if (ridIdx != -1) {
@@ -1107,10 +1108,21 @@ void executeCloudSynchronization() {
     }
   }
 
+  // Deregistracja: właściciel trwale odłączył centralkę (potwierdzone kodem z maila).
+  // Czyścimy CAŁY EEPROM (WiFi + owner_email + karty RFID) — firmware pozostaje nietknięty —
+  // i restartujemy, przez co urządzenie wraca do trybu konfiguracji CTRLABLE_SETUP.
+  if (serverDeregisterSignal) {
+    sendRemoteLog("[HARDWARE] Wykryto deregister:true — czyszczenie konfiguracji i restart do trybu konfiguracji.");
+    updateDisplay("ODLACZANIE", "Reset ustawien...");
+    factoryResetSettings();
+    delay(800);
+    ESP.restart();
+  }
+
   if (serverOtaSignal) {
     sendRemoteLog("[HARDWARE] Wykryto ota:true w pakiecie poll! Odpalam update.");
-    performLocalFirmwareUpdate(); 
-    return; 
+    performLocalFirmwareUpdate();
+    return;
   }
 
   if (serverUnlockSignal) {  
