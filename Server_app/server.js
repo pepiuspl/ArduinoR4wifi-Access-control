@@ -1057,21 +1057,9 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { status: "ok" });
       }
 
-      // =========================================================================
-      // USUNIĘCIE URZĄDZENIA Z KONTA
-      // =========================================================================
-      if (pathname === '/api/devices/remove' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
-        const { mac } = body;
-        if (!mac) return sendJSON(res, 400, { error: "Missing mac" });
-        const result = await dbPool.query(
-          'DELETE FROM devices WHERE mac_address = $1 AND account_id = $2 RETURNING mac_address',
-          [mac.toUpperCase(), accountId]
-        );
-        if (result.rows.length === 0) return sendJSON(res, 404, { error: "Device not found on this account" });
-        writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Removed from account ${accountId}.`);
-        return sendJSON(res, 200, { status: "ok" });
-      }
+      // Uwaga: dawny "miękki" endpoint /api/devices/remove usunięto — kasował tylko
+      // wiersz w bazie, a centralka i tak rejestrowała się z powrotem przy najbliższym
+      // pollu (wysyła ?email= co cykl). Twarde odłączenie realizuje deregistracja poniżej.
 
       // =========================================================================
       // DEREGISTRACJA — KROK 1: właściciel prosi o kod potwierdzający (mail)

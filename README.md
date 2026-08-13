@@ -165,11 +165,11 @@ Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `sys
 | POST | /api/hardware/scan | — | RFID scan reported by ESP32 — **this only logs/queues server-side; the actual unlock decision on RFID is made LOCALLY on the ESP32 from its own EEPROM, see §5.7.** |
 | POST | /api/auth/keypad | — | Keypad PIN verification — **fully server-side**, enforces schedule/expiry/max-uses |
 | POST | /api/auth/save_push_token | JWT | Save Expo push token |
-| POST | /api/keypad/add | JWT | Add PIN (supports `isGuestCode`, `expiresAt`, `maxUses`) |
-| POST | /api/keypad/delete / toggle_active / rename | JWT | Manage PINs |
+| POST | /api/keypad/add | JWT | Add PIN to a device (`mac`, defaults to the account's first device; supports `isGuestCode`, `expiresAt`, `maxUses`). Per-device scoping — see §4.1/§6.5 |
+| POST | /api/keypad/delete / toggle_active / rename | JWT | Manage PINs (authorized by device access — owner or co-admin) |
 | POST | /api/keypad/update_schedule | JWT | Set day/time window for a PIN |
 | POST | /api/user/update_schedule | JWT | Set day/time window for an RFID card — **enforced only in `/api/hardware/scan`'s logging/queue decision, NOT in the ESP32's actual local unlock decision. See §5.7 — this is a known limitation.** |
-| GET/POST | /api/devices/list, rename, remove | JWT | Multi-device management. `remove` is a soft-delete (device auto-re-registers on next poll — see below); prefer `deregister_*` for a real removal |
+| GET/POST | /api/devices/list, rename | JWT | Multi-device management. (Removal is the hard `deregister_*` flow below — the old soft `remove` endpoint was deleted because the device just re-registered on its next poll.) |
 | POST | /api/devices/deregister_request | JWT | Owner-only, **hard** deregister step 1: emails a 6-digit confirm code |
 | POST | /api/devices/deregister_confirm | JWT | Owner-only step 2: verifies code → deletes device + all its data → commands the ESP32 to wipe its EEPROM (factory reset) via the poll's `deregister:true` flag, blocking auto-re-registration for 120 s |
 | POST | /api/devices/invite, accept_invite | JWT | Multi-admin: owner invites a co-admin by email; email now carries a **link** (`invite_token`) AND a 6-digit `invite_code` fallback. `accept_invite` still redeems the code in-app |
@@ -253,11 +253,12 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 ### 5.2 Server connection — architecture note (important)
 ```cpp
 #define PROXMOX_SERVER "node.ctrlable.pl"
-#define PROXMOX_PORT   3000
+#define PROXMOX_PORT   443   // TLS via NPM (was 3000 plain HTTP)
 ```
-**Must stay as the domain name, not a local IP.** Devices will eventually be field-deployed at customer sites, not on this LAN — a hardcoded local IP would only work here and break everywhere else. This requires port 3000 forwarded on the router (§2.3).
+**Must stay as the domain name, not a local IP.** Devices will eventually be field-deployed at customer sites, not on this LAN — a hardcoded local IP would only work here and break everywhere else.
 
-**Known security gap:** this connection is plain HTTP (`WiFiClient`, no TLS) over a port forwarded straight to the internet. Credentials, PINs, and JWTs for hardware endpoints currently travel unencrypted. **Planned fix:** migrate firmware from `WiFiClient` to `WiFiClientSecure` and connect via `node.ctrlable.pl:443` (through NPM, same as the app) instead of a raw port-forwarded 3000. This is a real firmware project on its own — not done yet, tracked here so it isn't forgotten before real customer deployments.
+**TLS migration — DONE in firmware (Aug 13 2026), pending bench test.** All 8 outbound cloud calls now use `WiFiClientSecure` on port **443** through NPM (same path as the app), replacing plain-HTTP `WiFiClient` on 3000. Server identity is validated against a **pinned root CA** — `ROOT_CA_LE` holds the Let's Encrypt **ISRG Root X1** PEM (embedded) via `setCACert` — MITM-resistant; the LE leaf renews every ~90 days but the root is stable for years. Local AP/provisioning `server.accept()` clients are unchanged. Poll cadence relaxed 1 s → **2.5 s** and read deadlines widened, because a TLS handshake per poll is heavy.
+- **Bench-test on the dev device before closing port 3000** (§7.1 / hardening step #2): build + OTA, then verify poll (device "online"), keypad PIN, app unlock, and OTA all work over TLS. Only then remove the router's :3000 forward. A CA/chain problem shows up as every cloud call failing while offline RFID still works.
 
 ### 5.3 OTA update workflow
 1. Build `.bin` (Arduino IDE or GitHub Actions auto-build on push)
@@ -347,6 +348,9 @@ The local setup page (`http://192.168.4.1` in `CTRLABLE_SETUP` AP mode) does **n
 client.println("<input type='password' id='wifi_pass' name='p' placeholder='Password' required>");
 ```
 
+### 5.11 Deregistration command (owner-triggered EEPROM wipe)
+Every poll response is parsed for `"deregister":true` (alongside `unlock`/`ota`/`learn`). When set, the firmware runs the existing `factoryResetSettings()` (writes 0xFF over the whole 512-byte EEPROM + `totalCards=0`) then `ESP.restart()`. On reboot `loadConfiguration()` finds no `0x55` magic at addr 250 → `provisioningMode = true` → `CTRLABLE_SETUP`. This wipes **config data only** (WiFi 260/292, owner_email 324, RFID cards 0/10+/220+) — the program flash is separate and untouched. The server sends `deregister:true` only during the 120 s window after an owner confirms deregistration (§3.6, §6.11), and blocks auto-re-registration during that window so the wiped device can't immediately re-add itself. **This command handling must be present in the deployed firmware** — build + OTA after changing it.
+
 ---
 
 ## 6. Mobile App (React Native / Expo)
@@ -383,9 +387,10 @@ lxc.mount.entry: /dev/net dev/net none bind,create=dir
 Then `pct stop <CTID> && pct start <CTID>`.
 
 ### 6.3 Multi-device support
-- Device switcher appears on the dashboard **only when the account has more than one device**.
+- The device panel/switcher (`🏠 <name> · Zmień ›`) appears on the dashboard whenever the account has **≥1** device (lowered from ">1" so a single-device owner can also rename/manage it). With multiple devices it also switches the active one.
 - Adding a device needs **no firmware changes** — same `.ino`, provisioned via `CTRLABLE_SETUP`, registered to the same account email.
-- Rename/remove from the switcher modal.
+- **Rename** (owner-only): "✏️ Zmień nazwę" on the device card → cross-platform `TextInput` modal (was `Alert.prompt`, iOS-only). Any name, e.g. "Garaż". Server `/api/devices/rename` enforces owner via `account_id`; co-admins don't see the button.
+- **Hard removal** is now the deregistration flow in Settings — see §6.11. (The old switcher "🗑️ soft remove" and its `/api/devices/remove` endpoint were both removed: they only deleted the DB row, but the ESP32 re-registers on its next poll because it sends `?email=` every cycle.)
 
 ### 6.4 Multiple admins per lock
 Access is **per-device**, modeled entirely on `device_shares(mac_address, account_id)` — there is **no global account-level role**. "Owner" vs "admin" is derived from ownership/shares at query time, so one account can own device A and be a co-admin on device B. This is what lets an owner grant an admin access to just one of several centralki.
@@ -401,11 +406,12 @@ Access is **per-device**, modeled entirely on `device_shares(mac_address, accoun
 3. Invitee opens the link → server-rendered page (`GET /invite`, `renderInvitePage()`) with the device name and locked email → sets a password + accepts RODO → `POST /api/devices/accept_via_web` creates the account (if new) and the `device_shares` row. An **existing** account is only granted the share — its password is never reset.
 4. Invitee logs into the app → the shared device appears (`/api/data` returns owned + shared devices, each with an `isOwner` flag).
 
-Web-rendered (not a deep link) because the app runs on Expo Go, where custom-scheme deep-linking is unreliable. The in-app "🔑 Mam kod zaproszenia" (6-digit `accept_invite`) still exists as a fallback in the device switcher.
+Web-rendered (not a deep link) because the app runs on Expo Go, where custom-scheme deep-linking is unreliable. The in-app "🔑 Mam kod zaproszenia" fallback (6-digit `accept_invite`, for someone who already has an account) is a cross-platform `TextInput` modal reachable from the **Zespół** tab (and the device switcher). The old per-device admin management modal was removed — the Zespół tab is the single management surface now.
 
 ### 6.5 Keypad scheduling & guest codes
 - Adding a PIN: **Stały PIN** (permanent) or **👤 Kod gościnny** (expiry days + optional max-use limit).
 - Any PIN, guest or permanent, can have a **📅 Harmonogram** (day-of-week + time window) via the calendar icon on its row.
+- **PINs are per-device** (scoped by `mac_address`, since Aug 13 2026 — §4.1/§9): the list shows the selected centralka's PINs, the 20-PIN limit is per device, and verify checks only that device's PINs. Any account with access to the device (owner **or** co-admin) can add/manage its PINs. Unlike RFID-card schedules, keypad PIN schedules/expiry **are** enforced (server-side).
 - Day picker displays Monday-first (Pn/Wt/Śr/Cz/Pt/So/Nd) but the underlying bitmask stays JS `getDay()`-compatible (bit0=Sunday) — display order and storage order are intentionally decoupled via a `DAY_DISPLAY_ORDER` mapping array.
 - Card rename now uses the same inline-edit pattern as PIN rename (was previously an `Alert.prompt` popup, inconsistent — fixed).
 - **Card scheduling exists in the UI and server, but does not actually gate physical access** — see §5.7. Flagged here so this isn't rediscovered as a "bug" later.
@@ -439,6 +445,9 @@ npm install --legacy-peer-deps    # ~700 packages is normal; if you see only 1-2
 npx expo start
 ```
 Use `cmd.exe`, not PowerShell, if `npm` is blocked by execution policy. Press `w` for web (needs `npx expo install react-dom react-native-web` first), or scan the QR with Expo Go on a phone on the same WiFi.
+
+### 6.11 Device deregistration (hard removal) — Settings → "⚠️ Strefa zaawansowana"
+Owner-only, per selected device, two-step with an emailed 6-digit code (the section only renders when the active device's `isOwner` is true). Flow: "🔌 Odłącz i zresetuj centralkę" → `deregister_request` emails a code → enter code → `deregister_confirm`. On confirm the server deletes the device and **all its data** (keypad PINs, cards, logs, co-admin shares) and commands the ESP32 (via poll `deregister:true`) to run `factoryResetSettings()` — wiping **EEPROM only** (WiFi + owner_email + RFID cards); the **firmware/program flash is untouched**. The device reboots into `CTRLABLE_SETUP`; reconnecting means re-provisioning it as new. See §3.6 for the endpoints and §5.11 for the firmware side. **Requires the updated firmware (OTA) to work** — old firmware ignores `deregister` and simply re-registers after the 120 s block.
 
 ---
 
@@ -567,7 +576,7 @@ Going forward, deploy the app entry directly as `App.js`. Also ensure the pm2 pr
 ## 9. Known Open Items (not yet built — see also the standalone roadmap PDF)
 
 - **RFID schedule/expiry enforcement doesn't actually gate physical access** (§5.7) — the UI and server-side plumbing exist, but the ESP32 makes its own local decision from EEPROM regardless. Needs either firmware-side schedule sync + local enforcement, or an architecture change to make RFID server-mediated like keypad (network-dependency tradeoff).
-- **ESP32 firmware transport is unencrypted HTTP over a directly-port-forwarded connection** (§5.2, §7.1) — needs `WiFiClientSecure` migration before real customer deployments, not just this dev/test setup.
+- ~~**ESP32 firmware transport is unencrypted HTTP**~~ — **migrated to TLS in firmware (Aug 13 2026, §5.2):** `WiFiClientSecure` on 443 through NPM, root-CA pinned. ISRG Root X1 PEM is embedded in `ROOT_CA_LE`. Remaining to fully close this out: (a) bench-test all cloud paths over TLS, (b) then remove the router's port-3000 forward (hardening step #2).
 - **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
 - ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
 - Other roadmap items (2FA, data export/deletion, activity-log-triggered features beyond current search, etc.) — see the separate features PDF generated earlier.

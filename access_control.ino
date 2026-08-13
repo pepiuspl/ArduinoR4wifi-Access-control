@@ -4,7 +4,8 @@
 #include <SPI.h> 
 #include <MFRC522.h> 
 #include <WiFi.h>
-#include <WiFiUdp.h> 
+#include <WiFiClientSecure.h>
+#include <WiFiUdp.h>
 #include <NTPClient.h> 
 #include <EEPROM.h>  
 #include <ArduinoOTA.h>
@@ -13,7 +14,55 @@
 
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
 #define PROXMOX_SERVER "node.ctrlable.pl"
-#define PROXMOX_PORT   3000
+#define PROXMOX_PORT   443   // TLS przez NPM (Let's Encrypt). Ruch do chmury szyfrowany.
+
+// === Root CA Let's Encrypt (ISRG Root X1) ===
+// ⚠️ WYMAGANE PRZED KOMPILACJĄ: wklej poniżej PEŁNY, dokładny PEM ISRG Root X1.
+// Pobierz z zaufanego źródła: https://letsencrypt.org/certs/isrgrootx1.pem
+// albo wyciągnij root z łańcucha serwera (weź OSTATNI cert = root):
+//   openssl s_client -connect node.ctrlable.pl:443 -showcerts </dev/null
+// Cert liścia LE rotuje co ~90 dni, ale root jest stabilny latami — nie trzeba go zmieniać.
+static const char* ROOT_CA_LE = R"EOF(
+-----BEGIN CERTIFICATE-----
+MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
+TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
+cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
+WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
+h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
+A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
+T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
+B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
+B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
+KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
+OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
+jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
+qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
+rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
+HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
+hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
+ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
+3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
+NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
+ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
+TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
+jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
+oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
+4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
+mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
+emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
+-----END CERTIFICATE-----
+)EOF";
+
+// Konfiguracja klienta TLS: walidacja serwera po root CA + limity czasu,
+// żeby nieudany handshake nie zawieszał pętli głównej.
+static void configureSecure(WiFiClientSecure &c) {
+  c.setCACert(ROOT_CA_LE);
+  c.setHandshakeTimeout(6);   // sekundy na handshake TLS
+  c.setTimeout(6000);         // ms na operacje we/wy
+}
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
@@ -689,7 +738,7 @@ void handleProvisioningServer() {
       while (WiFi.status() != WL_CONNECTED && attempts < 10) { delay(500); attempts++; }
       
       if (WiFi.status() == WL_CONNECTED) {
-         WiFiClient registerClient;
+         WiFiClientSecure registerClient; configureSecure(registerClient);
          if (registerClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
            String postBody = "{\"email\":\"" + decodedEmail + "\",\"password\":\"" + decodedRegPass + "\"}";
            registerClient.println("POST /api/auth/register HTTP/1.1");
@@ -1055,7 +1104,7 @@ void handleOnlineInstallerServer() {
 } 
 
 void executeCloudSynchronization() { 
-  WiFiClient httpCheck;
+  WiFiClientSecure httpCheck; configureSecure(httpCheck);
   httpCheck.setTimeout(250);
   httpCheck.setConnectionTimeout(500);
   if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
@@ -1068,7 +1117,7 @@ void executeCloudSynchronization() {
   String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId);  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
-  unsigned long deadline = millis() + 300;
+  unsigned long deadline = millis() + 2000;   // dłuższe okno odczytu — TLS przetwarza rekordy wolniej niż czysty HTTP
   String payloadResponse = "";  
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {  
     if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK");
@@ -1147,7 +1196,7 @@ void executeCloudSynchronization() {
 }
 
 void performLocalFirmwareUpdate() {
-  WiFiClient otaClient;
+  WiFiClientSecure otaClient; configureSecure(otaClient);
   updateDisplay("AKTUALIZACJA OTA", "Pobieranie pliku...");
   sendRemoteLog("[OTA PULL] Proba polaczenia z serwerem w celu pobrania binu...");
   
@@ -1248,7 +1297,7 @@ void performLocalFirmwareUpdate() {
 }
 
 void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) { 
-  WiFiClient httpPost; 
+  WiFiClientSecure httpPost; configureSecure(httpPost);
   httpPost.setTimeout(400);
   if (!httpPost.connect(PROXMOX_SERVER, PROXMOX_PORT)) return; 
   String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan"; 
@@ -1262,7 +1311,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
   httpPost.print("Content-Length: "); httpPost.println(postData.length()); 
   httpPost.println("Connection: close\r\n"); 
   httpPost.print(postData);
-  unsigned long deadline = millis() + 400; 
+  unsigned long deadline = millis() + 2000;
   String payloadResponse = "";
   while ((httpPost.available() || httpPost.connected()) && millis() < deadline) { 
     if (httpPost.available()) { 
@@ -1279,7 +1328,7 @@ void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) {
 // =========================================================================
 void sendTamperAlert(bool active) {
   if (WiFi.status() != WL_CONNECTED) return;
-  WiFiClient tc; tc.setTimeout(500);
+  WiFiClientSecure tc; configureSecure(tc);
   tc.setConnectionTimeout(500);
   if (!tc.connect(PROXMOX_SERVER, PROXMOX_PORT)) return;
   String mac  = getMacAddressString();
@@ -1343,7 +1392,7 @@ void verifyKeypadPIN(const String& pin) {
     logKeypadEvent("Keypad: BLOKADA - aktywny alarm sabotazu"); playSound(SND_ACCESS_DENIED);
     kpChecking = false; renderSystemUI(); return;
   }
-  WiFiClient kc; kc.setTimeout(3000);
+  WiFiClientSecure kc; configureSecure(kc);
   kc.setConnectionTimeout(2000);
   if (!kc.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     logKeypadEvent("Keypad: blad polaczenia z serwerem"); playSound(SND_ACCESS_DENIED);
@@ -1752,7 +1801,7 @@ void loop() {
       // Logowanie naciśnięcia przycisku do chmury jest "nice to have", nie
       // krytyczne - pomijamy je całkowicie offline, by nie czekać na nic.
       if (WiFi.status() == WL_CONNECTED) {
-        WiFiClient buttonLogClient;
+        WiFiClientSecure buttonLogClient; configureSecure(buttonLogClient);
         buttonLogClient.setTimeout(150);
         buttonLogClient.setConnectionTimeout(300);
         if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
@@ -1784,7 +1833,7 @@ void loop() {
     // Skrócone z 3000ms na 1000ms + natychmiastowy sync po openDoor()/zamknięciu
     // (forceSyncNow), żeby aplikacja zawsze zdążyła zobaczyć potwierdzone przez
     // sprzęt "otwarte", zanim 3-sekundowe okno otwarcia drzwi się skończy.
-    if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 1000)) { 
+    if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 2500)) {   // 2.5 s — handshake TLS jest ciężki, nie odpytujemy co sekundę 
       executeCloudSynchronization();
       lastPollTime = millis();
       forceSyncNow = false;
@@ -1793,7 +1842,7 @@ void loop() {
 }
 
 void sendRemoteLog(String message) {
-  WiFiClient logClient;
+  WiFiClientSecure logClient; configureSecure(logClient);
   logClient.setConnectionTimeout(400);
   if (logClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     // POPRAWKA: to było zahardkodowane na MAC jednego konkretnego zamka
