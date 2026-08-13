@@ -20,6 +20,10 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://node.ctrlable.pl
 const TERMS_URL   = process.env.TERMS_URL   || 'https://ctrlable.pl/regulamin.html';
 const PRIVACY_URL = process.env.PRIVACY_URL || 'https://ctrlable.pl/polityka-prywatnosci.html';
 
+// Retencja/minimalizacja danych (RODO art. 5): po ilu dniach kasować rejestr
+// zdarzeń (system_events). 0 lub puste = wyłączone (trzymaj bez limitu).
+const LOG_RETENTION_DAYS = parseInt(process.env.LOG_RETENTION_DAYS || '90', 10);
+
 // ─── Security packages ────────────────────────────────────────────────────────
 // Install once on the server:
 //   npm install jsonwebtoken express-rate-limit helmet
@@ -2412,6 +2416,34 @@ async function runSchemaMigrations() {
   writeToLocalLogFile('Core Daemon', `[Migration] Zakończono: ${successCount}/${alters.length + creates.length} instrukcji wykonanych pomyślnie.`);
 }
 runSchemaMigrations();
+
+// =========================================================================
+// RETENCJA / MINIMALIZACJA DANYCH (RODO art. 5) — uruchamiane przy starcie i co 24 h.
+// Kasuje stary rejestr zdarzeń oraz zużyte/wygasłe zaproszenia (trzymają e-maile).
+// Okres sterowany zmienną LOG_RETENTION_DAYS (domyślnie 90; 0 = wyłączone).
+// =========================================================================
+async function purgeExpiredData() {
+  try {
+    if (LOG_RETENTION_DAYS > 0) {
+      const ev = await dbPool.query(
+        `DELETE FROM system_events WHERE event_time < NOW() - ($1::int * INTERVAL '1 day')`,
+        [LOG_RETENTION_DAYS]
+      );
+      if (ev.rowCount > 0)
+        writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${ev.rowCount} zdarzeń starszych niż ${LOG_RETENTION_DAYS} dni.`);
+    }
+    // Zaproszenia żyją 48 h — cokolwiek starszego niż 30 dni to martwy rekord z e-mailem.
+    const inv = await dbPool.query(
+      `DELETE FROM device_invites WHERE created_at < NOW() - INTERVAL '30 days'`
+    ).catch(() => ({ rowCount: 0 }));
+    if (inv.rowCount > 0)
+      writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${inv.rowCount} przeterminowanych zaproszeń.`);
+  } catch (e) {
+    writeToLocalLogFile('Core Daemon', `[Retention] BŁĄD: ${e.message}`);
+  }
+}
+purgeExpiredData();
+setInterval(purgeExpiredData, 24 * 60 * 60 * 1000);
 
 server.listen(3000, () => {
   console.log('⚡ Multi-Tenant SmartLock Engine live on port 3000. Writing local filesystem archives at /var/log/smartlock/');

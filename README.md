@@ -54,8 +54,9 @@
 | External port | Internal destination | Purpose |
 |---|---|---|
 | 80 | 192.168.0.102:80 | NPM HTTP (Let's Encrypt challenges) |
-| 443 | 192.168.0.102:443 | NPM HTTPS (node./access. subdomains) |
-| 3000 | 192.168.0.199:3000 | **ESP32 firmware connection — raw HTTP, unencrypted.** Required because firmware uses plain `WiFiClient`, not `WiFiClientSecure`. See §5.2 for the plan to eliminate this. |
+| 443 | 192.168.0.102:443 | NPM HTTPS (node./access. subdomains) — **now also the ESP32 path** (TLS, §5.2) |
+
+**Port 3000 is no longer forwarded (removed Aug 13 2026, hardening step #2).** The ESP32 now connects over TLS via `node.ctrlable.pl:443` → NPM → `:3000` (same as the app), so the raw-HTTP internet exposure is gone. Only 80/443 (both → NPM) remain forwarded.
 
 ### 2.4 Nginx Proxy Manager
 
@@ -105,8 +106,11 @@ DB_PASSWORD=<PostgreSQL password for admin user>
 DB_USER=admin
 DB_NAME=smartlock_db
 EXPO_TOKEN=<Expo access token for EAS CLI>
+LOG_RETENTION_DAYS=90        # optional; auto-purge system_events older than N days (0 = keep forever)
 ```
 Loaded with `override: true` — essential, or pm2's cached env wins over `.env`.
+
+**Data retention (hardening #4, Aug 13 2026):** `purgeExpiredData()` runs on startup and every 24 h — deletes `system_events` older than `LOG_RETENTION_DAYS` (default **90**; set `0` to disable) and stale `device_invites` (>30 days, they hold emails). GDPR data-minimization (Art. 5) + smaller breach blast radius. The **file** logs under `/var/log/smartlock/` are separate — rotate/expire those with OS-level `logrotate` if desired.
 
 ### 3.3 pm2 processes
 | Name | Command | Working dir |
@@ -456,11 +460,11 @@ Owner-only, per selected device, two-step with an emailed 6-digit code (the sect
 ### 7.1 Firewall (UFW on smartlock-backend)
 ```bash
 ufw status
-# 3000 ALLOW from 192.168.0.102 (NPM) / 192.168.0.76 (ESP32) / 192.168.0.1 (hairpin NAT)
-# 8081 ALLOW from 192.168.0.102
-# 22   ALLOW from 192.168.0.0/24
+# 3000 ALLOW from 192.168.0.102   # NPM proxy ONLY
+# 8081 ALLOW from 192.168.0.102   # NPM app proxy
+# 22   ALLOW from 192.168.0.0/24  # SSH from LAN
 ```
-Note: port 3000 is now **also** forwarded from the router directly to the internet for field-deployed ESP32 devices (§2.3, §5.2) — this is outside UFW's LAN-only rules and is the known unencrypted-transport gap tracked for future HTTPS migration.
+**Tightened Aug 13 2026 (hardening step #2):** 3000 now accepts **only** from NPM (192.168.0.102). The old `3000 ALLOW from 192.168.0.76 (ESP32)` and `192.168.0.1 (hairpin NAT)` rules were removed, and the router's port-3000 forward was deleted (§2.3) — because the ESP32 now reaches the server over TLS via 443 → NPM → 3000, so nothing needs raw 3000 except NPM itself. The old unencrypted-transport internet exposure is closed.
 
 ### 7.2 Fail2ban (on Proxy, 192.168.0.102)
 ```bash
@@ -578,6 +582,8 @@ Going forward, deploy the app entry directly as `App.js`. Also ensure the pm2 pr
 - **RFID schedule/expiry enforcement doesn't actually gate physical access** (§5.7) — the UI and server-side plumbing exist, but the ESP32 makes its own local decision from EEPROM regardless. Needs either firmware-side schedule sync + local enforcement, or an architecture change to make RFID server-mediated like keypad (network-dependency tradeoff).
 - ~~**ESP32 firmware transport is unencrypted HTTP**~~ — **migrated to TLS in firmware (Aug 13 2026, §5.2):** `WiFiClientSecure` on 443 through NPM, root-CA pinned. ISRG Root X1 PEM is embedded in `ROOT_CA_LE`. Remaining to fully close this out: (a) bench-test all cloud paths over TLS, (b) then remove the router's port-3000 forward (hardening step #2).
 - **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
+- **LittleFS storage migration + local PIN verification** (in progress, Aug 13 2026) — moving cards/PINs/logs off the 512 B EEPROM to LittleFS on internal flash, adding local (offline) PIN verification (PBKDF2 hash) and a two-axis limit model (hardware floor vs per-account license). **LittleFS is in the ESP32 core and the default `esp32:esp32:esp32` partition scheme (used by the arduino-cli CI build) already has a `spiffs` partition — so it deploys via normal OTA, no partition change / USB / re-provision expected.** `partitions.csv` is only a fallback if `LittleFS.begin()` fails the boot self-test. Full model in `LICENSING.md`. Stage 1a done: LittleFS mount + self-test at boot (`initStorage()`), non-invasive.
+- **Offline license key (future idea)** — for the "many users, zero cloud, willing to pay" niche: a one-time **signed** license key entered at provisioning that raises the offline-standalone cap **without a server** (firmware validates the signature). Lets the no-cloud brand serve >2-user private clients. Not built; recorded so it isn't lost (`LICENSING.md`).
 - ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
 - Other roadmap items (2FA, data export/deletion, activity-log-triggered features beyond current search, etc.) — see the separate features PDF generated earlier.
 

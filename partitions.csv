@@ -1,0 +1,20 @@
+# CTRLABLE Node — tablica partycji (ESP32, flash 4 MB) — PLIK FALLBACK
+#
+# ⚠️ Najczęściej NIEPOTRZEBNY. Domyślny schemat `esp32:esp32:esp32` ("Default 4MB
+# with spiffs"), którego używa build arduino-cli, MA już partycję `spiffs` (~1.5 MB),
+# z której korzysta LittleFS — plus OTA i EEPROM. Czyli LittleFS wchodzi zwykłym OTA,
+# bez zmiany partycji, USB ani re-prowizjonowania.
+#
+# Ten plik jest tylko FALLBACKIEM, gdyby `LittleFS.begin()` się nie zamontował
+# (self-test = FAIL). Wtedy w CI (compile-ESP32.yml) dołóż do arduino-cli:
+#   --board-options PartitionScheme=custom
+# i umieść ten plik jako partitions.csv obok szkicu. Uwaga: własna partycja =
+# jednorazowy flash przez USB + re-prowizjonowanie (kasuje EEPROM).
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x180000,
+app1,       app,  ota_1,    0x190000, 0x180000,
+eeprom,     data, 0x99,     0x310000, 0x1000,
+littlefs,   data, spiffs,   0x311000, 0xEF000,

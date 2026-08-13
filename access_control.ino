@@ -5,6 +5,7 @@
 #include <MFRC522.h> 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <LittleFS.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h> 
 #include <EEPROM.h>  
@@ -93,8 +94,10 @@ void saveConfiguration(String newSSID, String newPass);
 void factoryResetSettings(); 
 void loadConfiguration(); 
 void loadCards();
-void saveNewCard(byte* uid, String nameStr); 
-void deleteUser(int index); 
+void saveNewCard(byte* uid, String nameStr);
+void deleteUser(int index);
+void initStorage();          // LittleFS (etap 1)
+void storageSelfTest();
 void updateDisplay(String status, String info = ""); 
 void renderSystemUI(); 
 void handleProvisioningServer();
@@ -360,9 +363,69 @@ void deleteUser(int index) {
   totalCards--; 
   EEPROM.put(0, totalCards);
   EEPROM.commit();
-} 
+}
 
-void forceHardwareRFIDReset() { 
+// ===========================================================================
+// MAGAZYN LittleFS (etap 1) — nowy magazyn kart/PIN-ów zastępujący 512 B EEPROM.
+// Etap 1a: montowanie + test zapis/odczyt (poniżej). Etap 1b: pełny store kart +
+// migracja z EEPROM. Etap 2: PIN-y (hash) + weryfikacja lokalna. NIE rusza jeszcze
+// żywej ścieżki weryfikacji — to bezpieczne dołożenie do przetestowania na bench.
+//
+// FORMAT REKORDÓW (spec na etap 1b/2; limity egzekwuje serwer wg tieru + sufit sprzętowy):
+//   /cards.db : sekwencja FsCard (stała długość, łatwe skanowanie)
+//   /pins.db  : sekwencja FsPin  (hash PBKDF2, nigdy jawnie)
+struct FsCard {
+  uint8_t  uidLen;        // 4 lub 7
+  uint8_t  uid[7];        // UID karty/breloka
+  char     name[24];      // nazwa/lokator
+  uint8_t  active;        // 1 = aktywna
+  uint8_t  schEnabled;    // harmonogram wł/wył
+  uint8_t  schDays;       // bitmaska dni (bit0=Nd..bit6=Sb)
+  uint16_t schStart;      // minuty od północy
+  uint16_t schEnd;
+};                        // ~40 B
+struct FsPin {
+  uint8_t  hash[32];      // PBKDF2-HMAC-SHA256(pin, sól per-urządzenie)
+  char     name[24];
+  uint8_t  active;
+  uint8_t  isGuest;       // kod gościnny (tylko licencja) — flaga informacyjna
+  uint8_t  schEnabled;
+  uint8_t  schDays;
+  uint16_t schStart;
+  uint16_t schEnd;
+  uint32_t expiresAt;     // epoch, 0 = bez wygasania
+  uint16_t maxUses;       // 0 = bez limitu
+  uint16_t useCount;
+};                        // ~73 B
+
+void storageSelfTest() {
+  const char* path = "/selftest.bin";
+  uint32_t magic = 0xCAFE1234, back = 0;
+  File f = LittleFS.open(path, "w");
+  if (!f) { Serial.println("[FS] BLAD: nie moge otworzyc do zapisu"); return; }
+  f.write((const uint8_t*)&magic, sizeof(magic));
+  f.close();
+  File r = LittleFS.open(path, "r");
+  if (r) { r.read((uint8_t*)&back, sizeof(back)); r.close(); }
+  LittleFS.remove(path);
+  Serial.print("[FS] LittleFS total="); Serial.print(LittleFS.totalBytes());
+  Serial.print("B used="); Serial.print(LittleFS.usedBytes());
+  Serial.print("B FsCard="); Serial.print(sizeof(FsCard));
+  Serial.print("B FsPin="); Serial.print(sizeof(FsPin));
+  Serial.print("B selftest="); Serial.println(back == magic ? "PASS" : "FAIL");
+}
+
+void initStorage() {
+  // true = sformatuj przy pierwszym uruchomieniu / gdy montowanie się nie uda
+  if (!LittleFS.begin(true)) {
+    Serial.println("[FS] BLAD: LittleFS.begin nieudany — sprawdz schemat partycji (potrzebna partycja spiffs/littlefs).");
+    return;
+  }
+  Serial.println("[FS] LittleFS zamontowany.");
+  storageSelfTest();
+}
+
+void forceHardwareRFIDReset() {
   digitalWrite(RST_PIN, LOW); 
   delay(30); 
   digitalWrite(RST_PIN, HIGH); 
@@ -1473,6 +1536,7 @@ void setup() {
   delay(1500);
   EEPROM.begin(512);
   EEPROM.get(480, installedReleaseId);  // restore flashed release ID
+  initStorage();                        // LittleFS (etap 1a) — montowanie + self-test na Serialu
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   // Anti-tamper pin (tylko gdy TAMPER_INSTALLED == true)
   if (TAMPER_INSTALLED) pinMode(TAMPER_PIN, INPUT_PULLUP);
