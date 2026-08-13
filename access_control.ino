@@ -1281,17 +1281,17 @@ void performLocalFirmwareUpdate() {
       }
     }
     
-    sendRemoteLog("[OTA PULL] Naglowki przeczytane. Content-Length: " + String(contentLength));
+    addLog("[OTA PULL] Naglowki przeczytane. Content-Length: " + String(contentLength));  // addLog (bez TLS) — w trakcie OTA nie otwieramy 2. polaczenia TLS (OOM)
     if (contentLength == 0) {
       updateDisplay("BŁĄD OTA", "Brak rozmiaru naglowka");
-      sendRemoteLog("[OTA PULL ERR] Serwer zwrocil rozmiar 0. Przerywam.");
+      addLog("[OTA PULL ERR] Serwer zwrocil rozmiar 0. Przerywam.");
       otaClient.stop();
       delay(3000);
       return;
     }
     
     if (Update.begin(contentLength, U_FLASH)) {
-      sendRemoteLog("[OTA PULL] Start szybkiej transmisji blokowej...");
+      addLog("[OTA PULL] Start szybkiej transmisji blokowej...");
       uint32_t receivedBytes = 0;
       unsigned long receiveDeadline = millis() + 10000; 
       
@@ -1300,7 +1300,7 @@ void performLocalFirmwareUpdate() {
       // PANCERNA PĘTLA: Czytamy dopóki nie zbierzemy wszystkich bajtów zadeklarowanych w Content-Length
       while (receivedBytes < contentLength) { 
         if (!otaClient.connected() && !otaClient.available()) {
-          sendRemoteLog("[OTA PULL ERR] Polaczenie zerwane przed pobraniem calosci.");
+          addLog("[OTA PULL ERR] Polaczenie zerwane przed pobraniem calosci.");
           break;
         }
 
@@ -1317,14 +1317,14 @@ void performLocalFirmwareUpdate() {
               receivedBytes += readBytes;
               receiveDeadline = millis() + 10000; 
             } else {
-              sendRemoteLog("[OTA PULL ERR] Blad zapisu w pamieci Flash.");
+              addLog("[OTA PULL ERR] Blad zapisu w pamieci Flash.");
               break;
             }
           }
         } 
         
         if (millis() > receiveDeadline) {
-          sendRemoteLog("[OTA PULL ERR] Timeout transmisji.");
+          addLog("[OTA PULL ERR] Timeout transmisji.");
           break;
         }
         delay(1);
@@ -1349,7 +1349,7 @@ void performLocalFirmwareUpdate() {
       }
     } else {
       updateDisplay("BŁĄD OTA", "Brak miejsca flash");
-      sendRemoteLog("[OTA PULL ERR] Brak wolnego miejsca na partycji OTA (begin failed).");
+      addLog("[OTA PULL ERR] Brak wolnego miejsca na partycji OTA (begin failed).");
       delay(3000);
     }
   } else {
