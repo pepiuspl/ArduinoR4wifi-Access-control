@@ -227,6 +227,14 @@ bool systemWasOnline = false;
 // zobaczyły prawdziwy, potwierdzony przez sprzęt stan rygla.
 bool forceSyncNow = false;
 
+// Status magazynu LittleFS (etap 1a) — ustawiany w initStorage()/storageSelfTest(),
+// wysyłany raz do logu serwera po połączeniu WiFi (Serial nie jest dostępny zdalnie).
+bool     fsMounted = false;
+bool     fsSelfTestPass = false;
+uint32_t fsTotalBytes = 0;
+uint32_t fsUsedBytes = 0;
+bool     fsStatusReported = false;
+
 // ─── ZMIENNE ANTI-TAMPER ──────────────────────────────────────────────────────
 bool tamperActive            = false;
 unsigned long lastTamperPost = 0;
@@ -408,6 +416,9 @@ void storageSelfTest() {
   File r = LittleFS.open(path, "r");
   if (r) { r.read((uint8_t*)&back, sizeof(back)); r.close(); }
   LittleFS.remove(path);
+  fsTotalBytes = LittleFS.totalBytes();
+  fsUsedBytes  = LittleFS.usedBytes();
+  fsSelfTestPass = (back == magic);
   Serial.print("[FS] LittleFS total="); Serial.print(LittleFS.totalBytes());
   Serial.print("B used="); Serial.print(LittleFS.usedBytes());
   Serial.print("B FsCard="); Serial.print(sizeof(FsCard));
@@ -421,6 +432,7 @@ void initStorage() {
     Serial.println("[FS] BLAD: LittleFS.begin nieudany — sprawdz schemat partycji (potrzebna partycja spiffs/littlefs).");
     return;
   }
+  fsMounted = true;
   Serial.println("[FS] LittleFS zamontowany.");
   storageSelfTest();
 }
@@ -1697,6 +1709,16 @@ void setup() {
 void loop() {
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
   handleProvisioningServer();  // process local web requests (WiFi change, settings) even when online
+
+  // Raport statusu LittleFS (etap 1a) — RAZ, po połączeniu WiFi, do logu serwera
+  // (self-test loguje tylko na Serial, który jest niedostępny zdalnie).
+  if (!fsStatusReported && WiFi.status() == WL_CONNECTED && !isOfflineStandby) {
+    fsStatusReported = true;
+    sendRemoteLog("[FS] LittleFS " + String(fsMounted ? "OK" : "BLAD MONTAZU") +
+                  " total=" + String(fsTotalBytes) + "B used=" + String(fsUsedBytes) +
+                  "B FsCard=" + String(sizeof(FsCard)) + "B FsPin=" + String(sizeof(FsPin)) +
+                  "B selftest=" + String(fsSelfTestPass ? "PASS" : "FAIL"));
+  }
   checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
   checkKeypad();  // obsługa matrycy klawiatury PIN
 
