@@ -1833,7 +1833,7 @@ void loop() {
     // Skrócone z 3000ms na 1000ms + natychmiastowy sync po openDoor()/zamknięciu
     // (forceSyncNow), żeby aplikacja zawsze zdążyła zobaczyć potwierdzone przez
     // sprzęt "otwarte", zanim 3-sekundowe okno otwarcia drzwi się skończy.
-    if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 2500)) {   // 2.5 s — handshake TLS jest ciężki, nie odpytujemy co sekundę 
+    if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 1000)) {   // 1 s bazowo; handshake TLS i tak ogranicza realne tempo. forceSyncNow zgłasza otwarcie/zamknięcie natychmiast, bez czekania na interwał.
       executeCloudSynchronization();
       lastPollTime = millis();
       forceSyncNow = false;

@@ -775,7 +775,11 @@ const server = http.createServer(async (req, res) => {
             lockValue = true;
           } else {
             const pendingSince = pendingUnlocks[primaryMac];
-            const stillPending = pendingSince && (Date.now() - pendingSince) < 6000;
+            // Okno "pending" wydłużone (6s→12s) pod latencję TLS na ESP32: komenda
+            // czeka na kolejny poll, a potwierdzenie "opened" wraca po handshake'u —
+            // krótsze okno powodowało chwilowy powrót UI na "Zabezpieczony" zanim
+            // sprzęt potwierdził otwarcie.
+            const stillPending = pendingSince && (Date.now() - pendingSince) < 12000;
             lockValue = stillPending ? 'pending' : false;
           }
         }
