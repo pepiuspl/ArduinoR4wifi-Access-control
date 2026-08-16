@@ -560,16 +560,22 @@ export default function App() {
   // WYLOGOWANY UŻYTKOWNIK
 
   const handleLogout = async () => {
-    try {
-      // 1. Informujemy backend na Proxmoxie, żeby wyłączył pushe dla tego konta
-      if (authToken) {
+    // 1. Best-effort: powiadamiamy backend, żeby wyłączył pushe dla tego konta.
+    //    NIE może to blokować wylogowania — gdy backend/sieć są niedostępne, fetch
+    //    rzuca "Network request failed", a użytkownik i tak MUSI móc się wylogować.
+    if (authToken) {
+      try {
         await fetch(`${backendUrl}/api/auth/save_push_token`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
           body: JSON.stringify({ token: 'LOGGED_OUT' })
         });
+      } catch (e) {
+        console.warn('Wylogowanie: nie udało się powiadomić backendu, kontynuuję lokalnie:', e?.message);
       }
+    }
 
+    try {
       // 2. Czyścimy pamięć lokalną sesji w telefonie (konto w chmurze i/lub Tryb Lokalny)
       await AsyncStorage.removeItem('@lock_account_id');
       await AsyncStorage.removeItem('@lock_auth_token');

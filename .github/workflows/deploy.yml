@@ -41,12 +41,16 @@ jobs:
               exit 1
             fi
             
-            echo "3. Restartowanie usługi smartlock"
-            systemctl restart smartlock || exit 1
-            
-            echo "4. Sprawdzanie statusu usługi"
+            echo "3. Przeladowanie backendu w pm2 (ctrlable-server)"
+            # Backend dziala pod pm2 jako ctrlable-server (NIE systemd smartlock).
+            # PATH rozszerzony, bo powloka --noprofile --norc ma minimalny PATH.
+            export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+            pm2 restart ctrlable-server --update-env || exit 1
+            pm2 save || true
+
+            echo "4. Status procesu"
             sleep 2
-            systemctl is-active smartlock
+            pm2 describe ctrlable-server | grep -iE "status|restart" || true
             echo "========================================="
             echo "🎉 Wdrożenie zakończone sukcesem!"
           '"

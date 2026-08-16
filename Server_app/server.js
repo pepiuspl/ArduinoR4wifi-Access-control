@@ -120,12 +120,17 @@ let latestFirmwareFile = "";
 const updatesDir = '/opt/smartlock-server/updates';
 
 // CONNECT TO THE RELATIONAL POSTGRESQL ENGINE
+// Dane dostępowe TYLKO ze zmiennych środowiskowych (/opt/smartlock-server/.env) —
+// żadnych sekretów w kodzie/repo. Hasło NIE ma fallbacku: musi być w .env.
+if (!process.env.DB_PASSWORD) {
+  console.error('[FATAL] Brak DB_PASSWORD w /opt/smartlock-server/.env — ustaw je przed startem serwera.');
+}
 const dbPool = new Pool({
-  user: 'admin',
-  host: 'localhost',
-  database: 'smartlock_db',
-  password: 'Groszowice1!',
-  port: 5432,
+  user:     process.env.DB_USER     || 'admin',
+  host:     process.env.DB_HOST     || 'localhost',
+  database: process.env.DB_NAME     || 'smartlock_db',
+  password: process.env.DB_PASSWORD,
+  port:     parseInt(process.env.DB_PORT || '5432', 10),
 });
 
 // Local Postfix delivery service
