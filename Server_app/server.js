@@ -1050,6 +1050,44 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
+      // LICENCJA + ZUŻYCIE — pakiet konta i "ile z ilu" na każdej centralce.
+      // Aplikacja pokazuje to na ekranie "Pakiet" i przy dodawaniu kart/PIN-ów.
+      // =========================================================================
+      if (pathname === '/api/license' && req.method === 'GET') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const ent = await getEntitlements(accountId);
+        // Zużycie liczymy dla centralek, których to konto jest WŁAŚCICIELEM
+        // (bo licencja jest właściciela). Współadmin widzi limity właściciela.
+        const owned = await dbPool.query(
+          'SELECT mac_address, device_name FROM devices WHERE account_id = $1 ORDER BY mac_address ASC', [accountId]);
+        const usage = [];
+        for (const d of owned.rows) {
+          const cc = await dbPool.query('SELECT COUNT(*) FROM card_credentials WHERE mac_address = $1', [d.mac_address]);
+          const pc = await dbPool.query('SELECT COUNT(*) FROM keypad_pins WHERE mac_address = $1', [d.mac_address]);
+          const ac = await dbPool.query('SELECT COUNT(*) FROM device_shares WHERE mac_address = $1', [d.mac_address]);
+          usage.push({
+            mac: d.mac_address,
+            name: d.device_name || d.mac_address,
+            cards: parseInt(cc.rows[0].count), maxCards: ent.max_cards,
+            pins: parseInt(pc.rows[0].count),  maxPins: ent.max_pins,
+            admins: parseInt(ac.rows[0].count) + 1, maxAdmins: ent.max_admins, // +1 = właściciel
+          });
+        }
+        return sendJSON(res, 200, {
+          tier: ent.license_tier,
+          limits: {
+            maxCards: ent.max_cards, maxPins: ent.max_pins, maxAdmins: ent.max_admins,
+            maxDevices: ent.max_devices, logRetentionDays: ent.log_retention_days,
+            guestCodes: ent.guest_codes_enabled, pinChangesPerMonth: ent.pin_changes_per_month,
+          },
+          validUntil: ent.license_valid_until,
+          expired: !!ent.expired,
+          devicesUsed: owned.rows.length, maxDevices: ent.max_devices,
+          usage,
+        });
+      }
+
+      // =========================================================================
       // ZMIANA NAZWY URZĄDZENIA (np. "Drzwi wejściowe", "Garaż")
       // =========================================================================
       if (pathname === '/api/devices/rename' && req.method === 'POST') {
@@ -1163,6 +1201,20 @@ const server = http.createServer(async (req, res) => {
           [mac.toUpperCase(), accountId]
         );
         if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może zapraszać administratorów.' });
+
+        // Limit administratorów wg pakietu (łącznie z właścicielem). Liczymy
+        // istniejących współadminów + oczekujące niewykorzystane zaproszenia + 1.
+        const adEnt = await getEntitlements(accountId);
+        const shCnt = await dbPool.query('SELECT COUNT(*) FROM device_shares WHERE mac_address = $1', [mac.toUpperCase()]);
+        const pendCnt = await dbPool.query(
+          `SELECT COUNT(*) FROM device_invites WHERE mac_address = $1 AND used = false AND expires_at > NOW()`,
+          [mac.toUpperCase()]);
+        const adminTotal = parseInt(shCnt.rows[0].count) + parseInt(pendCnt.rows[0].count) + 1;
+        if (adminTotal >= adEnt.max_admins)
+          return sendJSON(res, 403, {
+            error: `Limit administratorów (${adEnt.max_admins}) osiągnięty w pakiecie ${adEnt.license_tier}. Zwiększ pakiet, aby zaprosić kolejnych.`,
+            limit: adEnt.max_admins, tier: adEnt.license_tier, feature: 'max_admins'
+          });
 
         const inviteCode = Math.floor(100000 + Math.random() * 900000).toString();
         const inviteToken = crypto.randomBytes(24).toString('hex');   // 48-znakowy token linku
@@ -1399,6 +1451,18 @@ const server = http.createServer(async (req, res) => {
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
           const nextMode = devRes.rows[0].operational_mode === 'Czuwanie' ? 'Uczenie' : 'Czuwanie';
+          // Limit kart wg pakietu właściciela — sprawdzamy PRZED wejściem w Uczenie,
+          // żeby nadmiarowa karta nie została w ogóle zeskanowana. Wyłączanie trybu
+          // (Uczenie→Czuwanie) zawsze przechodzi.
+          if (nextMode === 'Uczenie') {
+            const clEnt = await deviceOwnerEntitlements(targetMac);
+            const cc = await dbPool.query('SELECT COUNT(*) FROM card_credentials WHERE mac_address = $1', [targetMac]);
+            if (parseInt(cc.rows[0].count) >= clEnt.max_cards)
+              return sendJSON(res, 403, {
+                error: `Limit kart (${clEnt.max_cards}) osiągnięty w pakiecie ${clEnt.license_tier}. Zwiększ pakiet, aby dodać więcej.`,
+                limit: clEnt.max_cards, used: parseInt(cc.rows[0].count), tier: clEnt.license_tier, feature: 'max_cards'
+              });
+          }
           await dbPool.query('UPDATE devices SET operational_mode = $1 WHERE mac_address = $2', [nextMode, targetMac]);
           if (nextMode === 'Uczenie') {
             learningQueues[targetMac] = query.username ? decodeURIComponent(query.username) : 'Nowy Użytkownik';
@@ -1756,6 +1820,18 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/device/provision' && req.method === 'POST') {
         const { mac, ownerId, currentIp, firmware } = body;
+        // Limit centralek na konto wg pakietu — tylko dla NOWEJ centralki
+        // (ponowny provisioning istniejącego MAC to ON CONFLICT = update, wolny).
+        const provExists = await dbPool.query('SELECT 1 FROM devices WHERE mac_address = $1', [mac]);
+        if (provExists.rows.length === 0) {
+          const dEnt = await getEntitlements(ownerId);
+          const dc = await dbPool.query('SELECT COUNT(*) FROM devices WHERE account_id = $1', [ownerId]);
+          if (parseInt(dc.rows[0].count) >= dEnt.max_devices)
+            return sendJSON(res, 403, {
+              error: `Limit centralek (${dEnt.max_devices}) osiągnięty w pakiecie ${dEnt.license_tier}. Zwiększ pakiet, aby dodać kolejną.`,
+              limit: dEnt.max_devices, tier: dEnt.license_tier, feature: 'max_devices'
+            });
+        }
         await dbPool.query(
           `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version)
            VALUES ($1, $2, $3, $4)
@@ -1844,12 +1920,22 @@ const server = http.createServer(async (req, res) => {
               // PROVISIONING: Automatyczne dodanie nowej centralki do bazy danych
               const accountRes = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [query.email.trim().toLowerCase()]);
               if (accountRes.rows.length > 0) {
-                await dbPool.query(
-                  `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
-                  VALUES ($1, $2, $3, $4, 'Czuwanie')`,
-                  [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
-                );
-                writeToLocalLogFile('Provisioning', `[Node: ${mac}] Pomyślnie utworzono i przypisano centralkę do konta: ${query.email}`);
+                // Limit centralek na konto wg pakietu. Nowa centralka ponad limit
+                // się NIE rejestruje (zostaje w trybie setup) — właściciel musi
+                // zwiększyć pakiet. Nie dotyczy już zarejestrowanych (te trafiają
+                // wyżej w checkDev/checkDevRev, więc tu jest zawsze NOWY MAC).
+                const provEnt = await getEntitlements(accountRes.rows[0].id);
+                const provCnt = await dbPool.query('SELECT COUNT(*) FROM devices WHERE account_id = $1', [accountRes.rows[0].id]);
+                if (parseInt(provCnt.rows[0].count) >= provEnt.max_devices) {
+                  writeToLocalLogFile('Provisioning', `[Node: ${mac}] ODRZUCONO: limit centralek (${provEnt.max_devices}) pakietu ${provEnt.license_tier} dla konta ${query.email}.`);
+                } else {
+                  await dbPool.query(
+                    `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
+                    VALUES ($1, $2, $3, $4, 'Czuwanie')`,
+                    [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
+                  );
+                  writeToLocalLogFile('Provisioning', `[Node: ${mac}] Pomyślnie utworzono i przypisano centralkę do konta: ${query.email}`);
+                }
               }
             }
           }
@@ -2243,10 +2329,21 @@ const server = http.createServer(async (req, res) => {
         if (kpDev.rows.length === 0) return sendJSON(res, 403, { error: 'Brak dostępu do tej centralki' });
         const kpMac = kpDev.rows[0].mac_address;
 
+        // Limit PIN-ów wg pakietu WŁAŚCICIELA centralki (nie twarde 20).
+        const kpEnt = await deviceOwnerEntitlements(kpMac);
         const cnt = await dbPool.query(
           'SELECT COUNT(*) FROM keypad_pins WHERE mac_address = $1', [kpMac]);
-        if (parseInt(cnt.rows[0].count) >= 20)
-          return sendJSON(res, 400, { error: 'Limit 20 PINów na centralkę osiągnięty' });
+        if (parseInt(cnt.rows[0].count) >= kpEnt.max_pins)
+          return sendJSON(res, 403, {
+            error: `Limit PIN-ów (${kpEnt.max_pins}) osiągnięty w pakiecie ${kpEnt.license_tier}. Zwiększ pakiet, aby dodać więcej.`,
+            limit: kpEnt.max_pins, used: parseInt(cnt.rows[0].count), tier: kpEnt.license_tier, feature: 'max_pins'
+          });
+        // Kody gościnne (wygasające / limit użyć) to funkcja płatna — od Silver.
+        if (isGuestCode && !kpEnt.guest_codes_enabled)
+          return sendJSON(res, 403, {
+            error: 'Kody gościnne są dostępne od pakietu Silver.',
+            tier: kpEnt.license_tier, feature: 'guest_codes'
+          });
 
         const hash = await bcrypt.hash(String(pin), 10);
         const ins = await dbPool.query(
@@ -2334,6 +2431,61 @@ mailTransport.verify((error, success) => {
   }
 });
 
+// =========================================================================
+// LICENCJE — presety tierów i odczyt uprawnień konta.
+// Presety to pojedyncze źródło wartości liczbowych dla tierów; klucz licencyjny
+// i webhook P24 ustawiają konto na jeden z nich (albo na wartości "individual").
+// =========================================================================
+const TIER_PRESETS = {
+  free:       { max_cards: 2,   max_pins: 2,   max_admins: 1,  max_devices: 1,  log_retention_days: 15, guest_codes_enabled: false, pin_changes_per_month: 4 },
+  silver:     { max_cards: 10,  max_pins: 10,  max_admins: 3,  max_devices: 2,  log_retention_days: 45, guest_codes_enabled: true,  pin_changes_per_month: null },
+  gold:       { max_cards: 50,  max_pins: 50,  max_admins: 99, max_devices: 99, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
+  individual: { max_cards: 200, max_pins: 200, max_admins: 99, max_devices: 99, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
+};
+
+// Odczyt efektywnych uprawnień konta. Wygasła licencja (license_valid_until w
+// przeszłości) schodzi do limitów darmowych — ale bez kasowania danych: sama
+// logika egzekwowania blokuje tylko NOWE dodania ponad limit.
+async function getEntitlements(accountId) {
+  const FREE = { license_tier: 'free', ...TIER_PRESETS.free, license_valid_until: null };
+  try {
+    const r = await dbPool.query(
+      `SELECT license_tier, max_cards, max_pins, max_admins, max_devices,
+              log_retention_days, guest_codes_enabled, pin_changes_per_month, license_valid_until
+         FROM accounts WHERE id = $1`, [accountId]);
+    if (r.rows.length === 0) return { ...FREE };
+    const row = r.rows[0];
+    const expired = row.license_valid_until && new Date(row.license_valid_until) < new Date();
+    if (expired) return { ...FREE, expired: true, license_valid_until: row.license_valid_until };
+    return {
+      license_tier:          row.license_tier || 'free',
+      max_cards:             row.max_cards ?? FREE.max_cards,
+      max_pins:              row.max_pins ?? FREE.max_pins,
+      max_admins:            row.max_admins ?? FREE.max_admins,
+      max_devices:           row.max_devices ?? FREE.max_devices,
+      log_retention_days:    row.log_retention_days ?? FREE.log_retention_days,
+      guest_codes_enabled:   row.guest_codes_enabled ?? false,
+      pin_changes_per_month: row.pin_changes_per_month, // null = bez limitu
+      license_valid_until:   row.license_valid_until || null,
+    };
+  } catch (e) {
+    writeToLocalLogFile('Core Daemon', `[Entitlements] Błąd odczytu dla konta ${accountId}: ${e.message}`);
+    return { ...FREE };
+  }
+}
+
+// Uprawnienia liczą się wg WŁAŚCICIELA urządzenia (licencja jest właściciela),
+// nawet jeśli operację wykonuje zaproszony współadmin.
+async function deviceOwnerEntitlements(mac) {
+  try {
+    const r = await dbPool.query('SELECT account_id FROM devices WHERE mac_address = $1', [mac]);
+    if (r.rows.length === 0) return { license_tier: 'free', ...TIER_PRESETS.free, license_valid_until: null };
+    return getEntitlements(r.rows[0].account_id);
+  } catch (e) {
+    return { license_tier: 'free', ...TIER_PRESETS.free, license_valid_until: null };
+  }
+}
+
 // Migracja schematu: dodajemy kolumny dla harmonogramu dostępu i kodów
 // gościnnych do istniejącej tabeli keypad_pins. Bezpieczne do uruchamiania
 // przy każdym starcie serwera — IF NOT EXISTS pomija już istniejące kolumny.
@@ -2373,6 +2525,24 @@ async function runSchemaMigrations() {
     // obok istniejącego 6-cyfrowego invite_code używanego w aplikacji).
     `ALTER TABLE device_invites ADD COLUMN IF NOT EXISTS invite_token VARCHAR(64)`,
     `CREATE INDEX IF NOT EXISTS idx_device_invites_token ON device_invites(invite_token)`,
+    // ---------------------------------------------------------------------
+    // LICENCJE (oś sprzedażowa). Pola uprawnień na koncie = jedyne źródło prawdy;
+    // tiery to presety tych liczb, "Indywidualna" = po prostu inne wartości bez
+    // zmiany kodu. Ustawiane albo automatycznie (webhook P24 po zakupie), albo
+    // przez podpisany klucz licencyjny. DEFAULT = tier darmowy, więc każde NOWE
+    // konto startuje jako 'free' bez żadnej ingerencji. Egzekwowanie blokuje tylko
+    // NOWE dodania ponad limit — istniejące karty/PIN-y są zachowane (grandfathering),
+    // więc obniżenie/wygaśnięcie licencji nigdy nie "zamurowuje" zamka.
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_tier VARCHAR(20) DEFAULT 'free'`,
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_cards INT DEFAULT 2`,          // per centralka
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_pins INT DEFAULT 2`,           // per centralka
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_admins INT DEFAULT 1`,         // łącznie z właścicielem
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_devices INT DEFAULT 1`,        // per konto
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS log_retention_days INT DEFAULT 15`,
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS guest_codes_enabled BOOLEAN DEFAULT false`,
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS pin_changes_per_month INT DEFAULT 4`, // 0/NULL = bez limitu (anty-Airbnb dla free)
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_valid_until TIMESTAMP DEFAULT NULL`, // NULL = darmowa/bezterminowa
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS p24_customer_ref VARCHAR(64) DEFAULT NULL`,  // powiązanie z operatorem płatności
   ];
   // Wielu administratorów na jedno urządzenie: konto-właściciel (devices.account_id)
   // pozostaje jedynym uprawnionym do usuwania/zmiany WiFi/zapraszania innych,
@@ -2424,13 +2594,27 @@ runSchemaMigrations();
 // =========================================================================
 async function purgeExpiredData() {
   try {
+    // Retencja per-tier: każde urządzenie trzyma logi tyle dni, ile pakiet jego
+    // właściciela (log_retention_days). Zdarzenia bez dopasowanego urządzenia
+    // (osierocone MAC) sprząta globalny limit LOG_RETENTION_DAYS jako bezpiecznik.
+    const evTier = await dbPool.query(
+      `DELETE FROM system_events se
+         USING devices d, accounts a
+        WHERE se.mac_address = d.mac_address
+          AND d.account_id = a.id
+          AND se.event_time < NOW() - (COALESCE(a.log_retention_days, 15)::int * INTERVAL '1 day')`
+    );
+    if (evTier.rowCount > 0)
+      writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${evTier.rowCount} zdarzeń wg retencji pakietu.`);
     if (LOG_RETENTION_DAYS > 0) {
       const ev = await dbPool.query(
-        `DELETE FROM system_events WHERE event_time < NOW() - ($1::int * INTERVAL '1 day')`,
+        `DELETE FROM system_events se
+          WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.mac_address = se.mac_address)
+            AND se.event_time < NOW() - ($1::int * INTERVAL '1 day')`,
         [LOG_RETENTION_DAYS]
       );
       if (ev.rowCount > 0)
-        writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${ev.rowCount} zdarzeń starszych niż ${LOG_RETENTION_DAYS} dni.`);
+        writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${ev.rowCount} osieroconych zdarzeń starszych niż ${LOG_RETENTION_DAYS} dni.`);
     }
     // Zaproszenia żyją 48 h — cokolwiek starszego niż 30 dni to martwy rekord z e-mailem.
     const inv = await dbPool.query(

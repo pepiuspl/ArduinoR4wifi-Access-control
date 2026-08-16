@@ -1733,9 +1733,13 @@ void loop() {
     forceHardwareRFIDReset(); 
   } 
 
-  if (isOfflineStandby) { 
+  if (isOfflineStandby) {
     handleProvisioningServer();
-    if (systemWasOnline && (millis() - lastWifiRetryTime > 60000)) { 
+    // Retry WiFi zawsze, gdy jest zapisana realna konfiguracja (nie tylko gdy centralka
+    // BYŁA wcześniej online). Naprawia utknięcie w AP po zaniku prądu, gdy router wstaje
+    // wolniej niż centralka: przy starcie WiFi nie zdąży (12 s), a bez tego warunku
+    // rescue-watchdog nigdy nie ruszał (systemWasOnline == false) i AP zostawał na stałe.
+    if (!provisioningMode && String(ssid) != "OFFLINE_MODE" && (millis() - lastWifiRetryTime > 60000)) {
       lastWifiRetryTime = millis();
       updateDisplay("RESCUE WATCHDOG", "Sprawdzam Wi-Fi...");
       WiFi.begin(ssid, pass); 
