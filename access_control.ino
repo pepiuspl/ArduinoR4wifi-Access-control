@@ -199,8 +199,13 @@ bool provisioningMode = false;
 bool isOfflineStandby = false;  
 bool hasSavedConfig = false;
 bool oledConnected = false; 
-User users[10];
-bool isCardActive[10] = {true, true, true, true, true, true, true, true, true, true};  
+// Sufit sprzętowy kart w trybie online (magazyn LittleFS). Prowizorycznie 200 =
+// górny tier "individual"; do walidacji na bench (RAM/czas skanu). Realny limit
+// i tak narzuca licencja serwera. Przy braku LittleFS spadamy do starego limitu
+// 10 (EEPROM) — patrz loadCards()/saveNewCard().
+#define HW_MAX_CARDS 200
+User users[HW_MAX_CARDS];
+bool isCardActive[HW_MAX_CARDS];
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik";  
 String globalDisplayInfo = "";  
@@ -326,62 +331,24 @@ void saveConfiguration(String newSSID, String newPass, String newEmail) {
   EEPROM.commit(); 
 } 
 
-void factoryResetSettings() { 
-  for (int i = 0; i < 512; i++) { 
+void factoryResetSettings() {
+  for (int i = 0; i < 512; i++) {
     EEPROM.write(i, 0xFF);
-  } 
-  EEPROM.put(0, 0);  
+  }
+  EEPROM.put(0, 0);
   EEPROM.commit();
-} 
-
-void loadCards() { 
-  EEPROM.get(0, totalCards);
-  if (totalCards < 0 || totalCards > 10) { 
-    totalCards = 0;
-  } 
-  for (int i = 0; i < totalCards; i++) { 
-    EEPROM.get(10 + (i * sizeof(User)), users[i]);
-    isCardActive[i] = (EEPROM.read(220 + i) != 0x00);  
-  } 
-} 
-
-void saveNewCard(byte* uid, String nameStr) { 
-  if (totalCards >= 10) return;
-  memset(&users[totalCards], 0, sizeof(User)); 
-  memcpy(users[totalCards].uid, uid, 4); 
-  nameStr.toCharArray(users[totalCards].name, 16); 
-  EEPROM.put(10 + (totalCards * sizeof(User)), users[totalCards]); 
-  isCardActive[totalCards] = true;
-  EEPROM.write(220 + totalCards, 0x01); 
-  totalCards++; 
-  EEPROM.put(0, totalCards); 
-  EEPROM.commit();
-} 
-
-void deleteUser(int index) { 
-  if (index < 0 || index >= totalCards) return;
-  for (int i = index; i < totalCards - 1; i++) { 
-    users[i] = users[i + 1];
-    EEPROM.put(10 + (i * sizeof(User)), users[i]); 
-    isCardActive[i] = isCardActive[i + 1];  
-    EEPROM.write(220 + i, isCardActive[i] ? 0x01 : 0x00);
-  } 
-  isCardActive[totalCards - 1] = true; 
-  EEPROM.write(220 + totalCards - 1, 0x01); 
-  totalCards--; 
-  EEPROM.put(0, totalCards);
-  EEPROM.commit();
+  // Wyczyść też magazyn LittleFS — inaczej po deregistracji karty/PIN-y wróciłyby
+  // z /cards.db przy ponownej rejestracji. WiFi/owner zostają w EEPROM (już wyżej).
+  if (fsMounted) {
+    LittleFS.remove("/cards.db");
+    LittleFS.remove("/pins.db");   // etap 2 (jeszcze nieużywany) — bezpieczne z góry
+  }
 }
 
-// ===========================================================================
-// MAGAZYN LittleFS (etap 1) — nowy magazyn kart/PIN-ów zastępujący 512 B EEPROM.
-// Etap 1a: montowanie + test zapis/odczyt (poniżej). Etap 1b: pełny store kart +
-// migracja z EEPROM. Etap 2: PIN-y (hash) + weryfikacja lokalna. NIE rusza jeszcze
-// żywej ścieżki weryfikacji — to bezpieczne dołożenie do przetestowania na bench.
-//
-// FORMAT REKORDÓW (spec na etap 1b/2; limity egzekwuje serwer wg tieru + sufit sprzętowy):
+// Format rekordów magazynu LittleFS (etap 1b/2). Zdefiniowane TU, przed
+// funkcjami magazynu, by typ był znany przed użyciem (sizeof/pola).
 //   /cards.db : sekwencja FsCard (stała długość, łatwe skanowanie)
-//   /pins.db  : sekwencja FsPin  (hash PBKDF2, nigdy jawnie)
+//   /pins.db  : sekwencja FsPin  (hash PBKDF2, nigdy jawnie) — etap 2
 struct FsCard {
   uint8_t  uidLen;        // 4 lub 7
   uint8_t  uid[7];        // UID karty/breloka
@@ -405,6 +372,125 @@ struct FsPin {
   uint16_t maxUses;       // 0 = bez limitu
   uint16_t useCount;
 };                        // ~73 B
+
+// --- Magazyn kart: LittleFS (etap 1b) z degradacją do EEPROM ---------------
+// Format na dysku: /cards.db = sekwencja rekordów FsCard (stała długość).
+// LittleFS trzyma do HW_MAX_CARDS kart; stary EEPROM (cap 10) to fallback, gdy
+// LittleFS się nie zamontował (fsMounted=false) — zamek nigdy nie traci kart.
+#define CARDS_DB_PATH "/cards.db"
+
+// Zapis WSZYSTKICH kart z RAM do EEPROM (stary układ: nagłówek@0, rekordy@10,
+// flagi aktywności@220). Używane tylko w trybie fallback (bez LittleFS).
+void eepromPersistCards() {
+  int n = totalCards; if (n > 10) n = 10;           // EEPROM mieści maks. 10
+  for (int i = 0; i < n; i++) {
+    EEPROM.put(10 + (i * sizeof(User)), users[i]);
+    EEPROM.write(220 + i, isCardActive[i] ? 0x01 : 0x00);
+  }
+  EEPROM.put(0, n);
+  EEPROM.commit();
+}
+
+// Odczyt kart ze starego EEPROM do RAM (stare zachowanie, cap 10).
+void eepromLoadCards() {
+  EEPROM.get(0, totalCards);
+  if (totalCards < 0 || totalCards > 10) totalCards = 0;
+  for (int i = 0; i < totalCards; i++) {
+    EEPROM.get(10 + (i * sizeof(User)), users[i]);
+    isCardActive[i] = (EEPROM.read(220 + i) != 0x00);
+  }
+}
+
+// Zrzut wszystkich kart z RAM do /cards.db (pełny rewrite — proste i bezpieczne
+// dla ≤200 rekordów; LittleFS robi wear-leveling, a operacje na kartach są rzadkie).
+void fsPersistCards() {
+  if (!fsMounted) return;
+  File f = LittleFS.open(CARDS_DB_PATH, "w");
+  if (!f) { Serial.println("[FS] BLAD: nie moge zapisac /cards.db"); return; }
+  for (int i = 0; i < totalCards; i++) {
+    FsCard c; memset(&c, 0, sizeof(c));
+    c.uidLen = 4;                                   // etap 1b: UID 4-bajtowe (jak dziś)
+    memcpy(c.uid, users[i].uid, 4);
+    strncpy(c.name, users[i].name, sizeof(c.name) - 1);
+    c.active = isCardActive[i] ? 1 : 0;
+    c.schEnabled = 0; c.schDays = 127; c.schStart = 0; c.schEnd = 1440; // harmonogram: etap 2+
+    f.write((const uint8_t*)&c, sizeof(c));
+  }
+  f.close();
+}
+
+// Wczytanie /cards.db do RAM. Zwraca false, gdy pliku nie ma (→ migracja).
+bool fsLoadCards() {
+  if (!fsMounted || !LittleFS.exists(CARDS_DB_PATH)) return false;
+  File f = LittleFS.open(CARDS_DB_PATH, "r");
+  if (!f) return false;
+  totalCards = 0;
+  FsCard c;
+  while (totalCards < HW_MAX_CARDS &&
+         f.read((uint8_t*)&c, sizeof(c)) == (int)sizeof(c)) {
+    memset(&users[totalCards], 0, sizeof(User));
+    memcpy(users[totalCards].uid, c.uid, 4);        // dopasowanie po 4 bajtach
+    strncpy(users[totalCards].name, c.name, sizeof(users[totalCards].name) - 1);
+    isCardActive[totalCards] = (c.active != 0);
+    totalCards++;
+  }
+  f.close();
+  return true;
+}
+
+// Jedno wejście dla wszystkich mutacji: LittleFS gdy zamontowany, inaczej EEPROM.
+void persistCards() {
+  if (fsMounted) fsPersistCards();
+  else           eepromPersistCards();
+}
+
+void loadCards() {
+  if (fsMounted) {
+    if (fsLoadCards()) return;                       // LittleFS = źródło prawdy
+    // Brak /cards.db → jednorazowa migracja starych kart z EEPROM.
+    eepromLoadCards();
+    fsPersistCards();
+    Serial.print("[FS] Migracja kart EEPROM->LittleFS, przeniesiono: ");
+    Serial.println(totalCards);
+    return;
+  }
+  eepromLoadCards();                                 // fallback bez LittleFS
+}
+
+void saveNewCard(byte* uid, String nameStr) {
+  int cap = fsMounted ? HW_MAX_CARDS : 10;
+  if (totalCards >= cap) return;
+  memset(&users[totalCards], 0, sizeof(User));
+  memcpy(users[totalCards].uid, uid, 4);
+  nameStr.toCharArray(users[totalCards].name, 16);
+  isCardActive[totalCards] = true;
+  totalCards++;
+  persistCards();
+}
+
+void deleteUser(int index) {
+  if (index < 0 || index >= totalCards) return;
+  for (int i = index; i < totalCards - 1; i++) {
+    users[i] = users[i + 1];
+    isCardActive[i] = isCardActive[i + 1];
+  }
+  totalCards--;
+  persistCards();
+}
+
+// ===========================================================================
+// MAGAZYN LittleFS — nowy magazyn kart/PIN-ów zastępujący 512 B EEPROM.
+// Etap 1a: montowanie + self-test (poniżej: storageSelfTest/initStorage).
+// Etap 1b: WDROŻONY — karty żyją w /cards.db (patrz loadCards/saveNewCard/
+//   persistCards wyżej), migracja z EEPROM przy pierwszym boocie, sufit
+//   HW_MAX_CARDS; przy braku LittleFS degradacja do EEPROM (cap 10).
+// Etap 2 (TODO): PIN-y (hash PBKDF2) w /pins.db + weryfikacja lokalna offline.
+//
+// FORMAT REKORDÓW (limity egzekwuje serwer wg tieru + sufit sprzętowy):
+//   /cards.db : sekwencja FsCard (stała długość, łatwe skanowanie)
+//   /pins.db  : sekwencja FsPin  (hash PBKDF2, nigdy jawnie)
+// Struktury FsCard/FsPin są zdefiniowane WYŻEJ (tuż przed magazynem kart),
+// żeby były znane kompilatorowi przed pierwszym użyciem (sizeof/pola).
 
 void storageSelfTest() {
   const char* path = "/selftest.bin";
@@ -1075,7 +1161,7 @@ void handleWebServer() {
         if (targetIdx >= 0 && targetIdx < totalCards && newName.length() > 0) { 
           memset(users[targetIdx].name, 0, 16);
           newName.toCharArray(users[targetIdx].name, 16); 
-          EEPROM.put(10 + (targetIdx * sizeof(User)), users[targetIdx]);  
+          persistCards();  // zapis do LittleFS (lub EEPROM w trybie fallback)
           addLog("Zmiana nazwy slot [" + String(targetIdx) + "]"); 
           playSound(SND_CLICK_CONFIRM);
         } 
@@ -1090,7 +1176,7 @@ void handleWebServer() {
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
         if (targetIdx >= 0 && targetIdx < totalCards) { 
           isCardActive[targetIdx] = !isCardActive[targetIdx];
-          EEPROM.write(220 + targetIdx, isCardActive[targetIdx] ? 0x01 : 0x00);  
+          persistCards();  // zapis do LittleFS (lub EEPROM w trybie fallback)
           addLog(isCardActive[targetIdx] ? "Aktywowano: " + String(users[targetIdx].name) : "Zablokowano: " + String(users[targetIdx].name));
           playSound(SND_CLICK_CONFIRM); 
         } 
