@@ -146,8 +146,16 @@ char owner_email[64] = "";
 #define LED_GREEN   25   
 #define LED_RED     26   
 #define BUZZER_PIN  27   
-#define RST_PIN     4    
-#define SS_PIN      5   
+#define RST_PIN     4
+#define SS_PIN      5
+
+// ─── DEDYKOWANY PRZYCISK FACTORY RESET ───────────────────────────────────────
+//   Osobny przycisk (nie miesza się z BUTTON_PIN 33 = otwórz/Uczenie).
+//   GPIO39 (VN) jest WEJŚCIOWY-TYLKO i NIE MA wewnętrznego pull-upa → WYMAGA
+//   ZEWNĘTRZNEGO rezystora 10 kΩ do 3.3 V (jak wiersze klawiatury 34/35).
+//   Podłączenie: przycisk między GPIO39 a GND; 10 kΩ między GPIO39 a 3.3 V.
+//   W spoczynku pin = HIGH; wciśnięty = LOW. Przytrzymaj 3 s → reset fabryczny.
+#define RESET_BTN_PIN   39
 
 // ─── ANTI-TAMPER ─────────────────────────────────────────────────────────────
 //   Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
@@ -1647,6 +1655,7 @@ void setup() {
   EEPROM.get(480, installedReleaseId);  // restore flashed release ID
   initStorage();                        // LittleFS (etap 1a) — montowanie + self-test na Serialu
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(RESET_BTN_PIN, INPUT);  // GPIO39 input-only, pull-up ZEWNĘTRZNY (10kΩ do 3.3V)
   // Anti-tamper pin (tylko gdy TAMPER_INSTALLED == true)
   if (TAMPER_INSTALLED) pinMode(TAMPER_PIN, INPUT_PULLUP);
   // Klawiatura — tylko gdy KEYPAD_INSTALLED == true
@@ -1694,14 +1703,22 @@ void setup() {
   loadConfiguration(); 
   loadCards();
 
-  // Obsługa przycisku Factory Reset przy starcie
-  if (digitalRead(BUTTON_PIN) == LOW) { 
+  // Obsługa dedykowanego przycisku Factory Reset przy starcie (RESET_BTN_PIN)
+  if (digitalRead(RESET_BTN_PIN) == LOW) {
     delay(2000);
-    if (digitalRead(BUTTON_PIN) == LOW) { 
-      factoryResetSettings(); 
+    if (digitalRead(RESET_BTN_PIN) == LOW) {
+      factoryResetSettings();
       Serial.println("[FACTORY RESET COMPLETE]");
-    } 
-  } 
+      // Twardy powrót do zera: config i karty są już w RAM (wczytane wyżej),
+      // więc bez restartu urządzenie chodziłoby dalej na STARYCH danych do
+      // najbliższego wyłączenia. Restartujemy od razu — po restarcie EEPROM
+      // jest pusty → loadConfiguration() wejdzie w CTRLABLE_SETUP.
+      updateDisplay("FACTORY RESET", "Kasowanie...\nRestart");
+      playSound(SND_PROVISION_START);
+      delay(1500);
+      ESP.restart();
+    }
+  }
   
   randomSeed(analogRead(0)); 
   delay(300); 
@@ -2005,25 +2022,25 @@ void loop() {
   if (digitalRead(BUTTON_PIN) == LOW) { 
     unsigned long pressTime = millis();
     bool longPressed = false; 
-    while (digitalRead(BUTTON_PIN) == LOW) { 
-      if (millis() - pressTime > 3000) { 
+    while (digitalRead(BUTTON_PIN) == LOW) {
+      if (millis() - pressTime > 3000) {
         longPressed = true;
-        learningMode = !learningMode; 
-        autoExitLearn = true; 
-        if (learningMode) { 
+        learningMode = !learningMode;
+        autoExitLearn = true;
+        if (learningMode) {
           pendingUsername = "Przycisk";
-          forceHardwareRFIDReset(); 
-          lastRfidWatchdogTime = millis(); 
-          globalAnimFrame = 0; 
+          forceHardwareRFIDReset();
+          lastRfidWatchdogTime = millis();
+          globalAnimFrame = 0;
           playSound(SND_LEARN_ENTER);
-        } else { 
-          globalDisplayInfo = ""; 
+        } else {
+          globalDisplayInfo = "";
           playSound(SND_LEARN_EXIT);
-        } 
-        while(digitalRead(BUTTON_PIN) == LOW); break;
-      } 
-      delay(10); 
-    } 
+        }
+        while (digitalRead(BUTTON_PIN) == LOW); break;
+      }
+      delay(10);
+    }
     if (!longPressed && (millis() - pressTime > 50)) { 
       failedLoginAttempts = 0;
       lockoutEndTime = 0; 
@@ -2044,10 +2061,34 @@ void loop() {
       }
 
       openDoor("PRZYCISK");
-    } 
-  } 
+    }
+  }
 
-  if (doorOpen && millis() > accessEndTime) { 
+  // ── DEDYKOWANY PRZYCISK FACTORY RESET (RESET_BTN_PIN) ──────────────────────
+  // Przytrzymanie 3 s podczas normalnej pracy → twardy reset do zera + restart.
+  // Bez wypinania zasilania. Odliczanie na OLED, więc nie zresetuje przypadkiem.
+  if (digitalRead(RESET_BTN_PIN) == LOW) {
+    unsigned long rstPress = millis();
+    bool rstWarned = false;
+    while (digitalRead(RESET_BTN_PIN) == LOW) {
+      unsigned long held = millis() - rstPress;
+      if (held > 3000) {
+        updateDisplay("FACTORY RESET", "Kasowanie...\nRestart");
+        playSound(SND_PROVISION_START);
+        factoryResetSettings();
+        delay(1200);
+        ESP.restart();
+      }
+      if (held > 400 && !rstWarned) {   // po debounce pokaż odliczanie
+        rstWarned = true;
+        updateDisplay("RESET FABRYCZNY?", "Trzymaj 3s...\nPusc = anuluj");
+      }
+      delay(10);
+    }
+    if (rstWarned) globalDisplayInfo = "";  // puszczono przed 3s → anuluj, wyczyść ekran
+  }
+
+  if (doorOpen && millis() > accessEndTime) {
     doorOpen = false;
     relayDeactivate();
     delay(100); 
