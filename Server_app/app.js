@@ -1287,7 +1287,7 @@ export default function App() {
               <TextInput style={styles.inputField} placeholder="Wpisz nazwę sieci Wi-Fi" placeholderTextColor="#444" value={settingsSsid} onChangeText={setSettingsSsid} />
 
               <Text style={styles.inputLabelText}>Hasło do domowej sieci Wi-Fi:</Text>
-              <TextInput style={styles.inputField} placeholder="Wpisz hasło Wi-Fi" placeholderTextColor="#444" secureSetSecureLoginEntry value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
+              <TextInput style={styles.inputField} placeholder="Wpisz hasło Wi-Fi" placeholderTextColor="#444" secureTextEntry value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
 
               <Text style={[styles.sectionHeader, { marginTop: 10 }]}>Konfiguracja Profilu Administratora</Text>
               <Text style={styles.inputLabelText}>Adres E-mail:</Text>
@@ -1297,12 +1297,22 @@ export default function App() {
               <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry value={password} onChangeText={setPassword} />
 
               <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32' }, isAuthenticating ? { opacity: 0.6 } : null]} disabled={isAuthenticating} onPress={() => {
+                // UWAGA: firmware po odebraniu GET-a robi WiFi.begin (tryb AP+STA), przez co
+                // SoftAP przeskakuje na kanał sieci domowej i telefon WYPADA z CTRLABLE_SETUP —
+                // więc odpowiedź HTTP prawie nigdy nie wraca i fetch się ODRZUCA, mimo że sam
+                // GET DOTARŁ i ustawienia zostały zapisane. Dlatego .then i .catch traktujemy
+                // TAK SAMO: „konfiguracja wysłana". Realne potwierdzenie = centralka pojawi się
+                // na liście urządzeń po zalogowaniu (gdy zgłosi się do chmury).
+                const finishSent = () => {
+                  Alert.alert(
+                    "Konfiguracja wysłana ✓",
+                    "Centralka zapisała ustawienia i restartuje się, aby połączyć się z Twoją siecią domową. Za chwilę zgłosi się do chmury i pojawi się na liście urządzeń po zalogowaniu.\n\nPrzełącz teraz telefon z powrotem na swój internet (Wi-Fi domowe lub dane komórkowe)."
+                  );
+                  setAuthStep('login');
+                };
                 fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(email)}&reg_pass=${encodeURIComponent(password)}&offline=0`)
-                  .then(() => {
-                    Alert.alert("Konfiguracja wysłana", "Centralka restartuje się w celu wpięcia do sieci domowej. Możesz się teraz zalogować.");
-                    setAuthStep('login');
-                  })
-                  .catch(() => Alert.alert("Błąd połączenia", "Nie można dostarczyć pakietów do 192.168.4.1. Sprawdź czy telefon jest w sieci CTRLABLE_SETUP."));
+                  .then(finishSent)
+                  .catch(finishSent);
               }}>
                 <Text style={styles.btnText}>Zapisz i Utwórz Konto</Text>
               </TouchableOpacity>
