@@ -67,9 +67,9 @@ static void configureSecure(WiFiClientSecure &c) {
 
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
-int latestFirmwareReleaseId = 0;
+volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
-unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane wartoscia z serwera przy kazdym pollu
+volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
 const char* app_version = "v3.0.1";
 
 struct User { 
@@ -192,8 +192,8 @@ WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200);
 WiFiServer server(80);  
 
-bool doorOpen = false; 
-bool learningMode = false;
+volatile bool doorOpen = false;
+volatile bool learningMode = false;
 bool autoExitLearn = false;  
 bool provisioningMode = false;
 bool isOfflineStandby = false;  
@@ -220,7 +220,20 @@ bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 unsigned long lastWifiRetryTime = 0;  
 unsigned long lastRfidWatchdogTime = 0;  
-unsigned long lastPollTime = 0; 
+unsigned long lastPollTime = 0;
+int pollFailStreak = 0;   // ile pollów z rzędu nie połączyło się — backoff interwału (networkTask)
+
+// --- Dwurdzeniowość: task SIECIOWY na rdzeniu 0, cały SPRZĘT (RFID/przekaźnik/
+// dźwięk/OLED) na rdzeniu 1 (loop). Poll NIE dotyka sprzętu — ustawia flagi,
+// które loop wykonuje. Blokujący handshake TLS nigdy nie zamraża skanu karty
+// (karty i tak matchowane lokalnie → dostęp niezależny od serwera). Flagi
+// proste (bool/32-bit) = atomowe na ESP32; pendingUsername pisze TYLKO loop. ---
+volatile bool req_unlock = false;
+volatile bool req_ota = false;
+volatile bool req_deregister = false;
+volatile bool req_usernameUpdated = false;
+char req_username[40] = "";
+TaskHandle_t networkTaskHandle = NULL;
 unsigned long lastSuccessfulPollTime = 0;
 int globalAnimFrame = 0; 
 unsigned long lastFrameTick = 0; 
@@ -230,7 +243,7 @@ bool systemWasOnline = false;
 // Gdy true, najbliższa iteracja loop() wykona executeCloudSynchronization()
 // OD RAZU (poza normalnym 1s cyklem), żeby serwer/aplikacja jak najszybciej
 // zobaczyły prawdziwy, potwierdzony przez sprzęt stan rygla.
-bool forceSyncNow = false;
+volatile bool forceSyncNow = false;
 
 // Status magazynu LittleFS (etap 1a) — ustawiany w initStorage()/storageSelfTest(),
 // wysyłany raz do logu serwera po połączeniu WiFi (Serial nie jest dostępny zdalnie).
@@ -1268,21 +1281,24 @@ void executeCloudSynchronization() {
   WiFiClientSecure httpCheck; configureSecure(httpCheck);
   httpCheck.setTimeout(250);
   httpCheck.setConnectionTimeout(500);
-  if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
+  httpCheck.setHandshakeTimeout(2);   // rdzeń 0: max ~2 s gdy serwer nieosiągalny (nie dotyka pętli)
+  if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba...");
+    if (pollFailStreak < 100) pollFailStreak++;
     return;
-  } 
-  
-  lastSuccessfulPollTime = millis(); 
+  }
+  pollFailStreak = 0;
+
+  lastSuccessfulPollTime = millis();
   String macStr = getMacAddressString();
   String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId);  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
   unsigned long deadline = millis() + 2000;   // dłuższe okno odczytu — TLS przetwarza rekordy wolniej niż czysty HTTP
   String payloadResponse = "";  
-  while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {  
-    if (digitalRead(BUTTON_PIN) == LOW && !doorOpen) openDoor("PRZYCISK");
-    if (httpCheck.available()) {  
+  while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {
+    // (przycisk obsługuje loop na rdzeniu 1 — task sieciowy nie dotyka sprzętu)
+    if (httpCheck.available()) {
       char c = httpCheck.read();  
       payloadResponse += c;
     }  
@@ -1321,39 +1337,34 @@ void executeCloudSynchronization() {
   // Deregistracja: właściciel trwale odłączył centralkę (potwierdzone kodem z maila).
   // Czyścimy CAŁY EEPROM (WiFi + owner_email + karty RFID) — firmware pozostaje nietknięty —
   // i restartujemy, przez co urządzenie wraca do trybu konfiguracji CTRLABLE_SETUP.
+  // Task sieciowy (rdzeń 0) NIE dotyka sprzętu — ustawia flagi; akcje wykonuje loop (rdzeń 1).
   if (serverDeregisterSignal) {
-    sendRemoteLog("[HARDWARE] Wykryto deregister:true — czyszczenie konfiguracji i restart do trybu konfiguracji.");
-    updateDisplay("ODLACZANIE", "Reset ustawien...");
-    factoryResetSettings();
-    delay(800);
-    ESP.restart();
-  }
-
-  if (serverOtaSignal) {
-    sendRemoteLog("[HARDWARE] Wykryto ota:true w pakiecie poll! Odpalam update.");
-    performLocalFirmwareUpdate();
+    sendRemoteLog("[HARDWARE] Wykryto deregister:true — zlecam czyszczenie konfiguracji i restart.");
+    req_deregister = true;
     return;
   }
 
-  if (serverUnlockSignal) {  
-    if (tamperActive) {
-      addLog("!! BLOKADA: zdalne otwarcie zablokowane (alarm sabotazu)!");
-      sendTamperAlert(true);
-    } else if (!doorOpen) {
-      openDoor("Otwarte");
-    }
-  }  
-  
-  if (serverLearnSignal) {  
+  if (serverOtaSignal) {
+    sendRemoteLog("[HARDWARE] Wykryto ota:true w pakiecie poll! Zlecam update.");
+    req_ota = true;
+    return;
+  }
+
+  if (serverUnlockSignal) {
+    req_unlock = true;   // loop sprawdzi tamper i otworzy
+  }
+
+  if (serverLearnSignal) {
     learningMode = true;
-    int userStart = payloadResponse.indexOf("\"username\":\"");  
+    int userStart = payloadResponse.indexOf("\"username\":\"");
     int userEnd = payloadResponse.indexOf("\"", userStart + 12);
-    if (userStart > -1 && userEnd > userStart) {  
-      pendingUsername = payloadResponse.substring(userStart + 12, userEnd);
-    }  
-  } else {  
+    if (userStart > -1 && userEnd > userStart) {
+      payloadResponse.substring(userStart + 12, userEnd).toCharArray(req_username, sizeof(req_username));
+      req_usernameUpdated = true;
+    }
+  } else {
     learningMode = false;
-  } 
+  }
 }
 
 void performLocalFirmwareUpdate() {
@@ -1790,20 +1801,52 @@ void setup() {
     Serial.println(digitalRead(KP_ROW4) ? "HIGH - OK" : "LOW  - PROBLEM (10k to 3.3V missing or wired to GND)");
     Serial.println("======================================\n");
   }
+
+  // Start taska SIECIOWEGO na rdzeniu 0. Cały sprzęt (RFID/przekaźnik/dźwięk/OLED)
+  // zostaje na rdzeniu 1 (loop). Stos 12 KB — TLS/mbedTLS + String są pamięciożerne.
+  xTaskCreatePinnedToCore(networkTask, "netTask", 12288, NULL, 1, &networkTaskHandle, 0);
+}
+
+// Task SIECIOWY — rdzeń 0. Poll (blokujący TLS) + logi zdarzeń, NIE dotyka sprzętu.
+// Handshake TLS nigdy nie zamraża pętli (rdzeń 1) → karta czyta się natychmiast
+// (lokalny match), niezależnie od stanu sieci. Pauzuje na czas OTA/deregister.
+void networkTask(void *param) {
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED && !isOfflineStandby && !req_ota && !req_deregister) {
+      if (!fsStatusReported) {
+        fsStatusReported = true;
+        sendRemoteLog("[FS] LittleFS " + String(fsMounted ? "OK" : "BLAD MONTAZU") +
+                      " total=" + String(fsTotalBytes) + "B used=" + String(fsUsedBytes) +
+                      "B FsCard=" + String(sizeof(FsCard)) + "B FsPin=" + String(sizeof(FsPin)) +
+                      "B selftest=" + String(fsSelfTestPass ? "PASS" : "FAIL"));
+      }
+      unsigned long pollInterval = (pollFailStreak >= 3) ? 8000UL : 1000UL;   // backoff gdy serwer nieosiągalny
+      if (forceSyncNow || millis() - lastPollTime > pollInterval) {
+        executeCloudSynchronization();
+        lastPollTime = millis();
+        forceSyncNow = false;
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
 }
 
 void loop() {
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
-  handleProvisioningServer();  // process local web requests (WiFi change, settings) even when online
+  handleProvisioningServer();  // lokalny serwer WWW (zmiana WiFi/ustawień) — też gdy online
 
-  // Raport statusu LittleFS (etap 1a) — RAZ, po połączeniu WiFi, do logu serwera
-  // (self-test loguje tylko na Serial, który jest niedostępny zdalnie).
-  if (!fsStatusReported && WiFi.status() == WL_CONNECTED && !isOfflineStandby) {
-    fsStatusReported = true;
-    sendRemoteLog("[FS] LittleFS " + String(fsMounted ? "OK" : "BLAD MONTAZU") +
-                  " total=" + String(fsTotalBytes) + "B used=" + String(fsUsedBytes) +
-                  "B FsCard=" + String(sizeof(FsCard)) + "B FsPin=" + String(sizeof(FsPin)) +
-                  "B selftest=" + String(fsSelfTestPass ? "PASS" : "FAIL"));
+  // Komendy z taska sieciowego (rdzeń 0) — akcje SPRZĘTOWE wykonujemy TU (rdzeń 1).
+  if (req_usernameUpdated) { req_usernameUpdated = false; pendingUsername = String(req_username); }
+  if (req_deregister) {
+    req_deregister = false;
+    updateDisplay("ODLACZANIE", "Reset ustawien...");
+    factoryResetSettings(); delay(800); ESP.restart();
+  }
+  if (req_ota) { req_ota = false; performLocalFirmwareUpdate(); }
+  if (req_unlock) {
+    req_unlock = false;
+    if (tamperActive) { addLog("!! BLOKADA: zdalne otwarcie (alarm sabotazu)!"); sendTamperAlert(true); }
+    else if (!doorOpen) openDoor("Otwarte");
   }
   checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
   checkKeypad();  // obsługa matrycy klawiatury PIN
@@ -2004,16 +2047,11 @@ void loop() {
     digitalWrite(LED_RED, LOW);
     forceSyncNow = true; // zgłoś zamknięcie od razu, nie czekaj do następnego cyklu
   }
-  else { 
-    handleWebServer(); 
-    // Skrócone z 3000ms na 1000ms + natychmiastowy sync po openDoor()/zamknięciu
-    // (forceSyncNow), żeby aplikacja zawsze zdążyła zobaczyć potwierdzone przez
-    // sprzęt "otwarte", zanim 3-sekundowe okno otwarcia drzwi się skończy.
-    if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 1000)) {   // 1 s bazowo; handshake TLS i tak ogranicza realne tempo. forceSyncNow zgłasza otwarcie/zamknięcie natychmiast, bez czekania na interwał.
-      executeCloudSynchronization();
-      lastPollTime = millis();
-      forceSyncNow = false;
-    } 
+  else {
+    handleWebServer();
+    // POLL USUNIĘTY Z PĘTLI — robi go networkTask na rdzeniu 0. Pętla (rdzeń 1)
+    // NIGDY nie blokuje się na handshake TLS → skan RFID natychmiastowy, niezależny
+    // od serwera. To była brakująca zmiana, przez którą wcześniej było 3 s.
   }
 }
 
