@@ -146,8 +146,12 @@ char owner_email[64] = "";
 #define LED_GREEN   25   
 #define LED_RED     26   
 #define BUZZER_PIN  27   
-#define RST_PIN     4    
-#define SS_PIN      5   
+#define RST_PIN     4
+#define SS_PIN      5
+// MISO przeniesione z domyślnego GPIO 19 na GPIO 36 (input-only) — obejście
+// uszkodzonego GPIO 19 na tym ESP32 (przekłamanie linii danych → wersja 0x82,
+// karty nieczytane). Przepnij zworkę MISO z pinu 19 na 36. SCK=18, MOSI=23, SS=5.
+#define MISO_PIN    36
 
 // ─── ANTI-TAMPER ─────────────────────────────────────────────────────────────
 //   Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
@@ -1674,7 +1678,7 @@ void setup() {
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, LOW); 
 
-  SPI.begin(); 
+  SPI.begin(18, MISO_PIN, 23, SS_PIN);  // SCK=18, MISO=36 (obejście GPIO 19), MOSI=23, SS=5
   rfid.PCD_Init();
 
   // 5. Ładowanie konfiguracji z pamięci
