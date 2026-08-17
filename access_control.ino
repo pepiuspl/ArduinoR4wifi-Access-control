@@ -61,8 +61,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 // żeby nieudany handshake nie zawieszał pętli głównej.
 static void configureSecure(WiFiClientSecure &c) {
   c.setCACert(ROOT_CA_LE);
-  c.setHandshakeTimeout(6);   // sekundy na handshake TLS
-  c.setTimeout(6000);         // ms na operacje we/wy
+  c.setHandshakeTimeout(3);   // s na handshake TLS (skrócone z 6 — krótsza zawieszka pętli gdy serwer nieosiągalny; 3 s wystarcza gdy dostępny). Load bez zmian.
+  c.setTimeout(2500);         // ms na operacje we/wy (skrócone z 6000)
 }
 
 unsigned long lastOtaCheck = 0;
@@ -1268,7 +1268,8 @@ void executeCloudSynchronization() {
   WiFiClientSecure httpCheck; configureSecure(httpCheck);
   httpCheck.setTimeout(250);
   httpCheck.setConnectionTimeout(500);
-  if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
+  httpCheck.setHandshakeTimeout(2);   // poll jest częsty — max ~2 s blokady gdy serwer nieosiągalny
+  if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba...");
     return;
   } 
@@ -2009,7 +2010,10 @@ void loop() {
     // Skrócone z 3000ms na 1000ms + natychmiastowy sync po openDoor()/zamknięciu
     // (forceSyncNow), żeby aplikacja zawsze zdążyła zobaczyć potwierdzone przez
     // sprzęt "otwarte", zanim 3-sekundowe okno otwarcia drzwi się skończy.
-    if (WiFi.status() == WL_CONNECTED && (forceSyncNow || millis() - lastPollTime > 1000)) {   // 1 s bazowo; handshake TLS i tak ogranicza realne tempo. forceSyncNow zgłasza otwarcie/zamknięcie natychmiast, bez czekania na interwał.
+    // activeMelody == nullptr: NIE pollujemy, gdy gra melodia (accept/reject) — blokujący
+    // handshake TLS zamroziłby updateBuzzer i dźwięk urwałby się w połowie. Melodie są
+    // krótkie (<1-2 s), więc poll czeka jeden cykl. Interwał (a więc load serwera) bez zmian.
+    if (WiFi.status() == WL_CONNECTED && activeMelody == nullptr && (forceSyncNow || millis() - lastPollTime > 1000)) {   // 1 s bazowo; handshake TLS i tak ogranicza realne tempo. forceSyncNow zgłasza otwarcie/zamknięcie natychmiast, bez czekania na interwał.
       executeCloudSynchronization();
       lastPollTime = millis();
       forceSyncNow = false;
