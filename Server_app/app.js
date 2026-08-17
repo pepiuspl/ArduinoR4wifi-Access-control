@@ -1207,69 +1207,62 @@ export default function App() {
               {isScanning ? (
                 <View style={{ alignItems: 'center', marginVertical: 24, width: '100%' }}>
                   <LoadingPulse size={48} />
-                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 16, marginTop: 10, marginBottom: 6 }}>Inicjalizacja magistrali radiowej...</Text>
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 16, marginTop: 10, marginBottom: 6 }}>Sprawdzanie połączenia z centralką...</Text>
                   <Text style={{ color: '#555', fontSize: 12, textAlign: 'center' }}>
-                    Wywoływanie uprawnień sieciowych i próba spięcia z węzłem CTRLABLE_SETUP...
+                    Pukam do bramy 192.168.4.1 (sieć CTRLABLE_SETUP)...
                   </Text>
                 </View>
               ) : (
-                <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#5c33cf', marginVertical: 10 }]} onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                <>
+                  {/* Instrukcja RĘCZNEGO połączenia — w Expo Go apka nie może sama
+                      przełączyć Wi-Fi, więc prowadzimy użytkownika krok po kroku,
+                      a potem walidujemy realne połączenie fetchem do 192.168.4.1. */}
+                  <View style={{ width: '100%', backgroundColor: '#141414', borderRadius: 14, borderWidth: 1, borderColor: '#262626', padding: 18, marginVertical: 10 }}>
+                    <Text style={{ color: '#ffb300', fontWeight: 'bold', fontSize: 14, marginBottom: 12 }}>Podłącz telefon do centralki:</Text>
+                    <Text style={{ color: '#ccc', fontSize: 13, lineHeight: 20, marginBottom: 6 }}>1.  Upewnij się, że centralka jest zasilona i na ekranie ma „CTRLABLE_SETUP".</Text>
+                    <Text style={{ color: '#ccc', fontSize: 13, lineHeight: 20, marginBottom: 6 }}>2.  Wejdź w Ustawienia Wi-Fi telefonu i połącz się z siecią <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>CTRLABLE_SETUP</Text>.</Text>
+                    <Text style={{ color: '#ccc', fontSize: 13, lineHeight: 20 }}>3.  Wróć do aplikacji i naciśnij „Sprawdź połączenie".</Text>
+                  </View>
 
-                  // 1. Zgoda na sieć lokalną (Local Network Privacy)
-                  Alert.alert(
-                    "Uprawnienia sieciowe",
-                    "Aplikacja CTRLABLE wymaga dostępu do sieci lokalnej, aby wykrywać i zarządzać węzłami zabezpieczeń w Twoim otoczeniu.",
-                    [
-                      { text: "Odmów", style: "cancel", onPress: () => {
-                        setErrorMessage("Błąd: Brak uprawnień do sieci lokalnej. Konfiguracja zablokowana.");
-                      }},
-                      { text: "Zezwól", onPress: () => {
-                        setErrorMessage(null); // Czyszczenie starych błędów
-                        setIsScanning(true);
+                  <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2a2a2a', marginVertical: 6 }]} onPress={() => {
+                    // Best-effort otwarcie systemowych ustawień Wi-Fi (zależne od OS)
+                    if (Platform.OS === 'android') {
+                      Linking.sendIntent('android.settings.WIFI_SETTINGS').catch(() => Linking.openSettings());
+                    } else {
+                      Linking.openURL('App-Prefs:root=WIFI').catch(() => Linking.openSettings());
+                    }
+                  }}>
+                    <Text style={[styles.btnText, { color: '#ccc' }]}>Otwórz ustawienia Wi-Fi</Text>
+                  </TouchableOpacity>
 
-                        // 2. Wywołanie systemowego monitu o dołączenie do konkretnego SSID (Symulacja NEHotspotConfiguration dla Expo Go)
-                        setTimeout(() => {
-                          Alert.alert(
-                            "Połączenie Wi-Fi",
-                            "Aplikacja CTRLABLE chce dołączyć do sieci Wi-Fi „CTRLABLE_SETUP” nadawanej przez bliską centralkę. Czy wyrażasz zgodę?",
-                            [
-                              { text: "Anuluj", style: "cancel", onPress: () => {
-                                setIsScanning(false);
-                                setErrorMessage("Połączenie przerwane przez użytkownika.");
-                              }},
-                              { text: "Połącz", onPress: () => {
-                                // Telefon "przełącza" się na sieć centralki i zaczyna pukać do jej bramy (192.168.4.1)
-                                const controller = new AbortController();
-                                const timeoutId = setTimeout(() => controller.abort(), 3500); // Rygorystyczne 3.5 sekundy na odpowiedź
+                  <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#5c33cf', marginVertical: 6 }]} onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                    setErrorMessage(null);
+                    setIsScanning(true);
 
-                                fetch('http://192.168.4.1/', { signal: controller.signal })
-                                  .then(() => {
-                                    clearTimeout(timeoutId);
-                                    setIsScanning(false);
-                                    setDetectedDevice(true);
-                                    setAuthStep('onboarding'); // Sukces! Przechodzimy do karty konfiguracji
-                                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                                  })
-                                  .catch(() => {
-                                    clearTimeout(timeoutId);
-                                    setIsScanning(false);
-                                    setDetectedDevice(false);
-                                    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                    // Walidacja: telefon musi być już w sieci CTRLABLE_SETUP — pukamy do bramy centralki.
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 3500);
 
-                                    // ZWROT BŁĘDU ZGODNIE Z WYMAGANIAMI: Powrót do ekranu z jasnym komunikatem
-                                    setErrorMessage("Nie znaleziono w zasięgu centralki. Proszę się upewnić, że jest podłączona do zasilania i nadaje sygnał.");
-                                  });
-                              }}
-                            ]
-                          );
-                        }, 1200); // Opóźnienie dla płynności animacji UX
-                      }}
-                    ]
-                  );
-                }}>
-                  <Text style={styles.btnText}>⚡ Połącz z centralką</Text>
-                </TouchableOpacity>
+                    fetch('http://192.168.4.1/', { signal: controller.signal })
+                      .then(() => {
+                        clearTimeout(timeoutId);
+                        setIsScanning(false);
+                        setDetectedDevice(true);
+                        setAuthStep('onboarding'); // Sukces! Przechodzimy do karty konfiguracji
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                      })
+                      .catch(() => {
+                        clearTimeout(timeoutId);
+                        setIsScanning(false);
+                        setDetectedDevice(false);
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                        setErrorMessage("Nie widać centralki (192.168.4.1). Sprawdź, czy telefon jest połączony z siecią CTRLABLE_SETUP i czy centralka nadaje.");
+                      });
+                  }}>
+                    <Text style={styles.btnText}>Sprawdź połączenie</Text>
+                  </TouchableOpacity>
+                </>
               )}
 
               {/* Ukryta furtka dla dewelopera / powracającego klienta */}
