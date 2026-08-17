@@ -1,1 +1,5 @@
 /Images/Images
+
+# Klucz prywatny licencji — NIGDY nie commituj
+license_private.pem
+*.pem

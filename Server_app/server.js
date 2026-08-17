@@ -1093,6 +1093,42 @@ const server = http.createServer(async (req, res) => {
       }
 
       // =========================================================================
+      // AKTYWACJA KODU LICENCYJNEGO — krótki kod z tabeli license_codes ustawia
+      // tier konta. Jednorazowy: atomowe UPDATE ... WHERE used_by IS NULL blokuje
+      // podwójne użycie i wyścig. Kod normalizujemy (wielkie litery, bez spacji).
+      // =========================================================================
+      if (pathname === '/api/license/redeem' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        // Normalizacja: wielkie litery, usuwamy wszystko poza [A-Z0-9] (myślniki,
+        // spacje) — klient może wpisać z myślnikami albo bez.
+        const code = String((body.key || body.code || '')).toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (!code) return sendJSON(res, 400, { error: 'Podaj kod licencyjny.' });
+        // Atomowe "zajęcie" kodu — udaje się tylko, gdy istnieje i jest niewykorzystany.
+        const claim = await dbPool.query(
+          `UPDATE license_codes SET used_by = $1, used_at = NOW()
+             WHERE code = $2 AND used_by IS NULL RETURNING tier, days`, [accountId, code]);
+        if (claim.rows.length === 0) {
+          const exists = await dbPool.query('SELECT 1 FROM license_codes WHERE code = $1', [code]);
+          return sendJSON(res, exists.rows.length ? 409 : 400,
+            { error: exists.rows.length ? 'Ten kod został już wykorzystany.' : 'Nieprawidłowy kod licencyjny.' });
+        }
+        const tier = claim.rows[0].tier;
+        const days = parseInt(claim.rows[0].days || 0, 10) || 0;   // 0 = bezterminowo
+        if (!TIER_PRESETS[tier]) return sendJSON(res, 400, { error: 'Nieznany pakiet w kodzie.' });
+        const p = TIER_PRESETS[tier];
+        await dbPool.query(
+          `UPDATE accounts SET license_tier=$1, max_cards=$2, max_pins=$3, max_admins=$4, max_devices=$5,
+                 log_retention_days=$6, guest_codes_enabled=$7, pin_changes_per_month=$8,
+                 license_valid_until = CASE WHEN $9::int > 0 THEN NOW() + ($9::int * INTERVAL '1 day') ELSE NULL END
+             WHERE id=$10`,
+          [tier, p.max_cards, p.max_pins, p.max_admins, p.max_devices,
+           p.log_retention_days, p.guest_codes_enabled, p.pin_changes_per_month, days, accountId]
+        );
+        writeToLocalLogFile('License', `Account ${accountId} aktywował kod ${code}: ${tier} (${days > 0 ? days + ' dni' : 'bezterminowo'})`);
+        return sendJSON(res, 200, { success: true, tier });
+      }
+
+      // =========================================================================
       // ZMIANA NAZWY URZĄDZENIA (np. "Drzwi wejściowe", "Garaż")
       // =========================================================================
       if (pathname === '/api/devices/rename' && req.method === 'POST') {
@@ -2350,6 +2386,20 @@ const server = http.createServer(async (req, res) => {
             tier: kpEnt.license_tier, feature: 'guest_codes'
           });
 
+        // Anty-Airbnb: limit DODAŃ PIN-ów per centralka w bieżącym miesiącu
+        // (pin_changes_per_month; null = bez limitu na tierach płatnych).
+        if (kpEnt.pin_changes_per_month != null) {
+          const chg = await dbPool.query(
+            `SELECT COUNT(*) FROM pin_change_events
+               WHERE mac_address = $1 AND action = 'add'
+                 AND created_at >= date_trunc('month', NOW())`, [kpMac]);
+          if (parseInt(chg.rows[0].count) >= kpEnt.pin_changes_per_month)
+            return sendJSON(res, 403, {
+              error: `Limit zmian PIN-ów w tym miesiącu (${kpEnt.pin_changes_per_month}) osiągnięty. Zwiększ pakiet, aby dodawać częściej.`,
+              limit: kpEnt.pin_changes_per_month, tier: kpEnt.license_tier, feature: 'pin_changes_per_month'
+            });
+        }
+
         const hash = await bcrypt.hash(String(pin), 10);
         const ins = await dbPool.query(
           `INSERT INTO keypad_pins
@@ -2358,6 +2408,7 @@ const server = http.createServer(async (req, res) => {
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
           [accountId, kpMac, name.trim(), hash, scheduleEnabled, scheduleDays,
            scheduleStartMinutes, scheduleEndMinutes, expiresAt, maxUses, isGuestCode]);
+        await dbPool.query('INSERT INTO pin_change_events (account_id, mac_address, action) VALUES ($1,$2,$3)', [accountId, kpMac, 'add']);
         writeToLocalLogFile('Keypad', `PIN "${name.trim()}" added for [Node: ${kpMac}] by account ${accountId}${isGuestCode ? ' (guest code)' : ''}`);
         return sendJSON(res, 200, { success: true, id: ins.rows[0].id });
       }
@@ -2574,6 +2625,26 @@ async function runSchemaMigrations() {
        expires_at TIMESTAMP NOT NULL,
        used BOOLEAN DEFAULT false
      )`,
+    // Kody licencyjne (krótkie, jednorazowe). Operator generuje je na serwerze
+    // (licensekey.js) — wpadają tu z tier + dni; klient wpisuje w apce, redeem
+    // sprawdza w tej tabeli i oznacza used_by/used_at (atomowo, bez podwójnego użycia).
+    `CREATE TABLE IF NOT EXISTS license_codes (
+       code VARCHAR(32) PRIMARY KEY,
+       tier VARCHAR(20) NOT NULL,
+       days INT NOT NULL DEFAULT 365,
+       used_by INT REFERENCES accounts(id) ON DELETE SET NULL,
+       used_at TIMESTAMP,
+       created_at TIMESTAMP DEFAULT NOW()
+     )`,
+    // Audyt zmian PIN-ów (anty-Airbnb): liczymy dodania per centralka na miesiąc.
+    `CREATE TABLE IF NOT EXISTS pin_change_events (
+       id SERIAL PRIMARY KEY,
+       account_id INT REFERENCES accounts(id) ON DELETE SET NULL,
+       mac_address VARCHAR(17),
+       action VARCHAR(12),
+       created_at TIMESTAMP DEFAULT NOW()
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_pin_change_events_mac_time ON pin_change_events(mac_address, created_at)`,
   ];
 
   let successCount = 0;
