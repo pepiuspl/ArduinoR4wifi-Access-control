@@ -1661,6 +1661,8 @@ void setup() {
     delay(50);
   }
   Wire.begin();
+  Wire.setClock(400000);   // I2C 400 kHz zamiast domyślnych 100 kHz — pełny render OLED
+                           // ~4× szybszy (~25 ms zamiast ~90 ms), pętla nie siada do 40/s
   Wire.beginTransmission(0x3C);
   if (Wire.endTransmission() == 0) {
     display.begin(0x3C, true);
@@ -1861,11 +1863,11 @@ void loop() {
   checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
   checkKeypad();  // obsługa matrycy klawiatury PIN
 
-  if (millis() - lastFrameTick > 80) { 
+  if (millis() - lastFrameTick > 150) {   // było 80 ms — rzadszy render OLED = mniej dławienia pętli/skanu RFID
     lastFrameTick = millis();
-    globalAnimFrame++; 
+    globalAnimFrame++;
     renderSystemUI();
-  } 
+  }
 
   if (!doorOpen && !learningMode && (millis() - lastRfidWatchdogTime > 120000)) { 
     lastRfidWatchdogTime = millis();
