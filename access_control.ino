@@ -220,7 +220,8 @@ bool rfidResetPending = false;
 unsigned long lastScanTime = 0;
 unsigned long lastWifiRetryTime = 0;  
 unsigned long lastRfidWatchdogTime = 0;  
-unsigned long lastPollTime = 0; 
+unsigned long lastPollTime = 0;
+int pollFailStreak = 0;   // ile pollów z rzędu nie połączyło się — steruje backoffem interwału (loop)
 unsigned long lastSuccessfulPollTime = 0;
 int globalAnimFrame = 0; 
 unsigned long lastFrameTick = 0; 
@@ -1271,10 +1272,12 @@ void executeCloudSynchronization() {
   httpCheck.setHandshakeTimeout(2);   // poll jest częsty — max ~2 s blokady gdy serwer nieosiągalny
   if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba...");
+    if (pollFailStreak < 100) pollFailStreak++;   // backoff: przy nieosiągalnym serwerze pollujemy rzadziej (loop), żeby pętla była wolna do skanu RFID
     return;
-  } 
-  
-  lastSuccessfulPollTime = millis(); 
+  }
+  pollFailStreak = 0;   // połączenie się udało → serwer osiągalny → wracamy do pełnego tempa
+
+  lastSuccessfulPollTime = millis();
   String macStr = getMacAddressString();
   String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId);  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
@@ -2013,7 +2016,10 @@ void loop() {
     // activeMelody == nullptr: NIE pollujemy, gdy gra melodia (accept/reject) — blokujący
     // handshake TLS zamroziłby updateBuzzer i dźwięk urwałby się w połowie. Melodie są
     // krótkie (<1-2 s), więc poll czeka jeden cykl. Interwał (a więc load serwera) bez zmian.
-    if (WiFi.status() == WL_CONNECTED && activeMelody == nullptr && (forceSyncNow || millis() - lastPollTime > 1000)) {   // 1 s bazowo; handshake TLS i tak ogranicza realne tempo. forceSyncNow zgłasza otwarcie/zamknięcie natychmiast, bez czekania na interwał.
+    // Backoff: gdy serwer nieosiągalny (pollFailStreak >= 3), pollujemy co 8 s zamiast 1 s —
+    // pętla nie blokuje się co sekundę na nieudanym połączeniu, więc skan RFID jest responsywny.
+    unsigned long pollInterval = (pollFailStreak >= 3) ? 8000UL : 1000UL;
+    if (WiFi.status() == WL_CONNECTED && activeMelody == nullptr && (forceSyncNow || millis() - lastPollTime > pollInterval)) {   // 1 s bazowo; handshake TLS i tak ogranicza realne tempo. forceSyncNow zgłasza otwarcie/zamknięcie natychmiast, bez czekania na interwał.
       executeCloudSynchronization();
       lastPollTime = millis();
       forceSyncNow = false;
