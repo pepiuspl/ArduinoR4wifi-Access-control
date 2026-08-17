@@ -111,6 +111,7 @@ export default function App() {
   const [kpScheduleEndText, setKpScheduleEndText] = useState('20:00');
   const [kpRenameId, setKpRenameId]   = useState(null);
   const [kpRenameName, setKpRenameName] = useState('');
+  const [autoLockSeconds, setAutoLockSeconds] = useState({}); // { [mac]: sekundy } — optymistyczny wybór czasu otwarcia
   const [cardRenameIdx, setCardRenameIdx] = useState(null); // KTÓRY wiersz jest w edycji (stabilny klucz karty)
   const [cardRenameRef, setCardRenameRef] = useState(null); // CZYM zaadresować mutację: {id} lub {idx} (stare buildy)
   const [cardRenameName, setCardRenameName] = useState('');
@@ -1102,6 +1103,31 @@ export default function App() {
       .catch(() => Alert.alert('Błąd', 'Nie udało się zapisać ustawień.'));
   };
 
+  // --- Czas otwarcia rygla (tylko właściciel) ---
+  // Zapis optymistyczny: podświetlamy wybór od razu, a przy błędzie cofamy do wartości
+  // z serwera. Centralka pobierze nową wartość przy najbliższym pollu (auto_lock_delay).
+  // mac = KTÓREJ centralki dotyczy zmiana (moduł „Centralki" pokazuje wszystkie).
+  // Optymistycznie podświetlamy wybór per MAC, przy błędzie cofamy.
+  const saveAutoLockSeconds = (mac, seconds) => {
+    if (!mac) return;
+    setAutoLockSeconds(prev => ({ ...(prev || {}), [mac]: seconds }));
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    fetch(`${backendUrl}/api/devices/auto_lock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ mac, seconds })
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Nie udało się zapisać czasu otwarcia.');
+        fetchStatus();
+      })
+      .catch((e) => {
+        setAutoLockSeconds(prev => { const next = { ...(prev || {}) }; delete next[mac]; return next; });
+        Alert.alert('Nie zapisano', e.message);
+      });
+  };
+
   // --- Tryb nauki nowej karty RFID ---
   // Nazwa MUSI polecieć w URL-u: /api/toggle_learn to GET (executeCommand robi POST
   // dopiero gdy dostanie payload), a serwer czyta ją z query.username i dopiero stamtąd
@@ -1707,8 +1733,10 @@ export default function App() {
             <ScrollView contentContainerStyle={styles.scrollWrapper}>
               <Text style={styles.screenHeaderText}>📱 Dashboard</Text>
 
-              {/* ── PRZEŁĄCZNIK / ZARZĄDZANIE CENTRALKAMI ── widoczny, gdy konto ma co najmniej 1 urządzenie (żeby dało się nazwać nawet jedną centralkę) */}
-              {!isLocalMode && devices.length >= 1 && (
+              {/* ── PRZEŁĄCZNIK CENTRALEK ── tylko wybór urządzenia do zdalnego otwierania.
+                  Widoczny dopiero przy 2+ centralkach — przy jednej nie ma czego przełączać.
+                  Zarządzanie (nazwy, czas otwarcia, administratorzy) jest w module „Centralki". */}
+              {!isLocalMode && devices.length > 1 && (
                 <TouchableOpacity
                   style={{ backgroundColor: '#16161a', borderWidth: 1, borderColor: '#2a2a30', borderRadius: 10, padding: 12, marginBottom: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
                   onPress={() => setShowDeviceSwitcher(true)}
@@ -2271,6 +2299,97 @@ export default function App() {
           </KeyboardAvoidingView>
         )}
 
+        {/* ── EKRAN: CENTRALKI — jedno miejsce na wszystko, co dotyczy urządzeń:
+            dodawanie, nazwy, czas otwarcia, administratorzy. Dashboard służy już tylko
+            do otwierania i przełączania się między centralkami. ── */}
+        {currentScreen === 'devices' && (
+          <ScrollView contentContainerStyle={styles.scrollWrapper}>
+            <Text style={styles.screenHeaderText}>🏠 Centralki</Text>
+
+            <TouchableOpacity
+              style={[styles.secondaryBtn, { backgroundColor: '#2e7d32', marginBottom: 8 }]}
+              onPress={() => {
+                setInitMode('online');
+                setDetectedDevice(false);
+                setAuthStep('connect');
+                setIsConfigured(false);
+              }}
+            >
+              <Text style={styles.btnText}>➕ Dodaj nową centralkę</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#1a3a5c', marginBottom: 18 }]} onPress={handleAcceptInvite}>
+              <Text style={styles.btnText}>🔑 Mam kod zaproszenia</Text>
+            </TouchableOpacity>
+
+            {devices.length === 0 && (
+              <Text style={styles.subLabel}>Nie masz jeszcze żadnej centralki. Dodaj pierwszą powyżej.</Text>
+            )}
+
+            {devices.map((d) => {
+              const activeSeconds = (autoLockSeconds && autoLockSeconds[d.mac]) ?? d.autoLockSeconds ?? 3;
+              return (
+                <View key={d.mac} style={[styles.card, d.mac === selectedMac ? { borderColor: '#5c33cf', borderWidth: 1 } : null]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>{d.name}</Text>
+                      <Text style={{ color: d.online ? '#81c784' : '#e57373', fontSize: 12, marginTop: 3 }}>
+                        {d.online ? '● Online' : '● Offline'} · {d.mode || '—'}{!d.isOwner ? ' · Udostępnione Ci' : ''}
+                      </Text>
+                      <Text style={{ color: '#555', fontSize: 11, marginTop: 2 }}>{d.mac}{d.firmwareVersion ? ` · ${d.firmwareVersion}` : ''}</Text>
+                    </View>
+                    {d.mac === selectedMac
+                      ? <Text style={{ color: '#5c33cf', fontWeight: 'bold', fontSize: 12 }}>AKTYWNA</Text>
+                      : (
+                        <TouchableOpacity onPress={() => setSelectedMac(d.mac)} style={{ paddingHorizontal: 10, paddingVertical: 6 }}>
+                          <Text style={{ color: '#64b5f6', fontSize: 12, fontWeight: 'bold' }}>Wybierz</Text>
+                        </TouchableOpacity>
+                      )}
+                  </View>
+
+                  {d.isOwner && (
+                    <>
+                      <View style={{ height: 1, backgroundColor: '#222', marginVertical: 12 }} />
+
+                      <Text style={{ color: '#aaa', fontSize: 12, fontWeight: 'bold', marginBottom: 8 }}>⏱️ Czas otwarcia rygla</Text>
+                      <Text style={[styles.subLabel, { marginBottom: 10, fontSize: 11 }]}>
+                        Jak długo rygiel pozostaje otwarty po karcie, PIN-ie lub otwarciu z aplikacji.
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                        {[3, 5, 10, 15, 30].map((sec) => (
+                          <TouchableOpacity
+                            key={sec}
+                            style={{
+                              paddingVertical: 9, paddingHorizontal: 15, borderRadius: 8,
+                              backgroundColor: activeSeconds === sec ? '#5c33cf' : '#1a1a2e',
+                              borderWidth: 1, borderColor: activeSeconds === sec ? '#7c5cff' : '#2a2a3e',
+                            }}
+                            onPress={() => saveAutoLockSeconds(d.mac, sec)}
+                          >
+                            <Text style={{ color: activeSeconds === sec ? '#fff' : '#aaa', fontWeight: 'bold', fontSize: 13 }}>{sec}s</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+
+                      <View style={{ flexDirection: 'row', marginTop: 14, gap: 8 }}>
+                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 9 }]} onPress={() => handleRenameDevice(d.mac, d.name)}>
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>✏️ Zmień nazwę</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.secondaryBtn, { flex: 1, paddingVertical: 9, backgroundColor: '#1a3a5c' }]}
+                          onPress={() => { setSelectedMac(d.mac); navigateTo('team'); loadTeam(); }}
+                        >
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>👥 Administratorzy</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  )}
+                </View>
+              );
+            })}
+          </ScrollView>
+        )}
+
         {/* ── EKRAN: ZESPÓŁ (współadministratorzy per centralka) — tylko online ── */}
         {currentScreen === 'team' && (
           <KeyboardAvoidingView
@@ -2449,16 +2568,10 @@ export default function App() {
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Dashboard</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
           {!isLocalMode && (
-            <TouchableOpacity style={styles.menuItemRow} onPress={() => {
-              // Wejście w przepływ dodania kolejnej centralki (konto już zalogowane).
-              // Wracamy do karty inicjalizacji na kroku 'connect'; token zostaje w sesji,
-              // więc po konfiguracji finishSent → setIsConfigured(true) wróci do aplikacji.
-              toggleBurgerMenu();
-              setInitMode('online');
-              setDetectedDevice(false);
-              setAuthStep('connect');
-              setIsConfigured(false);
-            }}><Text style={styles.menuItemLabelText}>➕ Dodaj centralkę</Text></TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.menuItemRow, currentScreen === 'devices' ? styles.menuItemRowActive : null]}
+              onPress={() => navigateTo('devices')}
+            ><Text style={styles.menuItemLabelText}>🏠 Centralki</Text></TouchableOpacity>
           )}
           {!isLocalMode && (
             <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'team' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('team'); loadTeam(); }}><Text style={styles.menuItemLabelText}>🤝 Zespół (Administratorzy)</Text></TouchableOpacity>
@@ -2559,21 +2672,12 @@ export default function App() {
                         </Text>
                       </TouchableOpacity>
                     </View>
-                    {d.isOwner && (
-                      <View style={{ flexDirection: 'row', marginTop: 8, gap: 8 }}>
-                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8 }]} onPress={() => handleRenameDevice(d.mac, d.name)}>
-                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>✏️ Zmień nazwę</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, paddingVertical: 8, backgroundColor: '#1a3a5c' }]} onPress={() => { setShowDeviceSwitcher(false); navigateTo('team'); loadTeam(); }}>
-                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>👥 Administratorzy</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
                   </View>
                 ))}
               </ScrollView>
-              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12, backgroundColor: '#1a3a5c' }]} onPress={() => { setShowDeviceSwitcher(false); handleAcceptInvite(); }}>
-                <Text style={styles.btnText}>🔑 Mam kod zaproszenia</Text>
+              {/* Zarządzanie przeniesione do modułu „Centralki" — tu zostaje sam wybór. */}
+              <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 12, backgroundColor: '#1a3a5c' }]} onPress={() => { setShowDeviceSwitcher(false); navigateTo('devices'); }}>
+                <Text style={styles.btnText}>🏠 Zarządzaj centralkami</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.secondaryBtn, { marginTop: 8 }]} onPress={() => setShowDeviceSwitcher(false)}>
                 <Text style={styles.btnText}>Zamknij</Text>

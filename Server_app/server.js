@@ -856,6 +856,9 @@ const server = http.createServer(async (req, res) => {
           mode: d.operational_mode,
           firmwareVersion: d.firmware_version,
           isOwner: d.is_owner,
+          // Czas otwarcia rygla per centralka — moduł „Centralki" pokazuje i ustawia
+          // to dla KAŻDEJ z nich, nie tylko dla aktywnie wybranej.
+          autoLockSeconds: Math.round((d.auto_lock_delay_ms || 3000) / 1000),
         }));
 
         // Wybór aktywnego urządzenia: ?mac= z zapytania, jeśli należy do
@@ -929,6 +932,8 @@ const server = http.createServer(async (req, res) => {
           otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0),
           deviceReleaseId: (actualLockStates[primaryMac]?.deviceReleaseId || 0),
           latestReleaseId: latestFirmwareReleaseId,
+          autoLockSeconds: Math.round((primaryDevice.auto_lock_delay_ms || 3000) / 1000),
+          isOwner: !!primaryDevice.is_owner,   // wyliczane w SELECT (d.account_id = $1)
           keypad_pins: kpPinsRes.rows,
           devices: deviceList,
           activeMac: primaryMac,
@@ -1263,6 +1268,31 @@ const server = http.createServer(async (req, res) => {
         if (result.rows.length === 0) return sendJSON(res, 404, { error: "Device not found on this account" });
         writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Renamed to "${name.trim()}".`);
         return sendJSON(res, 200, { status: "ok" });
+      }
+
+      // =========================================================================
+      // CZAS OTWARCIA RYGLA — POST { mac, seconds }. Tylko WŁAŚCICIEL (jak rename/WiFi):
+      // to ustawienie bezpieczeństwa, więc współadmin go nie zmienia. Trafia do
+      // centralki przy najbliższym pollu jako "auto_lock_delay" (w ms).
+      // =========================================================================
+      if (pathname === '/api/devices/auto_lock' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const mac = String(body.mac || '').toUpperCase();
+        const seconds = parseInt(body.seconds, 10);
+        if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
+        // Zakres zgodny z firmware (1–60 s) — poza nim centralka i tak zignoruje wartość.
+        if (!Number.isFinite(seconds) || seconds < 1 || seconds > 60) {
+          return sendJSON(res, 400, { error: 'Czas otwarcia musi mieścić się w zakresie 1–60 sekund.' });
+        }
+        const result = await dbPool.query(
+          'UPDATE devices SET auto_lock_delay_ms = $1 WHERE mac_address = $2 AND account_id = $3 RETURNING mac_address',
+          [seconds * 1000, mac, accountId]
+        );
+        if (result.rows.length === 0) {
+          return sendJSON(res, 403, { error: 'Tylko właściciel może zmienić czas otwarcia.' });
+        }
+        writeToLocalLogFile('Provisioning', `[Node: ${mac}] Czas otwarcia rygla ustawiony na ${seconds}s.`);
+        return sendJSON(res, 200, { status: 'ok', seconds });
       }
 
       // Uwaga: dawny "miękki" endpoint /api/devices/remove usunięto — kasował tylko
@@ -2250,6 +2280,18 @@ const server = http.createServer(async (req, res) => {
     forceLog(`[OTA ACTIVATED] Zezwolono urządzeniu [${mac}] na pobranie wersji ${cleanLatest}`);
   }
 
+  // Czas otwarcia rygla ustawiony przez właściciela (per centralka). Firmware nadpisze
+  // nim swoją wartość domyślną (przyjmuje 1000–60000 ms). Zapytanie jest lekkie, a poll
+  // i tak trafia do bazy wyżej; przy błędzie po prostu nie wysyłamy pola.
+  let autoLockDelayMs = null;
+  if (mac && mac.includes(':')) {
+    const alRes = await dbPool.query('SELECT auto_lock_delay_ms FROM devices WHERE mac_address = $1', [mac])
+      .catch(() => ({ rows: [] }));
+    if (alRes.rows.length > 0 && alRes.rows[0].auto_lock_delay_ms) {
+      autoLockDelayMs = alRes.rows[0].auto_lock_delay_ms;
+    }
+  }
+
   return sendJSON(res, 200, {
     unlock: unlockAction,
     learn: isLearning,
@@ -2257,7 +2299,8 @@ const server = http.createServer(async (req, res) => {
     ota: otaUpdateTrigger,
     deregister: deregActive,
     latest_release_id: latestFirmwareReleaseId,
-    latest_version: latestFw.version
+    latest_version: latestFw.version,
+    ...(autoLockDelayMs ? { auto_lock_delay: autoLockDelayMs } : {})
   });
 }
 
@@ -2786,6 +2829,10 @@ async function runSchemaMigrations() {
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT true`,
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verify_code VARCHAR(6) DEFAULT NULL`,
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verify_expires TIMESTAMP DEFAULT NULL`,
+    // Czas otwarcia rygla, ustawiany przez właściciela w aplikacji. PER CENTRALKA —
+    // brama wjazdowa potrzebuje dłużej niż drzwi wejściowe. Firmware przyjmuje
+    // 1000–60000 ms i sam pilnuje zakresu; serwer wysyła to w odpowiedzi polla.
+    `ALTER TABLE devices ADD COLUMN IF NOT EXISTS auto_lock_delay_ms INT DEFAULT 3000`,
   ];
   // Wielu administratorów na jedno urządzenie: konto-właściciel (devices.account_id)
   // pozostaje jedynym uprawnionym do usuwania/zmiany WiFi/zapraszania innych,

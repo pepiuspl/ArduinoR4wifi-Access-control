@@ -1384,9 +1384,14 @@ void executeCloudSynchronization() {
 
   // Konfigurowalne opoznienie auto-blokady - odczytywane z kazdej odpowiedzi
   // pollu, zeby zmiana w aplikacji dzialala natychmiast, bez restartu urzadzenia.
-  int autoLockIdx = payloadResponse.indexOf("\"auto_lock_delay\":");
+  // UWAGA na off-by-one: klucz "auto_lock_delay": ma 18 znaków, nie 19. Wcześniej
+  // przesunięcie o 19 obcinało pierwszą cyfrę wartości (10000 -> "0000" = 0), więc
+  // walidacja >=1000 odrzucała ją i rygiel zostawał na domyślnych 3 s. Błąd nie
+  // ujawniał się, dopóki serwer w ogóle nie wysyłał tego pola. Liczymy długość klucza.
+  static const char AUTO_LOCK_KEY[] = "\"auto_lock_delay\":";
+  int autoLockIdx = payloadResponse.indexOf(AUTO_LOCK_KEY);
   if (autoLockIdx != -1) {
-    autoLockIdx += 19;
+    autoLockIdx += (sizeof(AUTO_LOCK_KEY) - 1);
     int autoLockEnd = payloadResponse.indexOf(",", autoLockIdx);
     if (autoLockEnd == -1) autoLockEnd = payloadResponse.indexOf("}", autoLockIdx);
     if (autoLockEnd > autoLockIdx) {
