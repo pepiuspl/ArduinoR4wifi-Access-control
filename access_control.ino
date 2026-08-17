@@ -1832,6 +1832,16 @@ void networkTask(void *param) {
 }
 
 void loop() {
+  // DIAGNOSTYKA (tymczasowa): ile iteracji pętli na sekundę. Wysoka liczba (tysiące)
+  // = pętla szybka → skan RFID wolny to sprzęt/pole RF. Niska (kilka/kilkadziesiąt)
+  // = pętla zablokowana → szukamy blokady. USUNĄĆ po diagnozie.
+  static unsigned long _loopCount = 0, _lastLoopReport = 0;
+  _loopCount++;
+  if (millis() - _lastLoopReport > 1000) {
+    Serial.print("[LOOP] iteracji/s: "); Serial.println(_loopCount);
+    _loopCount = 0; _lastLoopReport = millis();
+  }
+
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
   handleProvisioningServer();  // lokalny serwer WWW (zmiana WiFi/ustawień) — też gdy online
 
