@@ -289,7 +289,11 @@ export default function App() {
   const [secureSettingsWifi, setSecureSettingsWifi] = useState(true);
 
   // INICJALIZACJA
-  const [authStep, setAuthStep] = useState('connect');
+  // Nowy przepływ: 'mode' (online/offline) → (online) 'account_choice' → 'login'|'register'
+  // → 'verify' → 'connect' → 'onboarding'. Offline: 'mode' → 'connect' → 'onboarding'.
+  const [authStep, setAuthStep] = useState('mode');
+  const [initMode, setInitMode] = useState('online'); // 'online' | 'offline' — wybrany na ekranie 'mode'
+  const [verifyCode, setVerifyCode] = useState('');    // 6-cyfrowy kod weryfikacji e-mail
   const [isScanning, setIsScanning] = useState(false);
   const [detectedDevice, setDetectedDevice] = useState(false);
 
@@ -498,10 +502,16 @@ export default function App() {
     .then(data => {
       setIsAuthenticating(false);
 
-      // Dopasowanie do Twojego formatu odpowiedzi: data.status === "registered"
-      if (data.status === "registered") {
-        Alert.alert("Sukces", "Konto Master zostało pomyślnie utworzone! Sprawdź swoją skrzynkę e-mail.");
-        setAuthStep('login'); // Przełączenie widoku na panel logowania
+      // Nowy przepływ: serwer zwraca "code_sent" (konto nieaktywne, kod wysłany na e-mail).
+      // Przechodzimy na ekran wpisania kodu 6-cyfrowego.
+      if (data.status === "code_sent") {
+        setErrorMessage('');
+        Alert.alert("Sprawdź e-mail", "Wysłaliśmy 6-cyfrowy kod weryfikacyjny na Twój adres. Wpisz go, aby aktywować konto.");
+        setAuthStep('verify');
+      } else if (data.status === "registered") {
+        // Zgodność wsteczna ze starym serwerem (bez weryfikacji).
+        Alert.alert("Sukces", "Konto zostało utworzone. Możesz się zalogować.");
+        setAuthStep('login');
       } else {
         setErrorMessage(data.error || "Błąd podczas tworzenia konta.");
       }
@@ -511,6 +521,38 @@ export default function App() {
       setErrorMessage("Błąd połączenia z węzłem backendu.");
       console.error(error);
     });
+  };
+
+  // Weryfikacja e-mail kodem 6-cyfrowym. Serwer aktywuje konto, zwraca JWT i wysyła
+  // e-mail powitalny. Po sukcesie przechodzimy do dodania centralki (konto świeże).
+  const verifyEmailCode = async () => {
+    if (!email || !verifyCode) { setErrorMessage('Podaj kod z e-maila.'); return; }
+    setIsAuthenticating(true);
+    setErrorMessage('');
+    try {
+      const res = await fetch(`${backendUrl}/api/auth/verify_email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), code: verifyCode.trim() })
+      });
+      const data = await res.json();
+      setIsAuthenticating(false);
+      if (data.status === 'verified' || data.status === 'already_verified') {
+        if (data.token) { await AsyncStorage.setItem('@lock_auth_token', data.token); setAuthToken(data.token); }
+        if (data.accountId) { await AsyncStorage.setItem('@lock_account_id', String(data.accountId)); setAccountId(data.accountId); }
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setVerifyCode('');
+        setInitMode('online');
+        setDetectedDevice(false);
+        setAuthStep('connect'); // konto aktywne → przejdź do dodania centralki
+      } else {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        setErrorMessage(data.error || 'Kod nieprawidłowy lub wygasł.');
+      }
+    } catch (e) {
+      setIsAuthenticating(false);
+      setErrorMessage('Błąd połączenia z serwerem.');
+    }
   };
 
   const handleSecurityLogin = async () => {
@@ -523,13 +565,21 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: email.trim(), password: password.trim() })
     })
-      .then((res) => {
-        if (!res.ok) throw new Error();
-        return res.json();
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        return { ok: res.ok, httpStatus: res.status, data };
       })
-      .then(async (data) => {
+      .then(async ({ ok, httpStatus, data }) => {
         setIsAuthenticating(false);
-        if (data.auth && (data.token || data.accountId)) {
+        // Konto niezweryfikowane → serwer wysłał świeży kod; przejdź do ekranu weryfikacji.
+        if (httpStatus === 403 && data.status === 'unverified') {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          setErrorMessage('');
+          Alert.alert('Zweryfikuj konto', 'To konto nie jest jeszcze potwierdzone. Wysłaliśmy nowy kod na Twój e-mail.');
+          setAuthStep('verify');
+          return;
+        }
+        if (ok && data.auth && (data.token || data.accountId)) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           // Store the signed JWT; fall back to accountId for older server builds
           const tok = data.token || null;
@@ -1153,10 +1203,13 @@ export default function App() {
   if (!isConfigured) {
     // Dynamiczne dopasowanie nagłówka karty w zależności od etapu połączenia
     const getAuthTitle = () => {
+      if (authStep === 'mode') return 'Uruchomienie Centralki';
+      if (authStep === 'account_choice') return 'Konto CTRLABLE';
       if (authStep === 'connect') return 'Połączenie Węzła';
-      if (authStep === 'onboarding') return 'Inicjalizacja Centralki';
+      if (authStep === 'onboarding') return initMode === 'offline' ? 'Tryb Lokalny' : 'Inicjalizacja Centralki';
       if (authStep === 'forgot') return `Odzyskiwanie [Krok ${resetStep}/3]`;
       if (authStep === 'register') return 'Rejestracja Konta Master';
+      if (authStep === 'verify') return 'Weryfikacja E-mail';
       return 'Autoryzacja CTRLABLE';
     };
 
@@ -1195,13 +1248,64 @@ export default function App() {
             </View>
           )}
 
+          {/* KROK 0: WYBÓR TRYBU — online (chmura) vs offline (lokalny) */}
+          {authStep === 'mode' && (
+            <>
+              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 24, alignSelf: 'center', color: '#aaa', lineHeight: 18 }]}>
+                Jak chcesz uruchomić centralkę? Tryb chmurowy daje konto, zdalne zarządzanie, logi i aktualizacje. Tryb lokalny działa bez internetu i bez konta — zarządzasz przez Wi-Fi centralki.
+              </Text>
+
+              <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#5c33cf', marginVertical: 8 }]} onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                setInitMode('online');
+                setErrorMessage('');
+                setAuthStep('account_choice');
+              }}>
+                <Text style={styles.btnText}>☁️ Tryb chmurowy (online)</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#1c1917', borderWidth: 1, borderColor: '#444', marginVertical: 8 }]} onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                setInitMode('offline');
+                setErrorMessage('');
+                setDetectedDevice(false);
+                setAuthStep('connect');
+              }}>
+                <Text style={styles.btnText}>🔌 Tryb lokalny (offline)</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {/* KROK 0b: KONTO — masz już konto czy zakładasz nowe? (tylko online) */}
+          {authStep === 'account_choice' && (
+            <>
+              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 24, alignSelf: 'center', color: '#aaa', lineHeight: 18 }]}>
+                Masz już konto CTRLABLE? Zaloguj się, aby przypiąć centralkę. Jeśli nie — załóż nowe (potwierdzimy e-mail kodem).
+              </Text>
+
+              <TouchableOpacity style={[styles.primaryBtn, { marginVertical: 8 }]} onPress={() => { setErrorMessage(''); setAuthStep('login'); }}>
+                <Text style={styles.btnText}>Mam konto — zaloguj się</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32', marginVertical: 8 }]} onPress={() => { setErrorMessage(''); setIsPrivacyAccepted(false); setAuthStep('register'); }}>
+                <Text style={styles.btnText}>Załóż nowe konto</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 18 }} onPress={() => setAuthStep('mode')}>
+                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>⬅ Zmień tryb</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
           {/* =========================================================================
               KROK 1: RYGORYSTYCZNY EKRAN STARTOWY Z INTEGRACJĄ SYSTEMOWĄ WI-FI
               ========================================================================= */}
           {authStep === 'connect' && (
             <>
               <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 24, alignSelf: 'center', color: '#aaa', lineHeight: 18 }]}>
-                Wykryto pierwszy rozruch struktury. Aby uniemożliwić nieautoryzowany dostęp, funkcje rejestru i logowania są zablokowane do momentu wykrycia fizycznego modułu w Twoim otoczeniu.
+                {initMode === 'offline'
+                  ? 'Tryb lokalny. Podłącz telefon do sieci Wi-Fi centralki (CTRLABLE_SETUP), aby ją zainicjalizować.'
+                  : 'Ostatni krok: dodaj centralkę. Podłącz telefon do sieci Wi-Fi centralki (CTRLABLE_SETUP) i sprawdź połączenie.'}
               </Text>
 
               {isScanning ? (
@@ -1265,12 +1369,21 @@ export default function App() {
                 </>
               )}
 
-              {/* Ukryta furtka dla dewelopera / powracającego klienta */}
-              <TouchableOpacity style={{ marginTop: 24 }} onPress={() => setAuthStep('login')}>
-                <Text style={{ color: '#444', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>
-                  Moje urządzenie jest już podłączone do sieci domowej ➔
-                </Text>
-              </TouchableOpacity>
+              {/* Nawigacja zależna od trybu/sesji: offline → zmień tryb; online zalogowany →
+                  pomiń dodawanie i wejdź do aplikacji; online niezalogowany → wróć do konta. */}
+              {initMode === 'offline' ? (
+                <TouchableOpacity style={{ marginTop: 24 }} onPress={() => setAuthStep('mode')}>
+                  <Text style={{ color: '#444', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>⬅ Zmień tryb uruchomienia</Text>
+                </TouchableOpacity>
+              ) : authToken ? (
+                <TouchableOpacity style={{ marginTop: 24 }} onPress={() => { resetUiToDefault(); setIsConfigured(true); }}>
+                  <Text style={{ color: '#444', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>Dodam centralkę później — przejdź do aplikacji ➔</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity style={{ marginTop: 24 }} onPress={() => setAuthStep('account_choice')}>
+                  <Text style={{ color: '#444', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>⬅ Wróć do konta</Text>
+                </TouchableOpacity>
+              )}
             </>
           )}
 
@@ -1279,69 +1392,77 @@ export default function App() {
               ========================================================================= */}
           {authStep === 'onboarding' && (
             <>
-              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center', color: '#ffb300' }]}>
-                Aplikacja przygotowuje połączenie sieciowe. Połącz się w ustawieniach telefonu z Wi-Fi: CTRLABLE_SETUP i uzupełnij poniższy profil:
-              </Text>
+              {initMode === 'offline' ? (
+                <>
+                  <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center', color: '#ffb300', lineHeight: 18 }]}>
+                    Tryb lokalny: centralka nigdy nie łączy się z internetem ani chmurą. Karty RFID i przycisk działają od razu, a zarządzasz nią przez sieć Wi-Fi centralki (CTRLABLE_SETUP). Konto nie jest potrzebne.
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, { backgroundColor: '#1c1917', borderWidth: 1, borderColor: '#444' }, isAuthenticating ? { opacity: 0.6 } : null]}
+                    disabled={isAuthenticating}
+                    onPress={handleOfflineSetup}
+                  >
+                    <Text style={styles.btnText}>🔌 Uruchom w trybie lokalnym</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center', color: '#ffb300', lineHeight: 18 }]}>
+                    Upewnij się, że telefon jest połączony z Wi-Fi: CTRLABLE_SETUP. Podaj dane swojej domowej sieci — centralka wpisze się do niej i zgłosi do Twojego konta ({email}).
+                  </Text>
 
-              <Text style={styles.inputLabelText}>Nazwa domowej sieci Wi-Fi (SSID):</Text>
-              <TextInput style={styles.inputField} placeholder="Wpisz nazwę sieci Wi-Fi" placeholderTextColor="#444" value={settingsSsid} onChangeText={setSettingsSsid} />
+                  <Text style={styles.inputLabelText}>Nazwa domowej sieci Wi-Fi (SSID):</Text>
+                  <TextInput style={styles.inputField} placeholder="Wpisz nazwę sieci Wi-Fi" placeholderTextColor="#444" value={settingsSsid} onChangeText={setSettingsSsid} />
 
-              <Text style={styles.inputLabelText}>Hasło do domowej sieci Wi-Fi:</Text>
-              <TextInput style={styles.inputField} placeholder="Wpisz hasło Wi-Fi" placeholderTextColor="#444" secureTextEntry value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
+                  <Text style={styles.inputLabelText}>Hasło do domowej sieci Wi-Fi:</Text>
+                  <TextInput style={styles.inputField} placeholder="Wpisz hasło Wi-Fi" placeholderTextColor="#444" secureTextEntry value={settingsWifiPass} onChangeText={setSettingsWifiPass} />
 
-              <Text style={[styles.sectionHeader, { marginTop: 10 }]}>Konfiguracja Profilu Administratora</Text>
-              <Text style={styles.inputLabelText}>Adres E-mail:</Text>
-              <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" value={email} onChangeText={setEmail} />
-
-              <Text style={styles.inputLabelText}>Hasło dostępowe:</Text>
-              <TextInput style={styles.inputField} placeholder="••••••••" placeholderTextColor="#444" secureTextEntry value={password} onChangeText={setPassword} />
-
-              <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32' }, isAuthenticating ? { opacity: 0.6 } : null]} disabled={isAuthenticating} onPress={() => {
-                // UWAGA: firmware po odebraniu GET-a robi WiFi.begin (tryb AP+STA), przez co
-                // SoftAP przeskakuje na kanał sieci domowej i telefon WYPADA z CTRLABLE_SETUP —
-                // więc odpowiedź HTTP prawie nigdy nie wraca i fetch się ODRZUCA, mimo że sam
-                // GET DOTARŁ i ustawienia zostały zapisane. Dlatego .then i .catch traktujemy
-                // TAK SAMO: „konfiguracja wysłana". Realne potwierdzenie = centralka pojawi się
-                // na liście urządzeń po zalogowaniu (gdy zgłosi się do chmury).
-                const finishSent = () => {
-                  Alert.alert(
-                    "Konfiguracja wysłana ✓",
-                    "Centralka zapisała ustawienia i restartuje się, aby połączyć się z Twoją siecią domową. Za chwilę zgłosi się do chmury i pojawi się na liście urządzeń po zalogowaniu.\n\nPrzełącz teraz telefon z powrotem na swój internet (Wi-Fi domowe lub dane komórkowe)."
-                  );
-                  setAuthStep('login');
-                };
-                fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(email)}&reg_pass=${encodeURIComponent(password)}&offline=0`)
-                  .then(finishSent)
-                  .catch(finishSent);
-              }}>
-                <Text style={styles.btnText}>Zapisz i Utwórz Konto</Text>
-              </TouchableOpacity>
-
-              <View style={{ flexDirection: 'row', alignItems: 'center', width: '100%', marginVertical: 18 }}>
-                <View style={{ flex: 1, height: 1, backgroundColor: '#222' }} />
-                <Text style={{ color: '#555', fontSize: 12, marginHorizontal: 10 }}>ALBO</Text>
-                <View style={{ flex: 1, height: 1, backgroundColor: '#222' }} />
-              </View>
-
-              <TouchableOpacity
-                style={[styles.primaryBtn, { backgroundColor: '#1c1917', borderWidth: 1, borderColor: '#444' }, isAuthenticating ? { opacity: 0.6 } : null]}
-                disabled={isAuthenticating}
-                onPress={() => {
-                  Alert.alert(
-                    "Tryb Lokalny (bez internetu)",
-                    "Centralka nigdy nie połączy się z internetem ani z chmurą. Karty RFID i przycisk fizyczny będą działać od razu, a zarządzanie z aplikacji odbędzie się przez sieć Wi-Fi samej centralki. Nie potrzebujesz konta e-mail. Kontynuować?",
-                    [
-                      { text: "Anuluj", style: "cancel" },
-                      { text: "Tak, ustaw lokalnie", onPress: handleOfflineSetup }
-                    ]
-                  );
-                }}
-              >
-                <Text style={styles.btnText}>🔌 Skonfiguruj bez internetu (Tryb Lokalny)</Text>
-              </TouchableOpacity>
+                  <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#2e7d32', marginTop: 12 }, isAuthenticating ? { opacity: 0.6 } : null]} disabled={isAuthenticating} onPress={async () => {
+                    // NAJPIERW sonda: czy telefon NAPRAWDĘ jest w sieci CTRLABLE_SETUP?
+                    // Bez tego konfiguracja leciała „w próżnię" (fetch padał, a że .catch=.then,
+                    // apka i tak mówiła „wysłano" — centralka nigdy nie dostawała danych).
+                    if (!settingsSsid) { setErrorMessage('Podaj nazwę sieci Wi-Fi.'); return; }
+                    setIsAuthenticating(true);
+                    setErrorMessage('');
+                    try {
+                      const probe = new AbortController();
+                      const probeTimer = setTimeout(() => probe.abort(), 3500);
+                      await fetch('http://192.168.4.1/', { signal: probe.signal });
+                      clearTimeout(probeTimer);
+                    } catch (e) {
+                      setIsAuthenticating(false);
+                      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                      Alert.alert(
+                        'Brak łączności z centralką',
+                        'Telefon nie widzi centralki pod 192.168.4.1. Połącz się w ustawieniach Wi-Fi z siecią CTRLABLE_SETUP i spróbuj ponownie.'
+                      );
+                      return;
+                    }
+                    setIsAuthenticating(false);
+                    // Firmware po odebraniu GET-a robi WiFi.begin (AP+STA) → SoftAP przeskakuje na
+                    // kanał sieci domowej i telefon WYPADA z CTRLABLE_SETUP, więc fetch prawie zawsze
+                    // się ODRZUCA, mimo że GET dotarł i ustawienia zapisano. .then i .catch = to samo.
+                    // Konto JUŻ istnieje (użytkownik zalogowany/zweryfikowany) → reg_pass PUSTE;
+                    // owner = e-mail zalogowanego konta. Firmware NIE zakłada już konta.
+                    const finishSent = () => {
+                      Alert.alert(
+                        "Konfiguracja wysłana ✓",
+                        "Centralka zapisała ustawienia i restartuje się, aby połączyć się z Twoją siecią. Za chwilę zgłosi się do chmury i pojawi się na liście urządzeń.\n\nPrzełącz telefon z powrotem na swój internet (Wi-Fi domowe lub dane komórkowe)."
+                      );
+                      resetUiToDefault();
+                      setIsConfigured(true);
+                    };
+                    fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(email)}&reg_pass=&offline=0`)
+                      .then(finishSent)
+                      .catch(finishSent);
+                  }}>
+                    <Text style={styles.btnText}>Zapisz i połącz centralkę</Text>
+                  </TouchableOpacity>
+                </>
+              )}
 
               <TouchableOpacity style={{ marginTop: 20 }} onPress={() => { setAuthStep('connect'); setDetectedDevice(false); }}>
-                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>⬅ Powrót do skanowania</Text>
+                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>⬅ Powrót</Text>
               </TouchableOpacity>
             </>
           )}
@@ -1370,12 +1491,12 @@ export default function App() {
                 <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>Zapomniałeś hasła? Resetuj przez e-mail</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={{ marginTop: 14 }} onPress={() => setAuthStep('register')}>
+              <TouchableOpacity style={{ marginTop: 14 }} onPress={() => { setIsPrivacyAccepted(false); setAuthStep('register'); }}>
                 <Text style={{ color: '#aaa', fontSize: 13, textAlign: 'center' }}>Nie masz konta? Zarejestruj nową przestrzeń</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={{ marginTop: 24, padding: 10, borderWidth: 1, borderColor: '#333', borderRadius: 8, width: '100%' }} onPress={() => { setAuthStep('connect'); setDetectedDevice(false); }}>
-                <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: 'bold', textAlign: 'center' }}>⚙️ Rozłącz z obecnym węzłem</Text>
+              <TouchableOpacity style={{ marginTop: 24 }} onPress={() => setAuthStep('account_choice')}>
+                <Text style={{ color: '#666', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>⬅ Wróć</Text>
               </TouchableOpacity>
             </>
           )}
@@ -1426,16 +1547,51 @@ export default function App() {
                     Alert.alert("Wymagana zgoda", "Musisz zaakceptować Regulamin i Politykę Prywatności, aby kontynuować.");
                     return;
                   }
-                  handleAccountRegistration();
-                  setAuthStep('login');
+                  handleAccountRegistration(); // sam przełączy na 'verify' po code_sent
                 }}
                 disabled={isAuthenticating || !isPrivacyAccepted}
               >
                 <Text style={styles.btnText}>Utwórz Przestrzeń Chmurową</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => setAuthStep('login')}>
-                <Text style={{ color: '#64b5f6', fontSize: 13, fontWeight: 'bold', textAlign: 'center' }}>Powrót do logowania</Text>
+              <TouchableOpacity style={{ marginTop: 20 }} onPress={() => setAuthStep('account_choice')}>
+                <Text style={{ color: '#64b5f6', fontSize: 13, fontWeight: 'bold', textAlign: 'center' }}>⬅ Wstecz</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {/* KROK 4b: WERYFIKACJA E-MAIL — kod 6-cyfrowy → aktywacja konta → dodanie centralki */}
+          {authStep === 'verify' && (
+            <>
+              <Text style={[styles.inputLabelText, { textAlign: 'center', marginBottom: 20, alignSelf: 'center', color: '#aaa', lineHeight: 18 }]}>
+                Wpisz 6-cyfrowy kod, który wysłaliśmy na adres {email || 'Twój e-mail'}. Kod jest ważny 15 minut.
+              </Text>
+
+              <TextInput
+                style={[styles.inputField, { textAlign: 'center', fontSize: 24, letterSpacing: 8, fontFamily: 'monospace' }]}
+                placeholder="______"
+                placeholderTextColor="#444"
+                keyboardType="number-pad"
+                maxLength={6}
+                editable={!isAuthenticating}
+                value={verifyCode}
+                onChangeText={(t) => setVerifyCode(t.replace(/[^0-9]/g, ''))}
+              />
+
+              <TouchableOpacity
+                style={[styles.primaryBtn, { backgroundColor: '#2e7d32', marginTop: 10 }, (isAuthenticating || verifyCode.length < 6) ? { backgroundColor: '#333' } : null]}
+                onPress={verifyEmailCode}
+                disabled={isAuthenticating || verifyCode.length < 6}
+              >
+                <Text style={styles.btnText}>{isAuthenticating ? 'Weryfikacja...' : 'Potwierdź kod'}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 16 }} onPress={handleAccountRegistration} disabled={isAuthenticating}>
+                <Text style={{ color: '#64b5f6', fontSize: 13, fontWeight: 'bold', textAlign: 'center' }}>Wyślij kod ponownie</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={{ marginTop: 14 }} onPress={() => { setVerifyCode(''); setAuthStep('account_choice'); }}>
+                <Text style={{ color: '#666', fontSize: 12, fontWeight: '600', textAlign: 'center' }}>⬅ Anuluj</Text>
               </TouchableOpacity>
             </>
           )}
@@ -2245,6 +2401,18 @@ export default function App() {
           </View>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'dashboard' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('dashboard')}><Text style={styles.menuItemLabelText}>📱 Dashboard</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
+          {!isLocalMode && (
+            <TouchableOpacity style={styles.menuItemRow} onPress={() => {
+              // Wejście w przepływ dodania kolejnej centralki (konto już zalogowane).
+              // Wracamy do karty inicjalizacji na kroku 'connect'; token zostaje w sesji,
+              // więc po konfiguracji finishSent → setIsConfigured(true) wróci do aplikacji.
+              toggleBurgerMenu();
+              setInitMode('online');
+              setDetectedDevice(false);
+              setAuthStep('connect');
+              setIsConfigured(false);
+            }}><Text style={styles.menuItemLabelText}>➕ Dodaj centralkę</Text></TouchableOpacity>
+          )}
           {!isLocalMode && (
             <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'team' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('team'); loadTeam(); }}><Text style={styles.menuItemLabelText}>🤝 Zespół (Administratorzy)</Text></TouchableOpacity>
           )}

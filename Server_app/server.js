@@ -255,6 +255,9 @@ const pendingUnlocks = {};
 // (factory reset) i blokujemy jego automatyczną ponowną rejestrację w pollu.
 const deregisterCodes = {};
 const deregisterQueues = {};
+// provisionSkipLog[mac] = ostatni czas zalogowania POMINIĘTEJ rejestracji (throttle 60s),
+// żeby diagnostyka „czemu centralka się nie rejestruje" nie zalała logu przy pollu co 1–8s.
+const provisionSkipLog = {};
 
 function _sendJSON(res, statusCode, data, origin) {
   // Only echo the Origin back if it's on the allowlist — never '*' in production
@@ -523,46 +526,113 @@ const server = http.createServer(async (req, res) => {
         const hash = await bcrypt.hash(body.password, 10);
         const acceptedTimestamp = new Date(); // Generowanie czasu TIMESTAMP dla Postgresa
 
-        try {
-          // Wstrzyknięcie danych do tabeli accounts (uwzględniając password_hash oraz privacy_policy_accepted_at)
-          await dbPool.query(
-            'INSERT INTO accounts (email, password_hash, privacy_policy_accepted_at) VALUES ($1, $2, $3)',
-            [cleanEmail, hash, acceptedTimestamp]
-          );
+        const verifyCode = Math.floor(100000 + Math.random() * 900000).toString();
 
-          const welcomeMailManifest = {
+        // Wspólny nadawca kodu weryfikacyjnego (używany przy nowej rejestracji ORAZ
+        // przy ponownej próbie rejestracji konta jeszcze niezweryfikowanego).
+        const sendVerifyCode = (code) => {
+          const codeMailManifest = {
             from: '"CTRLABLE Node System" <node@ctrlable.pl>',
             to: cleanEmail,
-            subject: 'Witamy w ekosystemie CTRLABLE!',
+            subject: 'Twój kod weryfikacyjny CTRLABLE',
             html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-                <h2>Cześć! Twój inteligentny dom właśnie zyskał nową ochronę!</h2>
-                <p>Dziękujemy za zarejestrowanie konta w systemie <strong>CTRLABLE Node</strong>. Twoja konto oraz centralka CTRLABLE Node zostały pomyślnie zarejestrowane.</p>
-              <p><strong>Od czego zacząć?</strong></p>
-              <ul>
-              <li>Zaloguj się w aplikacji mobilnej używając swoich danych.</li>
-              <li>Przejdź do listy użytkowników aby dodać nowe przepustki.</li>
-              <li>Nadaj imię użytkownika przeputski, włącz tryb uczenia oraz zbliż fizyczny klucz RFID do czytnika.</li>
-              </ul>
-              <br>
-              <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
+                <h2>Potwierdź swój adres e-mail</h2>
+                <p>Dziękujemy za założenie konta w systemie <strong>CTRLABLE Node</strong>. Aby dokończyć rejestrację, wpisz w aplikacji ten kod:</p>
+                <h1 style="color:#0284c7; font-family:monospace; letter-spacing:4px;">${code}</h1>
+                <p>Kod jest ważny przez 15 minut. Jeśli to nie Ty zakładałeś konto, zignoruj tę wiadomość.</p>
               </div>`
           };
-
-          mailTransport.sendMail(welcomeMailManifest, (err, info) => {
-            if (err) writeToLocalLogFile('Welcome SMTP Fail', err.message);
+          mailTransport.sendMail(codeMailManifest, (err, info) => {
+            if (err) writeToLocalLogFile('Verify SMTP Fail', err.message);
           });
+        };
 
-          writeToLocalLogFile('Authentication Panel', `Registered account for: ${cleanEmail}. Zgoda RODO zarejestrowana: ${acceptedTimestamp}`);
-          return sendJSON(res, 200, { status: "registered" });
+        try {
+          // Konto zakładane jako NIEZWERYFIKOWANE (email_verified=false) + kod ważny 15 min.
+          // Aktywacja i e-mail powitalny dopiero po /api/auth/verify_email.
+          await dbPool.query(
+            `INSERT INTO accounts (email, password_hash, privacy_policy_accepted_at, email_verified, email_verify_code, email_verify_expires)
+             VALUES ($1, $2, $3, false, $4, NOW() + INTERVAL '15 minutes')`,
+            [cleanEmail, hash, acceptedTimestamp, verifyCode]
+          );
+
+          sendVerifyCode(verifyCode);
+          writeToLocalLogFile('Authentication Panel', `Rejestracja (oczekuje na weryfikację): ${cleanEmail}. Zgoda RODO: ${acceptedTimestamp}`);
+          return sendJSON(res, 200, { status: "code_sent" });
 
         } catch (err) {
           console.error("Błąd zapisu konta w Postgresie:", err);
-          // Kod błędu '23505' w PostgreSQL oznacza próbe zdublowania unikalnego pola (Unique Violation - ten sam e-mail)
+          // '23505' = e-mail już istnieje. Jeśli istniejące konto jest jeszcze
+          // NIEZWERYFIKOWANE — nie blokujemy w ślepej uliczce: nadpisujemy hasło+zgodę,
+          // generujemy nowy kod i wysyłamy ponownie. Jeśli JUŻ zweryfikowane — 400.
           if (err.code === '23505') {
+            const existing = await dbPool.query('SELECT email_verified FROM accounts WHERE email = $1', [cleanEmail]);
+            if (existing.rows.length > 0 && existing.rows[0].email_verified === false) {
+              await dbPool.query(
+                `UPDATE accounts
+                   SET password_hash = $1, privacy_policy_accepted_at = $2,
+                       email_verify_code = $3, email_verify_expires = NOW() + INTERVAL '15 minutes'
+                 WHERE email = $4`,
+                [hash, acceptedTimestamp, verifyCode, cleanEmail]
+              );
+              sendVerifyCode(verifyCode);
+              writeToLocalLogFile('Authentication Panel', `Ponowna rejestracja niezweryfikowanego konta — nowy kod: ${cleanEmail}`);
+              return sendJSON(res, 200, { status: "code_sent" });
+            }
             return sendJSON(res, 400, { error: 'Ten adres e-mail jest już zarejestrowany w systemie.' });
           }
           return sendJSON(res, 500, { error: 'Wewnętrzny błąd bazy danych przy rejestracji.' });
         }
+      }
+
+      // =========================================================================
+      // WERYFIKACJA E-MAIL KODEM 6-CYFROWYM → aktywacja konta + e-mail powitalny + JWT
+      // =========================================================================
+      if (pathname === '/api/auth/verify_email' && req.method === 'POST') {
+        const { email, code } = body || {};
+        if (!email || !code) return sendJSON(res, 400, { error: "Brak e-maila lub kodu." });
+
+        const cleanEmail = email.trim().toLowerCase();
+        const userRes = await dbPool.query(
+          'SELECT id, email_verified FROM accounts WHERE email = $1 AND email_verify_code = $2 AND email_verify_expires > NOW()',
+          [cleanEmail, String(code).trim()]
+        );
+
+        if (userRes.rows.length === 0) {
+          // Już zweryfikowane? Zwróć spójny sukces, żeby apka nie utknęła.
+          const already = await dbPool.query('SELECT id, email_verified FROM accounts WHERE email = $1', [cleanEmail]);
+          if (already.rows.length > 0 && already.rows[0].email_verified === true) {
+            return sendJSON(res, 200, { status: "already_verified" });
+          }
+          return sendJSON(res, 400, { error: "Kod jest nieprawidłowy lub wygasł." });
+        }
+
+        // Aktywacja: kasujemy kod, ustawiamy verified.
+        await dbPool.query(
+          'UPDATE accounts SET email_verified = true, email_verify_code = NULL, email_verify_expires = NULL WHERE id = $1',
+          [userRes.rows[0].id]
+        );
+
+        const welcomeMailManifest = {
+          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          to: cleanEmail,
+          subject: 'Witamy w ekosystemie CTRLABLE!',
+          html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+              <h2>Konto potwierdzone — witaj w CTRLABLE Node!</h2>
+              <p>Twój adres e-mail został zweryfikowany, a konto jest aktywne.</p>
+              <p><strong>Kolejny krok:</strong> zainicjalizuj centralkę w aplikacji — połącz się z siecią <strong>CTRLABLE_SETUP</strong> i przypisz urządzenie do tego konta.</p>
+              <p>Po dodaniu centralki dodasz karty RFID (tryb uczenia) oraz kody PIN.</p>
+              <br>
+              <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
+            </div>`
+        };
+        mailTransport.sendMail(welcomeMailManifest, (err, info) => {
+          if (err) writeToLocalLogFile('Welcome SMTP Fail', err.message);
+        });
+
+        const token = signToken(userRes.rows[0].id);
+        writeToLocalLogFile('Authentication Panel', `Konto zweryfikowane i aktywowane: ${cleanEmail}`);
+        return sendJSON(res, 200, { status: "verified", auth: true, token, accountId: userRes.rows[0].id });
       }
 
       // =========================================================================
@@ -608,6 +678,29 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, 401, { error: "Invalid credentials" });
         }
 
+        // ── Konto niezweryfikowane: nie wpuszczamy. Wysyłamy świeży kod i kierujemy
+        //    apkę do ekranu weryfikacji (status:"unverified" + email). ─────────────
+        if (result.rows[0].email_verified === false) {
+          const freshCode = Math.floor(100000 + Math.random() * 900000).toString();
+          await dbPool.query(
+            `UPDATE accounts SET email_verify_code = $1, email_verify_expires = NOW() + INTERVAL '15 minutes' WHERE id = $2`,
+            [freshCode, result.rows[0].id]
+          );
+          mailTransport.sendMail({
+            from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+            to: cleanEmail,
+            subject: 'Twój kod weryfikacyjny CTRLABLE',
+            html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+                <h2>Potwierdź swój adres e-mail</h2>
+                <p>Aby zalogować się do CTRLABLE Node, dokończ weryfikację konta tym kodem:</p>
+                <h1 style="color:#0284c7; font-family:monospace; letter-spacing:4px;">${freshCode}</h1>
+                <p>Kod jest ważny przez 15 minut.</p>
+              </div>`
+          }, (err) => { if (err) writeToLocalLogFile('Verify SMTP Fail', err.message); });
+          writeToLocalLogFile('Auth Rejection', `Login zablokowany — konto niezweryfikowane, wysłano kod: ${cleanEmail}`);
+          return sendJSON(res, 403, { error: "Konto niezweryfikowane. Wysłaliśmy nowy kod na Twój e-mail.", status: "unverified", email: cleanEmail });
+        }
+
         // ── Success: issue a signed JWT ───────────────────────────────────────
         const token = signToken(result.rows[0].id);
         writeToLocalLogFile('Authentication Panel', `User logged in successfully: ${cleanEmail}`);
@@ -645,7 +738,7 @@ const server = http.createServer(async (req, res) => {
 
         await dbPool.query(
           `UPDATE accounts
-           SET reset_token = $1, reset_token_expires = NOW()  INTERVAL '15 minutes'
+           SET reset_token = $1, reset_token_expires = NOW() + INTERVAL '15 minutes'
            WHERE email = $2`,
           [secureCode, cleanEmail]
         );
@@ -1939,6 +2032,17 @@ const server = http.createServer(async (req, res) => {
         let mac = query.mac;
         if (mac) mac = mac.toUpperCase();
 
+        // DIAGNOSTYKA: bezwarunkowy ślad KAŻDEGO polla (throttle 60s per MAC). Rozstrzyga
+        // pytanie „czy centralka w ogóle odpytuje?" — /poll jest wyciszony w Radar Traffic,
+        // więc bez tego nie widać go w logach wcale.
+        {
+          const _k = `arrive:${mac || 'NOMAC'}`;
+          if (!provisionSkipLog[_k] || Date.now() - provisionSkipLog[_k] > 60000) {
+            provisionSkipLog[_k] = Date.now();
+            writeToLocalLogFile('Provisioning', `[Node: ${mac || 'BRAK-MAC'}] POLL przyszedł: email='${query.email || ''}' version='${query.version || ''}' ip=${cleanIp}`);
+          }
+        }
+
         // Deregistracja: jeśli ta centralka jest w oknie wyrejestrowania, komenderujemy
         // jej wyczyszczenie (deregister:true) i NIE pozwalamy się ponownie zarejestrować.
         let deregActive = false;
@@ -1976,7 +2080,36 @@ const server = http.createServer(async (req, res) => {
                     [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
                   );
                   writeToLocalLogFile('Provisioning', `[Node: ${mac}] Pomyślnie utworzono i przypisano centralkę do konta: ${query.email}`);
+                  // E-mail „dodano centralkę" do właściciela (jednorazowo — ta gałąź
+                  // wykonuje się tylko dla NOWEGO MAC-a, już zarejestrowane trafiają wyżej).
+                  mailTransport.sendMail({
+                    from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+                    to: query.email.trim().toLowerCase(),
+                    subject: 'Nowa centralka dodana do Twojego konta CTRLABLE',
+                    html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+                        <h2>Centralka została dodana ✓</h2>
+                        <p>Nowa centralka CTRLABLE Node właśnie zgłosiła się i została przypisana do Twojego konta.</p>
+                        <p style="font-family:monospace; color:#0284c7;">MAC: ${mac}</p>
+                        <p>Możesz nią teraz zarządzać w aplikacji — dodać karty RFID i kody PIN. Jeśli to nie Ty dodawałeś urządzenie, skontaktuj się z nami.</p>
+                        <br>
+                        <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
+                      </div>`
+                  }, (err) => { if (err) writeToLocalLogFile('DeviceAdded SMTP Fail', err.message); });
                 }
+              } else {
+                // Poll z e-mailem, ale e-mail NIE pasuje do żadnego konta → rejestracja pominięta.
+                // Najczęstsza przyczyna „centralka nie pojawia się na koncie" (zły/pusty e-mail albo
+                // konto jeszcze niezałożone/niezweryfikowane). Log throttlowany co 60s.
+                if (!provisionSkipLog[mac] || Date.now() - provisionSkipLog[mac] > 60000) {
+                  provisionSkipLog[mac] = Date.now();
+                  writeToLocalLogFile('Provisioning', `[Node: ${mac}] NIE zarejestrowano: e-mail '${query.email}' nie pasuje do żadnego konta. Załóż i zweryfikuj konto najpierw.`);
+                }
+              }
+            } else {
+              // checkDevRev pusty i NIE (email && !deregActive): brak e-maila w pollu albo trwa deregistracja.
+              if (mac && mac.includes(':') && (!provisionSkipLog[mac] || Date.now() - provisionSkipLog[mac] > 60000)) {
+                provisionSkipLog[mac] = Date.now();
+                writeToLocalLogFile('Provisioning', `[Node: ${mac}] POMINIĘTO rejestrację: ${!query.email ? 'brak e-maila w pollu' : 'trwa okno deregistracji (deregister)'}.`);
               }
             }
           }
@@ -2599,6 +2732,13 @@ async function runSchemaMigrations() {
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS pin_changes_per_month INT DEFAULT 4`, // 0/NULL = bez limitu (anty-Airbnb dla free)
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_valid_until TIMESTAMP DEFAULT NULL`, // NULL = darmowa/bezterminowa
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS p24_customer_ref VARCHAR(64) DEFAULT NULL`,  // powiązanie z operatorem płatności
+    // Weryfikacja e-mail kodem 6-cyfrowym przy zakładaniu konta. DEFAULT true =
+    // wszystkie ISTNIEJĄCE konta są z automatu zweryfikowane (grandfathering, nie
+    // blokujemy nikogo). Rejestracja NOWEGO konta ustawia email_verified=false jawnie
+    // i wpisuje kod; login odrzuca konta niezweryfikowane.
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT true`,
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verify_code VARCHAR(6) DEFAULT NULL`,
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verify_expires TIMESTAMP DEFAULT NULL`,
   ];
   // Wielu administratorów na jedno urządzenie: konto-właściciel (devices.account_id)
   // pozostaje jedynym uprawnionym do usuwania/zmiany WiFi/zapraszania innych,

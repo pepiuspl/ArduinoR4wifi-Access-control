@@ -904,9 +904,10 @@ void handleProvisioningServer() {
       // z centralką WYŁĄCZNIE lokalnie (http://192.168.4.1), bez konta w chmurze.
       String localPass = getFactoryAdminPassword();
       String macStr = getMacAddressString();
+      // WAŻNE: poprawny JSON. Wcześniej wypisywany był śmieć `,"tamper":...` PRZED ciałem,
+      // przez co res.json() w aplikacji się wywalał i tryb offline nigdy się nie zapisywał.
       client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
-      client.print(",\"tamper\":"); client.print(tamperActive ? "true" : "false"); 
-      client.println("{\"status\":\"offline_ready\",\"admin_pass\":\"" + localPass + "\",\"mac\":\"" + macStr + "\"}");
+      client.println("{\"status\":\"offline_ready\",\"admin_pass\":\"" + localPass + "\",\"mac\":\"" + macStr + "\",\"tamper\":" + String(tamperActive ? "true" : "false") + "}");
       delay(100); client.stop();
       ESP.restart();
       return;
@@ -1287,9 +1288,14 @@ void handleOnlineInstallerServer() {
 
 void executeCloudSynchronization() { 
   WiFiClientSecure httpCheck; configureSecure(httpCheck);
-  httpCheck.setTimeout(250);
-  httpCheck.setConnectionTimeout(500);
-  httpCheck.setHandshakeTimeout(2);   // rdzeń 0: max ~2 s gdy serwer nieosiągalny (nie dotyka pętli)
+  // TIMEOUTY: poll biegnie na RDZENIU 0 (networkTask) i NIGDY nie dotyka pętli, więc
+  // może spokojnie czekać. Wcześniej były tu wartości ekstremalnie krótkie (connect 500 ms,
+  // handshake 2 s, I/O 250 ms) z czasów, gdy poll blokował loop — i przez to KAŻDY poll
+  // padał: handshake TLS z łańcuchem Let's Encrypt na ESP32 trwa realnie ~1,5–4 s.
+  // Objaw: „[NET] Serwer nie odpowiada" w kółko + centralka nigdy nie rejestrowała się
+  // na koncie (rejestracja dzieje się WYŁĄCZNIE przez poll). sendRemoteLog działał, bo
+  // korzystał z hojnych wartości z configureSecure (handshake 6 s, I/O 6000 ms).
+  httpCheck.setConnectionTimeout(4000);   // ms na TCP connect
   if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba...");
     if (pollFailStreak < 100) pollFailStreak++;
@@ -1302,7 +1308,7 @@ void executeCloudSynchronization() {
   String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId);  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
-  unsigned long deadline = millis() + 2000;   // dłuższe okno odczytu — TLS przetwarza rekordy wolniej niż czysty HTTP
+  unsigned long deadline = millis() + 6000;   // okno odczytu (rdzeń 0, nie blokuje pętli) — TLS przetwarza rekordy wolno
   String payloadResponse = "";  
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {
     // (przycisk obsługuje loop na rdzeniu 1 — task sieciowy nie dotyka sprzętu)
@@ -1851,16 +1857,6 @@ void networkTask(void *param) {
 }
 
 void loop() {
-  // DIAGNOSTYKA (tymczasowa): ile iteracji pętli na sekundę. Wysoka liczba (tysiące)
-  // = pętla szybka → skan RFID wolny to sprzęt/pole RF. Niska (kilka/kilkadziesiąt)
-  // = pętla zablokowana → szukamy blokady. USUNĄĆ po diagnozie.
-  static unsigned long _loopCount = 0, _lastLoopReport = 0;
-  _loopCount++;
-  if (millis() - _lastLoopReport > 1000) {
-    Serial.print("[LOOP] iteracji/s: "); Serial.println(_loopCount);
-    _loopCount = 0; _lastLoopReport = millis();
-  }
-
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
   handleProvisioningServer();  // lokalny serwer WWW (zmiana WiFi/ustawień) — też gdy online
 
