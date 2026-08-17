@@ -2181,14 +2181,24 @@ const server = http.createServer(async (req, res) => {
   // To jest JEDYNE miejsce w całym serwerze, gdzie ustawiamy actualLockStates[mac].state -
   // nigdy nie zgadujemy stanu na podstawie samego wysłania komendy z aplikacji,
   // bo wtedy UI pokazywałoby "OTWARTY" zanim zamek faktycznie się odblokuje.
-  const deviceReleaseId = parseInt(query.release_id || '0', 10);
+  // Ta sama sanityzacja co przy otaUpdateTrigger — TU jest źródło wartości, którą
+  // widzi aplikacja (/api/data -> deviceReleaseId -> ekran „Aktualizacja"). Bez tego
+  // apka porównywała 4294967295 >= <id release'u> i meldowała „Jesteś na najnowszej
+  // wersji", mimo że urządzenie miało tylko wyczyszczony EEPROM (0xFF).
+  let deviceReleaseId = parseInt(query.release_id || '0', 10);
+  if (!Number.isFinite(deviceReleaseId) || deviceReleaseId > 4000000000) deviceReleaseId = 0;
   if (query.opened !== undefined) {
     const reportedOpen = query.opened === '1';
     actualLockStates[mac] = {
       ...(actualLockStates[mac] || {}),
       state: reportedOpen,
       timestamp: Date.now(),
-      deviceReleaseId: deviceReleaseId || (actualLockStates[mac]?.deviceReleaseId || 0)
+      // Fallback też sanityzowany — inaczej raz zapamiętane 4294967295 przeżyłoby
+      // każdy kolejny poll (0 || 4294967295 = 4294967295).
+      deviceReleaseId: deviceReleaseId || (() => {
+        const prev = actualLockStates[mac]?.deviceReleaseId || 0;
+        return prev > 4000000000 ? 0 : prev;
+      })()
     };
     if (reportedOpen) delete pendingUnlocks[mac];
   } else {
@@ -2220,7 +2230,16 @@ const server = http.createServer(async (req, res) => {
   // what the device is running, trigger OTA — even if the version string is identical.
   // latestFirmwareReleaseId comes from the GitHub release object and is always
   // a higher integer for a newer release, regardless of tag name.
-  const deviceKnownReleaseId = parseInt(query.release_id || '0', 10);
+  // Sanityzacja ID build-u zgłoszonego przez centralkę: po factory resecie EEPROM
+  // jest wypełniony 0xFF, więc urządzenie raportuje 4294967295 — liczbę większą od
+  // każdego realnego release'u z GitHuba. Bez tego porównanie (latest > installed)
+  // zawsze wypadało na "nie", aplikacja pokazywała „masz najnowszy soft" i OTA
+  // nigdy się nie proponowało (a naprawa w firmware wymagałaby... OTA — zapętlenie).
+  // Traktujemy takie ID jako "nieznane" (0), więc aktualizacja znów jest oferowana.
+  let deviceKnownReleaseId = parseInt(query.release_id || '0', 10);
+  if (!Number.isFinite(deviceKnownReleaseId) || deviceKnownReleaseId > 4000000000) {
+    deviceKnownReleaseId = 0;
+  }
   const otaUpdateTrigger = (
     latestFirmwareReleaseId > 0 &&
     latestFirmwareReleaseId > deviceKnownReleaseId &&

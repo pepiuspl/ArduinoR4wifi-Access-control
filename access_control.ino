@@ -369,6 +369,11 @@ void factoryResetSettings() {
     EEPROM.write(i, 0xFF);
   }
   EEPROM.put(0, 0);
+  // ID wgranego build-u MUSI wrócić do 0, nie zostać jako 0xFFFFFFFF po wyczyszczeniu.
+  // Inaczej centralka raportuje release_id=4294967295, serwer porównuje
+  // (latest > installed) i uznaje, że urządzenie ma NOWSZY soft niż jakikolwiek
+  // release → aplikacja pokazuje „masz najnowszy" i OTA nigdy się nie proponuje.
+  EEPROM.put(480, (unsigned long)0);
   EEPROM.commit();
   // Wyczyść też magazyn LittleFS — inaczej po deregistracji karty/PIN-y wróciłyby
   // z /cards.db przy ponownej rejestracji. WiFi/owner zostają w EEPROM (już wyżej).
@@ -1688,6 +1693,15 @@ void setup() {
   delay(1500);
   EEPROM.begin(512);
   EEPROM.get(480, installedReleaseId);  // restore flashed release ID
+  // Sanityzacja: świeży/wyczyszczony EEPROM to same 0xFF → 4294967295, czyli numer
+  // większy od każdego realnego release'u z GitHuba. Traktujemy to jako "nieznany" (0),
+  // żeby serwer znów widział dostępne aktualizacje. Naprawia też urządzenia
+  // wyczyszczone STARYM firmwarem, bez potrzeby kolejnego resetu.
+  if (installedReleaseId == 0xFFFFFFFFUL || installedReleaseId > 4000000000UL) {
+    installedReleaseId = 0;
+    EEPROM.put(480, (unsigned long)0);
+    EEPROM.commit();
+  }
   initStorage();                        // LittleFS (etap 1a) — montowanie + self-test na Serialu
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(RESET_BTN_PIN, INPUT);  // GPIO39 input-only, pull-up ZEWNĘTRZNY (10kΩ do 3.3V)
@@ -1874,6 +1888,25 @@ void networkTask(void *param) {
                       "B FsCard=" + String(sizeof(FsCard)) + "B FsPin=" + String(sizeof(FsPin)) +
                       "B selftest=" + String(fsSelfTestPass ? "PASS" : "FAIL"));
       }
+      // KOLEJNOŚĆ MA ZNACZENIE: najpierw POLL (niesie stan rygla „opened"), dopiero
+      // potem zgłoszenia „nice to have". Każde z nich to osobny handshake TLS (~2 s),
+      // więc gdy szły pierwsze, informacja o otwarciu docierała do serwera dopiero
+      // po ~4 s — czyli już PO automatycznym zamknięciu (3 s) i aplikacja pokazywała
+      // „Otwarto" po fakcie.
+      unsigned long pollInterval = (pollFailStreak >= 3) ? 8000UL : 1000UL;   // backoff gdy serwer nieosiągalny
+      if (forceSyncNow || millis() - lastPollTime > pollInterval) {
+        executeCloudSynchronization();
+        lastPollTime = millis();
+        forceSyncNow = false;
+      }
+
+      // Zgłoszenie skanu karty (zakolejkowane przez loop) — TLS robimy TU, nie w pętli.
+      if (req_cardUpload) {
+        transmitCardPayloadToCloud(String(up_uid), String(up_name), up_slot, up_register);
+        req_cardUpload = false;
+        forceSyncNow = true;   // po rejestracji karty odśwież stan od razu
+      }
+
       // Log przycisku (zakolejkowany przez loop) — nieblokujący dla rdzenia 1.
       if (req_buttonLog) {
         req_buttonLog = false;
@@ -1886,20 +1919,6 @@ void networkTask(void *param) {
           delay(50);
           btnLog.stop();
         }
-      }
-
-      // Zgłoszenie skanu karty (zakolejkowane przez loop) — TLS robimy TU, nie w pętli.
-      if (req_cardUpload) {
-        transmitCardPayloadToCloud(String(up_uid), String(up_name), up_slot, up_register);
-        req_cardUpload = false;
-        forceSyncNow = true;   // niech serwer od razu zobaczy nowy stan/kartę
-      }
-
-      unsigned long pollInterval = (pollFailStreak >= 3) ? 8000UL : 1000UL;   // backoff gdy serwer nieosiągalny
-      if (forceSyncNow || millis() - lastPollTime > pollInterval) {
-        executeCloudSynchronization();
-        lastPollTime = millis();
-        forceSyncNow = false;
       }
     }
     vTaskDelay(pdMS_TO_TICKS(50));
