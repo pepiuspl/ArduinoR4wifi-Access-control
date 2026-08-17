@@ -105,7 +105,7 @@ void handleWebServer();
 void handleOnlineInstallerServer(); 
 void executeCloudSynchronization();
 void performLocalFirmwareUpdate(); 
-void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister); 
+void transmitCardPayloadToCloud(String uidStr, String nameStr, int slot, bool runRegister);
 void sendRemoteLog(String message);
 void sendTamperAlert(bool active);
 void checkTamper();
@@ -241,6 +241,18 @@ volatile bool req_ota = false;
 volatile bool req_deregister = false;
 volatile bool req_usernameUpdated = false;
 char req_username[40] = "";
+// --- Kolejka wysyłki skanu karty do chmury (rdzeń 1 -> rdzeń 0) --------------
+// KRYTYCZNE DLA SZYBKOŚCI: transmitCardPayloadToCloud() robi pełny handshake TLS
+// (realnie 1,5–4 s). Wołane wprost z loop() zamrażało rdzeń 1 na każdym skanie —
+// dioda przestawała migać, OLED stał, a potwierdzenie „DODANO KARTE" pojawiało się
+// po kilku sekundach. Wyglądało to jak wolne czytanie karty, choć odczyt jest
+// natychmiastowy. Teraz loop() tylko odkłada dane tutaj, a TLS robi networkTask.
+volatile bool req_cardUpload = false;
+volatile bool req_buttonLog = false;   // log naciśnięcia przycisku — wysyła rdzeń 0
+char  up_uid[32] = "";
+char  up_name[40] = "";
+volatile int  up_slot = 0;
+volatile bool up_register = false;
 TaskHandle_t networkTaskHandle = NULL;
 unsigned long lastSuccessfulPollTime = 0;
 int globalAnimFrame = 0; 
@@ -1482,14 +1494,16 @@ void performLocalFirmwareUpdate() {
   }
 }
 
-void transmitCardPayloadToCloud(String uidStr, byte* rawUid, bool runRegister) { 
+// UWAGA: wołać WYŁĄCZNIE z networkTask (rdzeń 0) — blokuje na czas handshake'u TLS.
+// Dane wejściowe przychodzą z kolejki (up_*), a nie ze stanu pętli, żeby rdzeń 0
+// nie czytał zmiennych, które w tym czasie może zmieniać rdzeń 1.
+void transmitCardPayloadToCloud(String uidStr, String nameStr, int slot, bool runRegister) {
   WiFiClientSecure httpPost; configureSecure(httpPost);
-  httpPost.setTimeout(400);
-  if (!httpPost.connect(PROXMOX_SERVER, PROXMOX_PORT)) return; 
-  String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan"; 
+  if (!httpPost.connect(PROXMOX_SERVER, PROXMOX_PORT)) return;
+  String endpoint = runRegister ? "/api/hardware/register" : "/api/hardware/scan";
   String macStr = getMacAddressString();
-  String postData = runRegister ? 
-    "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\",\"name\":\"" + pendingUsername + "\",\"slot\":" + String(totalCards > 0 ? totalCards - 1 : 0) + "}" : 
+  String postData = runRegister ?
+    "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\",\"name\":\"" + nameStr + "\",\"slot\":" + String(slot) + "}" :
     "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\"}";
   httpPost.println("POST " + endpoint + " HTTP/1.1"); 
   httpPost.print("Host: "); httpPost.println(PROXMOX_SERVER); 
@@ -1845,6 +1859,27 @@ void networkTask(void *param) {
                       "B FsCard=" + String(sizeof(FsCard)) + "B FsPin=" + String(sizeof(FsPin)) +
                       "B selftest=" + String(fsSelfTestPass ? "PASS" : "FAIL"));
       }
+      // Log przycisku (zakolejkowany przez loop) — nieblokujący dla rdzenia 1.
+      if (req_buttonLog) {
+        req_buttonLog = false;
+        WiFiClientSecure btnLog; configureSecure(btnLog);
+        btnLog.setConnectionTimeout(3000);
+        if (btnLog.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
+          btnLog.println("GET /api/hardware/log_button?mac=" + urlEncode(getMacAddressString()) + " HTTP/1.1");
+          btnLog.print("Host: "); btnLog.println(PROXMOX_SERVER);
+          btnLog.println("Connection: close\r\n");
+          delay(50);
+          btnLog.stop();
+        }
+      }
+
+      // Zgłoszenie skanu karty (zakolejkowane przez loop) — TLS robimy TU, nie w pętli.
+      if (req_cardUpload) {
+        transmitCardPayloadToCloud(String(up_uid), String(up_name), up_slot, up_register);
+        req_cardUpload = false;
+        forceSyncNow = true;   // niech serwer od razu zobaczy nowy stan/kartę
+      }
+
       unsigned long pollInterval = (pollFailStreak >= 3) ? 8000UL : 1000UL;   // backoff gdy serwer nieosiągalny
       if (forceSyncNow || millis() - lastPollTime > pollInterval) {
         executeCloudSynchronization();
@@ -1968,14 +2003,13 @@ void loop() {
         if (i < rfid.uid.size - 1) uidStr += " ";
       } 
       uidStr.toUpperCase(); 
-      // Nie ma sensu próbować łączyć się z chmurą, gdy nie mamy Wi-Fi - to
-      // tylko zbędne opóźnienie (do 400ms) na każdym skanie w trybie offline.
-      if (WiFi.status() == WL_CONNECTED) {
-        transmitCardPayloadToCloud(uidStr, rfid.uid.uidByte, learningMode);
-      }
-      if (learningMode) { 
+      // Zgłoszenie do chmury NIE blokuje już pętli: odkładamy je do kolejki, a pełny
+      // handshake TLS wykona networkTask na rdzeniu 0. Kolejkujemy PO ewentualnym
+      // zapisie karty (niżej), żeby wysłać właściwy numer slotu.
+      bool wasLearning = learningMode;
+      if (learningMode) {
         saveNewCard(rfid.uid.uidByte, pendingUsername);
-        addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]"); 
+        addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]");
         globalAnimFrame = 0; 
         globalDisplayInfo = "DODANO KARTE"; 
         digitalWrite(LED_RED, LOW);
@@ -2009,11 +2043,21 @@ void loop() {
           for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
         } 
       } 
+      // Kolejkujemy zgłoszenie do chmury (rdzeń 0 wyśle je w tle). Pętla leci dalej
+      // natychmiast — dioda miga, OLED żyje, potwierdzenie jest od razu.
+      if (WiFi.status() == WL_CONNECTED && !req_cardUpload) {
+        uidStr.toCharArray(up_uid, sizeof(up_uid));
+        pendingUsername.toCharArray(up_name, sizeof(up_name));
+        up_slot = (totalCards > 0) ? totalCards - 1 : 0;
+        up_register = wasLearning;
+        req_cardUpload = true;
+      }
+
       rfid.PICC_HaltA();
-      rfidResetPending = true; 
-      lastScanTime = millis(); 
-    } 
-  } 
+      rfidResetPending = true;
+      lastScanTime = millis();
+    }
+  }
 
   if (digitalRead(BUTTON_PIN) == LOW) { 
     unsigned long pressTime = millis();
@@ -2042,21 +2086,12 @@ void loop() {
       lockoutEndTime = 0; 
       lastRfidWatchdogTime = millis(); 
 
-      // Logowanie naciśnięcia przycisku do chmury jest "nice to have", nie
-      // krytyczne - pomijamy je całkowicie offline, by nie czekać na nic.
-      if (WiFi.status() == WL_CONNECTED) {
-        WiFiClientSecure buttonLogClient; configureSecure(buttonLogClient);
-        buttonLogClient.setTimeout(150);
-        buttonLogClient.setConnectionTimeout(300);
-        if (buttonLogClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) { 
-          buttonLogClient.println("GET /api/hardware/log_button?mac=" + urlEncode(getMacAddressString()) + " HTTP/1.1");
-          buttonLogClient.print("Host: "); buttonLogClient.println(PROXMOX_SERVER); 
-          buttonLogClient.println("Connection: close\r\n"); 
-          buttonLogClient.stop(); 
-        } 
-      }
-
+      // Drzwi otwieramy NATYCHMIAST. Log do chmury to "nice to have" — szedł tu
+      // wcześniej PRZED openDoor() i blokował rdzeń 1 na czas handshake'u TLS,
+      // czyli fizyczny przycisk reagował z opóźnieniem. Teraz zgłasza go
+      // networkTask (rdzeń 0) przy najbliższym cyklu.
       openDoor("PRZYCISK");
+      req_buttonLog = true;
     }
   }
 

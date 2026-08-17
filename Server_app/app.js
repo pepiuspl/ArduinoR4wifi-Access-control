@@ -102,7 +102,8 @@ export default function App() {
   const [kpMode, setKpMode]           = useState('normal'); // 'normal' | 'guest'
   const [kpGuestExpiryDays, setKpGuestExpiryDays] = useState('1'); // ile dni ważności kodu gościnnego
   const [kpGuestMaxUses, setKpGuestMaxUses] = useState('');  // puste = bez limitu użyć
-  const [kpScheduleEditId, setKpScheduleEditId] = useState(null); // id PINu LUB idx karty, którego harmonogram edytujemy
+  const [kpScheduleEditId, setKpScheduleEditId] = useState(null); // id PINu LUB id/idx karty, której harmonogram edytujemy
+  const [kpScheduleEditIsDbId, setKpScheduleEditIsDbId] = useState(true); // czy powyższe to stabilne id z bazy (nie slot sprzętowy)
   const [kpScheduleTargetType, setKpScheduleTargetType] = useState('pin'); // 'pin' | 'card' — rozróżnia który endpoint wywołać
   const [kpScheduleEnabled, setKpScheduleEnabled] = useState(false);
   const [kpScheduleDays, setKpScheduleDays] = useState(127);      // bitmask: bit0=Nd..bit6=So, 127=wszystkie
@@ -110,7 +111,8 @@ export default function App() {
   const [kpScheduleEndText, setKpScheduleEndText] = useState('20:00');
   const [kpRenameId, setKpRenameId]   = useState(null);
   const [kpRenameName, setKpRenameName] = useState('');
-  const [cardRenameIdx, setCardRenameIdx] = useState(null); // inline edycja nazwy karty RFID (jak w PIN)
+  const [cardRenameIdx, setCardRenameIdx] = useState(null); // KTÓRY wiersz jest w edycji (stabilny klucz karty)
+  const [cardRenameRef, setCardRenameRef] = useState(null); // CZYM zaadresować mutację: {id} lub {idx} (stare buildy)
   const [cardRenameName, setCardRenameName] = useState('');
   const [pushAlarms, setPushAlarms] = useState(true);
 
@@ -207,7 +209,10 @@ export default function App() {
 
   const openScheduleEditor = (entity, type = 'pin') => {
     setKpScheduleTargetType(type);
-    setKpScheduleEditId(type === 'pin' ? entity.id : entity.idx);
+    // Karty: preferuj stabilne id z bazy; entity.idx (slot sprzętowy) tylko gdy serwer
+    // jeszcze nie zwraca `id` — inaczej harmonogram trafiłby w niewłaściwą kartę.
+    setKpScheduleEditId(type === 'pin' ? entity.id : (entity.id != null ? entity.id : entity.idx));
+    setKpScheduleEditIsDbId(type === 'pin' || entity.id != null);
     setKpScheduleEnabled(!!entity.schedule_enabled);
     setKpScheduleDays(entity.schedule_days ?? 127);
     setKpScheduleStartText(minutesToTimeText(entity.schedule_start_minutes ?? 0));
@@ -235,7 +240,9 @@ export default function App() {
       const endpoint = kpScheduleTargetType === 'card'
         ? '/api/user/update_schedule'
         : '/api/keypad/update_schedule';
-      const idField = kpScheduleTargetType === 'card' ? { idx: kpScheduleEditId } : { id: kpScheduleEditId };
+      const idField = (kpScheduleTargetType === 'card' && !kpScheduleEditIsDbId)
+        ? { idx: kpScheduleEditId }        // stary serwer bez `id` — adresowanie slotem
+        : { id: kpScheduleEditId };
       await fetch(`${backendUrl}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...kpAuthHeader },
@@ -376,9 +383,14 @@ export default function App() {
         } else {
           const storedAccountId = await AsyncStorage.getItem('@lock_account_id');
           const storedToken     = await AsyncStorage.getItem('@lock_auth_token');
+          const storedEmail     = await AsyncStorage.getItem('@lock_account_email');
           if (storedToken || storedAccountId) {
             if (storedToken)     setAuthToken(storedToken);
             if (storedAccountId) setAccountId(parseInt(storedAccountId, 10));
+            // E-mail konta MUSI przetrwać przeładowanie bundla — przy przełączeniu telefonu
+            // na CTRLABLE_SETUP Metro się rozłącza i Expo Go przeładowuje apkę, przez co stan
+            // `email` znikał i centralka dostawała PUSTY e-mail (poll: email='' → brak rejestracji).
+            if (storedEmail)     setEmail(storedEmail);
             resetUiToDefault();
             setIsConfigured(true);
           }
@@ -540,6 +552,7 @@ export default function App() {
       if (data.status === 'verified' || data.status === 'already_verified') {
         if (data.token) { await AsyncStorage.setItem('@lock_auth_token', data.token); setAuthToken(data.token); }
         if (data.accountId) { await AsyncStorage.setItem('@lock_account_id', String(data.accountId)); setAccountId(data.accountId); }
+        await AsyncStorage.setItem('@lock_account_email', email.trim().toLowerCase());
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setVerifyCode('');
         setInitMode('online');
@@ -592,6 +605,8 @@ export default function App() {
             await AsyncStorage.setItem('@lock_account_id', String(aid));
             setAccountId(aid);
           }
+          // Trwały e-mail konta — używany przy inicjalizacji centralki (owner w pollu).
+          await AsyncStorage.setItem('@lock_account_email', email.trim().toLowerCase());
           resetUiToDefault();
           setIsConfigured(true);
           setErrorMessage('');
@@ -629,6 +644,7 @@ export default function App() {
       // 2. Czyścimy pamięć lokalną sesji w telefonie (konto w chmurze i/lub Tryb Lokalny)
       await AsyncStorage.removeItem('@lock_account_id');
       await AsyncStorage.removeItem('@lock_auth_token');
+      await AsyncStorage.removeItem('@lock_account_email');
       await AsyncStorage.removeItem('@lock_local_mode');
       await AsyncStorage.removeItem('@lock_local_admin_pass');
 
@@ -1087,16 +1103,26 @@ export default function App() {
   };
 
   // --- Tryb nauki nowej karty RFID ---
+  // Nazwa MUSI polecieć w URL-u: /api/toggle_learn to GET (executeCommand robi POST
+  // dopiero gdy dostanie payload), a serwer czyta ją z query.username i dopiero stamtąd
+  // trafia w odpowiedzi polla do centralki. Wcześniej nazwa z pola była po cichu gubiona
+  // i każda karta lądowała jako „Nowy Użytkownik".
   const handleToggleLearn = () => {
-    executeCommand('/api/toggle_learn');
+    const label = newName.trim();
+    const isLeaving = lockState.mode === 'Uczenie';
+    const endpoint = (!isLeaving && label)
+      ? `/api/toggle_learn?username=${encodeURIComponent(label)}`
+      : '/api/toggle_learn';
+    executeCommand(endpoint);
+    if (!isLeaving) setNewName('');
   };
 
   // --- Zmiana nazwy użytkownika (karty RFID) — jednolity wzorzec z PIN-ami:
   // edycja inline w wierszu, bez wyskakującego okienka.
   const cardRename = () => {
     if (!cardRenameName.trim()) return;
-    executeCommand('/api/user/rename', { idx: cardRenameIdx, name: cardRenameName.trim() });
-    setCardRenameIdx(null); setCardRenameName('');
+    executeCommand('/api/user/rename', { ...(cardRenameRef || {}), name: cardRenameName.trim() });
+    setCardRenameIdx(null); setCardRenameRef(null); setCardRenameName('');
   };
 
   // --- Rejestracja tokena push notifications ---
@@ -1181,7 +1207,11 @@ export default function App() {
   };
 
   useEffect(() => {
-    const dynamicIntervalTime = (lockState.lock === true || lockState.lock === 'pending') ? 500 : 3000;
+    // Rygiel jest otwarty tylko ~3 s (autoLockDelayMs), a łańcuch opóźnień to
+    // poll centralki (~1 s) + poll aplikacji. Przy 3 s w spoczynku apka pokazywała
+    // „Otwarto" dopiero PO faktycznym zamknięciu (albo gubiła zdarzenie).
+    // 1,2 s mieści się w oknie otwarcia i nadal nie zalewa serwera.
+    const dynamicIntervalTime = (lockState.lock === true || lockState.lock === 'pending') ? 500 : 1200;
 
     const interval = setInterval(fetchStatus, dynamicIntervalTime);
     return () => clearInterval(interval);
@@ -1422,6 +1452,15 @@ export default function App() {
                     // Bez tego konfiguracja leciała „w próżnię" (fetch padał, a że .catch=.then,
                     // apka i tak mówiła „wysłano" — centralka nigdy nie dostawała danych).
                     if (!settingsSsid) { setErrorMessage('Podaj nazwę sieci Wi-Fi.'); return; }
+                    // STRAŻNIK: bez e-maila właściciela centralka nigdy się nie zarejestruje
+                    // (serwer rejestruje TYLKO poll z niepustym &email=). Wcześniej pusty stan
+                    // `email` (po przeładowaniu bundla) cicho psuł całą inicjalizację.
+                    const ownerEmail = (email || (await AsyncStorage.getItem('@lock_account_email')) || '').trim().toLowerCase();
+                    if (!ownerEmail) {
+                      Alert.alert('Brak e-maila konta', 'Nie znam adresu e-mail Twojego konta. Zaloguj się ponownie i spróbuj dodać centralkę jeszcze raz.');
+                      return;
+                    }
+                    if (!email) setEmail(ownerEmail);
                     setIsAuthenticating(true);
                     setErrorMessage('');
                     try {
@@ -1452,7 +1491,7 @@ export default function App() {
                       resetUiToDefault();
                       setIsConfigured(true);
                     };
-                    fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(email)}&reg_pass=&offline=0`)
+                    fetch(`http://192.168.4.1/save_setup?s=${encodeURIComponent(settingsSsid)}&p=${encodeURIComponent(settingsWifiPass)}&m=${encodeURIComponent(ownerEmail)}&reg_pass=&offline=0`)
                       .then(finishSent)
                       .catch(finishSent);
                   }}>
@@ -1763,9 +1802,16 @@ export default function App() {
     {/* LISTA UŻYTKOWNIKÓW */}
     <View style={styles.card}>
       <Text style={styles.sectionHeader}>Zarejestrowane Karty ({lockState.total}/10)</Text>
-              {lockState.users.map((user) => (
-                <View key={user.idx} style={{ backgroundColor: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 8 }}>
-                  {cardRenameIdx === user.idx ? (
+              {/* Klucz i mutacje po STABILNYM user.id (nie po slocie sprzętowym!).
+                  Wcześniej key={user.idx} powodował duplikaty kluczy React (dwa edytory
+                  naraz) i mutacje trafiające w niewłaściwą kartę. Fallback na idx dla
+                  zgodności ze starszym serwerem, który nie zwracał jeszcze `id`. */}
+              {lockState.users.map((user, position) => {
+                const cardKey = user.id != null ? user.id : `slot-${user.idx}-${position}`;
+                const mutationRef = user.id != null ? { id: user.id } : { idx: user.idx };
+                return (
+                <View key={cardKey} style={{ backgroundColor: '#1a1a2e', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                  {cardRenameIdx === cardKey ? (
                     <View style={{ flexDirection: 'row', gap: 8 }}>
                       <TextInput style={[styles.inputField, { flex: 1, marginBottom: 0 }]}
                         value={cardRenameName} onChangeText={setCardRenameName}
@@ -1773,7 +1819,7 @@ export default function App() {
                       <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12 }]} onPress={cardRename}>
                         <Text style={styles.btnText}>✓</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12, backgroundColor: '#333' }]} onPress={() => setCardRenameIdx(null)}>
+                      <TouchableOpacity style={[styles.secondaryBtn, { paddingHorizontal: 12, backgroundColor: '#333' }]} onPress={() => { setCardRenameIdx(null); setCardRenameRef(null); }}>
                         <Text style={styles.btnText}>✕</Text>
                       </TouchableOpacity>
                     </View>
@@ -1785,22 +1831,23 @@ export default function App() {
                           <Text style={{ color: '#64b5f6', fontSize: 10, marginTop: 2 }}>📅 Harmonogram</Text>
                         )}
                       </View>
-                      <TouchableOpacity onPress={() => { setCardRenameIdx(user.idx); setCardRenameName(user.name); }} style={{ paddingHorizontal: 8 }}>
+                      <TouchableOpacity onPress={() => { setCardRenameIdx(cardKey); setCardRenameRef(mutationRef); setCardRenameName(user.name); }} style={{ paddingHorizontal: 8 }}>
                         <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
                       </TouchableOpacity>
                       <TouchableOpacity onPress={() => openScheduleEditor(user, 'card')} style={{ paddingHorizontal: 8 }}>
                         <Text style={{ color: user.schedule_enabled ? '#ffb300' : '#64b5f6', fontSize: 12 }}>📅</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity onPress={() => executeCommand('/api/user/toggle_active', { idx: user.idx })} style={{ paddingHorizontal: 8 }}>
+                      <TouchableOpacity onPress={() => executeCommand('/api/user/toggle_active', mutationRef)} style={{ paddingHorizontal: 8 }}>
                         <Text style={{ color: user.active ? '#81c784' : '#ffb300', fontWeight: 'bold', fontSize: 12 }}>{user.active ? 'Aktywny' : 'Zamrożony'}</Text>
                       </TouchableOpacity>
-                      <TouchableOpacity onPress={() => executeCommand('/api/user/delete', { idx: user.idx })} style={{ paddingHorizontal: 8 }}>
+                      <TouchableOpacity onPress={() => executeCommand('/api/user/delete', mutationRef)} style={{ paddingHorizontal: 8 }}>
                         <Text style={{ color: '#e57373', fontWeight: 'bold', fontSize: 12 }}>❌</Text>
                       </TouchableOpacity>
                     </View>
                   )}
                 </View>
-              ))}
+                );
+              })}
               {lockState.users.length === 0 ? <Text style={styles.subLabel}>Brak rekordów przypisanych do tego zamka.</Text> : null}
             </View>
 

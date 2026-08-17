@@ -218,6 +218,32 @@ async function resolveTargetDevice(accountId, requestedMac, columns = 'mac_addre
   return dbPool.query(`SELECT ${cols} FROM devices d WHERE ${DEVICE_ACCESS_CONDITION} ORDER BY d.mac_address ASC LIMIT 1`, [accountId]);
 }
 
+// --- Tożsamość karty RFID -----------------------------------------------------
+// HISTORIA BŁĘDU: `/api/data` zwracało `idx` = hardware_slot_idx (slot w EEPROM/LittleFS),
+// a endpointy mutacji używały `cards.rows[idx]`, czyli POZYCJI w liście. Te dwie rzeczy
+// pokrywały się tylko przypadkiem — po resetach/ponownym dodaniu karty miały ten sam
+// (albo pusty) slot, przez co zmiana nazwy/blokada/usunięcie trafiały w NIEWŁAŚCIWĄ kartę,
+// a aplikacja renderowała zduplikowane klucze React. Od teraz jedyną tożsamością jest
+// `card_credentials.id` (stabilne), a slot sprzętowy służy WYŁĄCZNIE do synchronizacji
+// z centralką. `idx` obsługiwany dalej jako fallback dla starszych buildów aplikacji.
+async function resolveCardRow(targetMac, body) {
+  const cards = await dbPool.query(
+    'SELECT id, is_active, hardware_slot_idx FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC',
+    [targetMac]
+  );
+  if (body && body.id != null) {
+    const wanted = parseInt(body.id, 10);
+    return cards.rows.find(r => r.id === wanted) || null;
+  }
+  if (body && body.idx != null) return cards.rows[body.idx] || null;   // stara apka
+  return null;
+}
+// Slot do wysłania na sprzęt: z bazy, a gdy brak (stare wiersze) — to, co podała apka.
+function cardHwSlot(card, body) {
+  if (card && card.hardware_slot_idx != null) return card.hardware_slot_idx;
+  return (body && body.idx != null) ? body.idx : 0;
+}
+
 // Fragment SQL: zbiór MAC-ów, do których dane konto ma dostęp jako właściciel LUB
 // współadmin. `param` to numer placeholdera (np. '$2'). Używane do autoryzacji
 // operacji na PIN-ach po MAC-u urządzenia zamiast po koncie twórcy PIN-u.
@@ -850,7 +876,8 @@ const server = http.createServer(async (req, res) => {
         ).catch(() => ({ rows: [] }));
 
         const processedUsersList = usersRes.rows.map(row => ({
-          idx: row.hardware_slot_idx,
+          id: row.id,                   // STABILNA tożsamość (klucz listy + mutacje)
+          idx: row.hardware_slot_idx,   // slot sprzętowy — tylko do synchronizacji z centralką
           name: row.name,
           active: row.active,
           uid: row.uid,
@@ -913,26 +940,26 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/user/rename' && req.method === 'POST') {
         const accountId = requireAuth(req, res); if (!accountId) return;
-        const { idx, name, mac: reqMac } = body;
+        const { name, mac: reqMac } = body;
         const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
         const targetMac = dev.rows[0].mac_address;
         const targetIp = dev.rows[0].last_known_ip;
 
-        const cards = await dbPool.query('SELECT id FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [targetMac]);
-        if (!cards.rows[idx]) return sendJSON(res, 400, { error: "Array index size exception" });
+        const card = await resolveCardRow(targetMac, body);
+        if (!card) return sendJSON(res, 400, { error: "Nie znaleziono karty" });
 
-        await dbPool.query('UPDATE card_credentials SET holder_name = $1 WHERE id = $2', [name, cards.rows[idx].id]);
-        writeToLocalLogFile('User Mutation', `Renamed card profile row ID: ${cards.rows[idx].id}`);
+        await dbPool.query('UPDATE card_credentials SET holder_name = $1 WHERE id = $2', [name, card.id]);
+        writeToLocalLogFile('User Mutation', `Renamed card profile row ID: ${card.id}`);
 
         // Wyliczamy hasło algorytmicznie dla tego konkretnego MAC urządzenia
         const currentDynamicPassword = getFactoryAdminPassword(targetMac);
 
-        // Wysyłamy do rygla poprawną komendę zmiany nazwy ze slotem
+        // Do SPRZĘTU zawsze slot sprzętowy tej karty (nie pozycja w liście!)
         const syncSuccess = await syncMutationToHardware(
         targetIp,
-        `/api/rename_user?idx=${idx}&name=${encodeURIComponent(name)}&pass=${currentDynamicPassword}`
+        `/api/rename_user?idx=${cardHwSlot(card, body)}&name=${encodeURIComponent(name)}&pass=${currentDynamicPassword}`
         );
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
@@ -948,8 +975,8 @@ const server = http.createServer(async (req, res) => {
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
         const targetMac = dev.rows[0].mac_address;
 
-        const cards = await dbPool.query('SELECT id FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [targetMac]);
-        if (!cards.rows[idx]) return sendJSON(res, 400, { error: "Array index size exception" });
+        const card = await resolveCardRow(targetMac, body);
+        if (!card) return sendJSON(res, 400, { error: "Nie znaleziono karty" });
 
         await dbPool.query(
           `UPDATE card_credentials SET
@@ -958,9 +985,9 @@ const server = http.createServer(async (req, res) => {
              schedule_start_minutes = COALESCE($3, schedule_start_minutes),
              schedule_end_minutes = COALESCE($4, schedule_end_minutes)
            WHERE id = $5`,
-          [scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, cards.rows[idx].id]
+          [scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, card.id]
         );
-        writeToLocalLogFile('User Mutation', `[Node: ${targetMac}] Schedule updated for card id=${cards.rows[idx].id}`);
+        writeToLocalLogFile('User Mutation', `[Node: ${targetMac}] Schedule updated for card id=${card.id}`);
         return sendJSON(res, 200, { success: true });
       }
 
@@ -976,16 +1003,16 @@ const server = http.createServer(async (req, res) => {
         const targetMac = dev.rows[0].mac_address;
         const targetIp = dev.rows[0].last_known_ip;
 
-        const cards = await dbPool.query('SELECT id, is_active FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [targetMac]);
-        if (!cards.rows[idx]) return sendJSON(res, 400, { error: "Array index size exception" });
+        const card = await resolveCardRow(targetMac, body);
+        if (!card) return sendJSON(res, 400, { error: "Nie znaleziono karty" });
 
-        const flippedStateBit = !cards.rows[idx].is_active;
-        await dbPool.query('UPDATE card_credentials SET is_active = $1 WHERE id = $2', [flippedStateBit, cards.rows[idx].id]);
-        writeToLocalLogFile('User Mutation', `Toggled access bit flag for ID: ${cards.rows[idx].id}`);
+        const flippedStateBit = !card.is_active;
+        await dbPool.query('UPDATE card_credentials SET is_active = $1 WHERE id = $2', [flippedStateBit, card.id]);
+        writeToLocalLogFile('User Mutation', `Toggled access bit flag for ID: ${card.id}`);
 
         // Autoryzacja fabrycznym hasłem dynamicznym
         const currentDynamicPassword = getFactoryAdminPassword(targetMac);
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/toggle_user_active?idx=${idx}&pass=${currentDynamicPassword}`);
+        const syncSuccess = await syncMutationToHardware(targetIp, `/api/toggle_user_active?idx=${cardHwSlot(card, body)}&pass=${currentDynamicPassword}`);
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
 
@@ -1001,15 +1028,16 @@ const server = http.createServer(async (req, res) => {
         const targetMac = dev.rows[0].mac_address;
         const targetIp = dev.rows[0].last_known_ip;
 
-        const cards = await dbPool.query('SELECT id FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [targetMac]);
-        if (!cards.rows[idx]) return sendJSON(res, 400, { error: "Array index size exception" });
+        const card = await resolveCardRow(targetMac, body);
+        if (!card) return sendJSON(res, 400, { error: "Nie znaleziono karty" });
 
-        await dbPool.query('DELETE FROM card_credentials WHERE id = $1', [cards.rows[idx].id]);
-        writeToLocalLogFile('User Mutation', `Purged key ID context entry: ${cards.rows[idx].id}`);
+        const hwSlot = cardHwSlot(card, body);   // wyliczyć PRZED usunięciem wiersza
+        await dbPool.query('DELETE FROM card_credentials WHERE id = $1', [card.id]);
+        writeToLocalLogFile('User Mutation', `Purged key ID context entry: ${card.id}`);
 
         // Autoryzacja fabrycznym hasłem dynamicznym
         const currentDynamicPassword = getFactoryAdminPassword(targetMac);
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/delete_user?idx=${idx}&pass=${currentDynamicPassword}`);
+        const syncSuccess = await syncMutationToHardware(targetIp, `/api/delete_user?idx=${hwSlot}&pass=${currentDynamicPassword}`);
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
       }
 
