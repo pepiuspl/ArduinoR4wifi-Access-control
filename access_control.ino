@@ -492,6 +492,18 @@ void loadCards() {
 
 void saveNewCard(byte* uid, String nameStr) {
   int cap = fsMounted ? HW_MAX_CARDS : 10;
+  // DEDUPLIKACJA: ta sama karta zbliżona ponownie w trybie uczenia NIE tworzy
+  // kolejnego slotu — aktualizujemy istniejący wpis. Bez tego jeden brelok
+  // lądował w bazie po kilka razy (widoczne jako 7 „użytkowników" przy 2 kartach).
+  for (int i = 0; i < totalCards; i++) {
+    if (memcmp(users[i].uid, uid, 4) == 0) {
+      memset(users[i].name, 0, sizeof(users[i].name));
+      nameStr.toCharArray(users[i].name, sizeof(users[i].name));
+      isCardActive[i] = true;
+      persistCards();
+      return;
+    }
+  }
   if (totalCards >= cap) return;
   memset(&users[totalCards], 0, sizeof(User));
   memcpy(users[totalCards].uid, uid, 4);
@@ -1132,9 +1144,12 @@ void handleWebServer() {
         client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\"");
         if (i > 0) client.print(","); 
       } 
-      client.print("],\"ssid\":\""); client.print(ssid); 
-      client.print(",\"tamper\":"); client.print(tamperActive ? "true" : "false"); 
-      client.print("\",\"admin_pass\":\""); client.print(getFactoryAdminPassword()); 
+      // JSON był tu ROZWALONY: cudzysłów zamykający ssid trafiał dopiero po "tamper",
+      // więc wychodziło  "ssid":"wifi_archer,"tamper":false","admin_pass":...
+      // (tryb lokalny nie mógł tego sparsować). Kolejność musi być zamknięta po kolei.
+      client.print("],\"ssid\":\""); client.print(ssid);
+      client.print("\",\"tamper\":"); client.print(tamperActive ? "true" : "false");
+      client.print(",\"admin_pass\":\""); client.print(getFactoryAdminPassword()); 
       client.print("\"}");
     } 
     delay(1); client.stop(); blockTelemetry = false; return;

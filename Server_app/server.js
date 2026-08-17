@@ -2067,7 +2067,7 @@ const server = http.createServer(async (req, res) => {
           const _k = `arrive:${mac || 'NOMAC'}`;
           if (!provisionSkipLog[_k] || Date.now() - provisionSkipLog[_k] > 60000) {
             provisionSkipLog[_k] = Date.now();
-            writeToLocalLogFile('Provisioning', `[Node: ${mac || 'BRAK-MAC'}] POLL przyszedł: email='${query.email || ''}' version='${query.version || ''}' ip=${cleanIp}`);
+            writeToLocalLogFile('Provisioning', `[Node: ${mac || 'BRAK-MAC'}] POLL przyszedł: email='${query.email || ''}' version='${query.version || ''}' release_id=${query.release_id || '?'} ip=${cleanIp}`);
           }
         }
 
