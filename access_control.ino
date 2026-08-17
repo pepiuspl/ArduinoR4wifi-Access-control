@@ -1340,16 +1340,31 @@ void executeCloudSynchronization() {
   String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId);  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
-  unsigned long deadline = millis() + 6000;   // okno odczytu (rdzeń 0, nie blokuje pętli) — TLS przetwarza rekordy wolno
-  String payloadResponse = "";  
+  // ODCZYT: kończymy, gdy ciało JSON jest KOMPLETNE — nie czekamy, aż serwer zamknie
+  // połączenie. Przy TLS connected() bywa prawdziwe jeszcze długo po odebraniu treści,
+  // więc czekanie na zamknięcie zjadało cały deadline. Efekt był dotkliwy: poll trwał
+  // kilka sekund zamiast ułamka, komenda odblokowania czekała na następny cykl
+  // (timeout w aplikacji), a luki w heartbeacie wyglądały jak "centralka offline".
+  unsigned long deadline = millis() + 4000;   // tylko bezpiecznik, normalnie wychodzimy wcześniej
+  String payloadResponse = "";
+  bool headersDone = false;
+  int braceDepth = 0;
+  bool bodyStarted = false;
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {
-    // (przycisk obsługuje loop na rdzeniu 1 — task sieciowy nie dotyka sprzętu)
-    if (httpCheck.available()) {
-      char c = httpCheck.read();  
-      payloadResponse += c;
-    }  
-  }  
-  httpCheck.stop();  
+    if (!httpCheck.available()) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
+    char c = httpCheck.read();
+    payloadResponse += c;
+    if (!headersDone) {
+      if (payloadResponse.endsWith("\r\n\r\n")) headersDone = true;
+      continue;
+    }
+    if (c == '{') { braceDepth++; bodyStarted = true; }
+    else if (c == '}') {
+      braceDepth--;
+      if (bodyStarted && braceDepth <= 0) break;   // pełny obiekt JSON — kończymy natychmiast
+    }
+  }
+  httpCheck.stop();
   
   bool serverUnlockSignal = (payloadResponse.indexOf("\"unlock\":true") != -1);
   bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1);
@@ -1531,15 +1546,14 @@ void transmitCardPayloadToCloud(String uidStr, String nameStr, int slot, bool ru
   httpPost.print("Content-Length: "); httpPost.println(postData.length()); 
   httpPost.println("Connection: close\r\n"); 
   httpPost.print(postData);
-  unsigned long deadline = millis() + 2000;
-  String payloadResponse = "";
-  while ((httpPost.available() || httpPost.connected()) && millis() < deadline) { 
-    if (httpPost.available()) { 
-      char c = httpPost.read();
-      payloadResponse += c; 
-    } 
-  } 
-  httpPost.stop(); 
+  // Odpowiedź nas nie interesuje (i tak była wyrzucana) — czekanie na zamknięcie
+  // połączenia tylko opóźniało kolejny poll, czyli raportowanie stanu rygla.
+  // Wystarczy dać żądaniu dojść do serwera i zamknąć gniazdo.
+  unsigned long deadline = millis() + 600;
+  while (!httpPost.available() && httpPost.connected() && millis() < deadline) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  httpPost.stop();
 } 
 
 
