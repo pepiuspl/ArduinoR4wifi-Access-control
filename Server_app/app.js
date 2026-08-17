@@ -822,6 +822,12 @@ export default function App() {
   const [teamLoading, setTeamLoading] = useState(false);
   const [teamBusyMac, setTeamBusyMac] = useState('');   // MAC, dla którego trwa wysyłka zaproszenia
 
+  // --- Zakładka "Pakiet": licencja + zużycie (czyta /api/license) ---
+  const [license, setLicense] = useState(null);          // { tier, limits, usage[], devicesUsed, validUntil, expired }
+  const [licenseLoading, setLicenseLoading] = useState(false);
+  const [licenseKeyInput, setLicenseKeyInput] = useState('');
+  const [licenseBusy, setLicenseBusy] = useState(false);
+
   // --- Filtrowanie/wyszukiwanie w logach ---
   const [isLogSearchMode, setIsLogSearchMode] = useState(false);
   const [logSearchQuery, setLogSearchQuery] = useState('');
@@ -884,6 +890,43 @@ export default function App() {
         setTeamLoading(false);
       })
       .catch(() => setTeamLoading(false));
+  };
+
+  // --- Pakiet/licencja ---
+  const TIER_LABELS = { free: 'Bez licencji', silver: 'Silver', gold: 'Gold', individual: 'Indywidualna' };
+  const tierLabel = (t) => TIER_LABELS[t] || t || '—';
+
+  const loadLicense = () => {
+    setLicenseLoading(true);
+    fetch(`${backendUrl}/api/license`, {
+      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+    })
+      .then((res) => res.json())
+      .then((d) => { setLicense(d); setLicenseLoading(false); })
+      .catch(() => setLicenseLoading(false));
+  };
+
+  const submitLicenseKey = () => {
+    const key = (licenseKeyInput || '').trim();
+    if (!key) { Alert.alert('Błąd', 'Wklej klucz licencyjny.'); return; }
+    setLicenseBusy(true);
+    fetch(`${backendUrl}/api/license/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ key })
+    })
+      .then((res) => res.json().then((d) => ({ ok: res.ok, d })))
+      .then(({ ok, d }) => {
+        setLicenseBusy(false);
+        if (ok) {
+          Alert.alert('Aktywowano', `Pakiet: ${tierLabel(d.tier)}. Limity zaktualizowane.`);
+          setLicenseKeyInput('');
+          loadLicense();
+        } else {
+          Alert.alert('Błąd', d.error || 'Nie udało się aktywować klucza.');
+        }
+      })
+      .catch(() => { setLicenseBusy(false); Alert.alert('Błąd', 'Brak połączenia z serwerem.'); });
   };
 
   // Wysyła zaproszenie e-mailem (serwer generuje link). Prawdziwy TextInput,
@@ -2102,6 +2145,91 @@ export default function App() {
           </KeyboardAvoidingView>
         )}
 
+        {currentScreen === 'pakiet' && (
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={{ flex: 1 }}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 100}
+          >
+            <ScrollView contentContainerStyle={styles.scrollWrapper} keyboardShouldPersistTaps="handled">
+              <Text style={styles.screenHeaderText}>💳 Pakiet i licencja</Text>
+
+              {licenseLoading && (
+                <Text style={{ color: '#64b5f6', textAlign: 'center', marginBottom: 12 }}>Wczytywanie…</Text>
+              )}
+
+              {license && (
+                <>
+                  <View style={styles.card}>
+                    <Text style={styles.sectionHeader}>Twój pakiet: {tierLabel(license.tier)}</Text>
+                    {license.expired && (
+                      <Text style={{ color: '#e57373', fontSize: 13, marginBottom: 6, lineHeight: 19 }}>
+                        Licencja wygasła — obowiązują limity darmowe. Istniejące karty/PIN-y działają dalej, ale nie dodasz nowych ponad limit.
+                      </Text>
+                    )}
+                    {license.validUntil && (
+                      <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>
+                        Ważna do: {new Date(license.validUntil).toLocaleDateString('pl-PL')}
+                      </Text>
+                    )}
+                    <Text style={{ color: '#aaa', fontSize: 13, lineHeight: 21 }}>
+                      Retencja logów: {license.limits?.logRetentionDays} dni{'\n'}
+                      Kody gościnne: {license.limits?.guestCodes ? 'tak' : '—'}{'\n'}
+                      Centralki: {license.devicesUsed}/{license.limits?.maxDevices}
+                    </Text>
+                  </View>
+
+                  {(license.usage || []).map((u) => (
+                    <View key={u.mac} style={styles.card}>
+                      <Text style={styles.sectionHeader}>{u.name}</Text>
+                      <Text style={{ color: '#666', fontSize: 11, marginTop: -6, marginBottom: 10 }}>{u.mac}</Text>
+                      {[['Karty', u.cards, u.maxCards], ['PIN-y', u.pins, u.maxPins], ['Administratorzy', u.admins, u.maxAdmins]].map(([label, used, max]) => (
+                        <View key={label} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#222' }}>
+                          <Text style={{ color: '#ccc', fontSize: 14 }}>{label}</Text>
+                          <Text style={{ color: used >= max ? '#e57373' : '#81c784', fontSize: 14, fontWeight: 'bold' }}>{used} / {max}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  ))}
+                </>
+              )}
+
+              <View style={styles.card}>
+                <Text style={styles.sectionHeader}>Masz klucz licencyjny?</Text>
+                <Text style={{ color: '#888', fontSize: 12, marginBottom: 8, lineHeight: 18 }}>
+                  Wklej klucz otrzymany przy zakupie (faktura / umowa), aby odblokować wyższy pakiet.
+                </Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="CTRL-XXXX-XXXX-XXXX"
+                  placeholderTextColor="#555"
+                  autoCapitalize="characters"
+                  value={licenseKeyInput}
+                  onChangeText={setLicenseKeyInput}
+                />
+                <TouchableOpacity
+                  style={[styles.secondaryBtn, { backgroundColor: '#0284c7', width: '100%', marginTop: 10, opacity: licenseBusy ? 0.5 : 1 }]}
+                  disabled={licenseBusy}
+                  onPress={submitLicenseKey}
+                >
+                  <Text style={styles.btnText}>{licenseBusy ? 'Sprawdzanie…' : '🔑 Aktywuj klucz'}</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity
+                style={[styles.secondaryBtn, { width: '100%', backgroundColor: '#1a3a5c', marginTop: 4 }]}
+                onPress={() => Alert.alert('Zwiększ pakiet', 'Zakup wyższego pakietu (Silver / Gold) online będzie wkrótce dostępny przez Przelewy24. Na razie napisz do nas — przydzielimy licencję i wyślemy klucz aktywacyjny.')}
+              >
+                <Text style={styles.btnText}>⬆️ Zwiększ pakiet</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={[styles.secondaryBtn, { width: '100%', marginTop: 8 }]} onPress={loadLicense}>
+                <Text style={styles.btnText}>🔄 Odśwież</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        )}
+
 
 
         {isMenuOpen && <TouchableOpacity style={styles.menuDimBackdropMask} activeOpacity={1} onPress={toggleBurgerMenu} />}
@@ -2116,6 +2244,9 @@ export default function App() {
           <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'directory' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('directory')}><Text style={styles.menuItemLabelText}>👥 Lista Użytkowników</Text></TouchableOpacity>
           {!isLocalMode && (
             <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'team' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('team'); loadTeam(); }}><Text style={styles.menuItemLabelText}>🤝 Zespół (Administratorzy)</Text></TouchableOpacity>
+          )}
+          {!isLocalMode && (
+            <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'pakiet' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('pakiet'); loadLicense(); }}><Text style={styles.menuItemLabelText}>💳 Pakiet i licencja</Text></TouchableOpacity>
           )}
           {!isLocalMode && (
             <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'notifications' ? styles.menuItemRowActive : null]} onPress={() => navigateTo('notifications')}><Text style={styles.menuItemLabelText}>🔔 Powiadomienia Push</Text></TouchableOpacity>
