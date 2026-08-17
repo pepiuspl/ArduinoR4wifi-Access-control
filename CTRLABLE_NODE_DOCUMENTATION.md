@@ -277,6 +277,76 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 psql -h localhost -U admin smartlock_db -c "SELECT mac_address, last_known_ip, firmware_version, last_heartbeat FROM devices;"
 ```
 
+### 4.4 Password rotation (admin DB user)
+
+The DB password used to be **hardcoded in server.js** (and committed to git). It now
+lives only in the environment; `server.js` reads `process.env.DB_PASSWORD` (via dotenv,
+`override: true`). Rotating it makes any copy left in git history useless.
+
+The password exists in **three** places — all must change together or auth breaks:
+
+| Where | Used by |
+|---|---|
+| PostgreSQL (`admin` role) | the database itself |
+| `/opt/smartlock-server/.env` → `DB_PASSWORD` | the backend (server.js) |
+| `/root/.pgpass` | interactive `psql` |
+
+Run on the **backend** VM. Choose a password using only letters, digits and `_ - .`
+(other characters break the shell/sed/psql quoting below):
+
+```bash
+NEW='CHOOSE_A_STRONG_PASSWORD'
+
+# 1. Change it in PostgreSQL (as the postgres superuser — no sudo on this box)
+su - postgres -c "psql -d smartlock_db -c \"ALTER USER admin WITH PASSWORD '$NEW';\""
+
+# 2. Update the backend .env (server.js reads DB_PASSWORD from here)
+sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=$NEW|" /opt/smartlock-server/.env
+
+# 3. Update .pgpass so interactive psql keeps working
+sed -i "s|^localhost:5432:smartlock_db:admin:.*|localhost:5432:smartlock_db:admin:$NEW|" /root/.pgpass
+
+# 4. Restart the backend so it reconnects with the new password
+/usr/local/bin/pm2 restart ctrlable-server
+
+# 5. Verify — logs must be clean (no DB auth errors)
+pm2 logs ctrlable-server --lines 12 --nostream | tail -12
+```
+
+**How it works:** set the new password in PostgreSQL *and* everywhere it is read from,
+then restart so the new value is loaded. Data is untouched — only the login credential
+changes. Do steps 1–4 together (seconds apart) to avoid a window where the running
+backend still holds the old password.
+
+**DB env vars** (`.env`, added when the password was moved out of code):
+```
+DB_USER=admin
+DB_HOST=localhost
+DB_NAME=smartlock_db
+DB_PORT=5432
+DB_PASSWORD=...
+```
+
+**`admin` must OWN the tables**, or schema migrations (`runSchemaMigrations()` in
+server.js) fail silently with `must be owner of table ...` (visible only in
+`/var/log/smartlock/*.log` as `[Migration] BŁĄD`, and `[Migration] Zakończono: N/M`
+with M < total). This bit us when license columns would not add. Fix — grant ownership
+of all public tables to `admin`:
+
+```bash
+cat > /tmp/fix_owner.sql <<'SQL'
+GRANT ALL ON SCHEMA public TO admin;
+DO $$ DECLARE r RECORD; BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='public' LOOP
+    EXECUTE 'ALTER TABLE public.'||quote_ident(r.tablename)||' OWNER TO admin';
+  END LOOP;
+END $$;
+SQL
+su - postgres -c "psql -d smartlock_db -f /tmp/fix_owner.sql"
+# then restart so the migration re-runs and applies the pending ALTERs:
+/usr/local/bin/pm2 restart ctrlable-server
+```
+
 ---
 
 ## 5. Firmware (ESP32)
