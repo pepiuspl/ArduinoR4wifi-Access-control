@@ -2150,7 +2150,11 @@ const server = http.createServer(async (req, res) => {
                   await dbPool.query(
                     `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
                     VALUES ($1, $2, $3, $4, 'Czuwanie')`,
-                    [mac, accountRes.rows[0].id, cleanIp, query.version || 'v2.9.6']
+                    // Adres raportowany przez centralkę (&ip=), nie adres proxy — patrz niżej.
+                    [mac,
+                     accountRes.rows[0].id,
+                     (typeof query.ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(query.ip.trim())) ? query.ip.trim() : cleanIp,
+                     query.version || 'v2.9.6']
                   );
                   writeToLocalLogFile('Provisioning', `[Node: ${mac}] Pomyślnie utworzono i przypisano centralkę do konta: ${query.email}`);
                   // E-mail „dodano centralkę" do właściciela (jednorazowo — ta gałąź
@@ -2206,13 +2210,23 @@ const server = http.createServer(async (req, res) => {
       mac = '00:00:00:00:00:00';
     }
   } else {
+    // ADRES CENTRALKI: bierzemy ten, który urządzenie SAMO raportuje (&ip= w pollu),
+    // a NIE adres źródłowy zapytania. Poll idzie przez proxy NPM, więc cleanIp to
+    // 192.168.0.102 (proxy), nie centralka — a na ten adres serwer próbował potem
+    // wysyłać zmiany nazwy/harmonogramu/ustawień przez syncMutationToHardware (port 80).
+    // Efekt: WSZYSTKIE przekazania do urządzenia po cichu trafiały w proxy i nic nie robiły.
+    const reportedIp = (typeof query.ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(query.ip.trim()))
+      ? query.ip.trim()
+      : null;
+    const deviceIp = reportedIp || cleanIp;
+
     // Zapisujemy i aktualizujemy tętno (heartbeat) urządzenia oraz jego wersję
     let queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version';
-    let queryParams = [cleanIp, mac];
+    let queryParams = [deviceIp, mac];
 
     if (clientReportedVersion) {
       queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
-      queryParams = [cleanIp, mac, clientReportedVersion];
+      queryParams = [deviceIp, mac, clientReportedVersion];
     }
 
     const devLookup = await dbPool.query(queryText, queryParams);

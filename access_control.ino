@@ -1429,7 +1429,10 @@ void executeCloudSynchronization() {
 
   lastSuccessfulPollTime = millis();
   String macStr = getMacAddressString();
-  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId);  httpCheck.println("GET " + pollPath + " HTTP/1.1");  
+  // &ip= — WŁASNY adres w sieci lokalnej. Serwer widzi tylko adres proxy (NPM), więc
+  // bez tego zapisywał w bazie IP proxy i próbował na nie wysyłać zmiany nazwy,
+  // harmonogramu i ustawień WiFi (syncMutationToHardware, port 80) — trafiając w pustkę.
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId) + "&ip=" + WiFi.localIP().toString();  httpCheck.println("GET " + pollPath + " HTTP/1.1");
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
   httpCheck.println("Connection: close\r\n");  
   // ODCZYT: kończymy, gdy ciało JSON jest KOMPLETNE — nie czekamy, aż serwer zamknie
