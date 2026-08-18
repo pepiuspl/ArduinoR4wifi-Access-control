@@ -214,6 +214,15 @@ bool oledConnected = false;
 #define HW_MAX_CARDS 200
 User users[HW_MAX_CARDS];
 bool isCardActive[HW_MAX_CARDS];
+// Harmonogramy kart trzymamy w RÓWNOLEGŁYCH tablicach, a nie w strukturze User —
+// User jest zapisywany do EEPROM-u w trybie awaryjnym pod offsetem 10 (10 rekordów
+// po 20 B), więc jej poszerzenie nadpisałoby tablicę isCardActive spod offsetu 220.
+// Na dysku harmonogram i tak mieszka w FsCard (LittleFS), gdzie pola już były.
+// W trybie awaryjnym (EEPROM) harmonogramów nie ma — karty działają jak dotąd.
+uint8_t  cardSchEnabled[HW_MAX_CARDS];
+uint8_t  cardSchDays[HW_MAX_CARDS];    // bitmaska: bit0=Niedziela … bit6=Sobota
+uint16_t cardSchStart[HW_MAX_CARDS];   // minuty od północy
+uint16_t cardSchEnd[HW_MAX_CARDS];
 int totalCards = 0;
 String pendingUsername = "Nowy Uzytkownik";  
 String globalDisplayInfo = "";  
@@ -436,6 +445,12 @@ void eepromLoadCards() {
   for (int i = 0; i < totalCards; i++) {
     EEPROM.get(10 + (i * sizeof(User)), users[i]);
     isCardActive[i] = (EEPROM.read(220 + i) != 0x00);
+    // Tryb awaryjny nie przechowuje harmonogramów — jawnie zerujemy, żeby karta
+    // nie odziedziczyła przypadkowej zawartości RAM i nie została błędnie odrzucona.
+    cardSchEnabled[i] = 0;
+    cardSchDays[i]    = 127;
+    cardSchStart[i]   = 0;
+    cardSchEnd[i]     = 1440;
   }
 }
 
@@ -451,7 +466,10 @@ void fsPersistCards() {
     memcpy(c.uid, users[i].uid, 4);
     strncpy(c.name, users[i].name, sizeof(c.name) - 1);
     c.active = isCardActive[i] ? 1 : 0;
-    c.schEnabled = 0; c.schDays = 127; c.schStart = 0; c.schEnd = 1440; // harmonogram: etap 2+
+    c.schEnabled = cardSchEnabled[i];
+    c.schDays    = cardSchDays[i];
+    c.schStart   = cardSchStart[i];
+    c.schEnd     = cardSchEnd[i];
     f.write((const uint8_t*)&c, sizeof(c));
   }
   f.close();
@@ -470,10 +488,38 @@ bool fsLoadCards() {
     memcpy(users[totalCards].uid, c.uid, 4);        // dopasowanie po 4 bajtach
     strncpy(users[totalCards].name, c.name, sizeof(users[totalCards].name) - 1);
     isCardActive[totalCards] = (c.active != 0);
+    cardSchEnabled[totalCards] = c.schEnabled;
+    cardSchDays[totalCards]    = c.schDays;
+    cardSchStart[totalCards]   = c.schStart;
+    cardSchEnd[totalCards]     = c.schEnd;
     totalCards++;
   }
   f.close();
   return true;
+}
+
+// --- Egzekwowanie harmonogramu karty (LOKALNIE, przed otwarciem) --------------
+// Wcześniej harmonogram istniał tylko w bazie i w UI: serwer go zapisywał, ale
+// centralka decydowała po samym UID, więc karta "tylko pn-pt 8-16" otwierała drzwi
+// zawsze. To była obietnica interfejsu bez pokrycia — tu jest jej realizacja.
+//
+// Czas nieznany (brak NTP po restarcie) => karta z harmonogramem NIE otwiera.
+// Świadomy wybór: fail-closed dotyka wyłącznie kart ograniczonych czasowo, więc
+// karta właściciela (bez harmonogramu) działa zawsze i nikt nie zostaje przed drzwiami.
+bool cardAllowedNow(int idx) {
+  if (idx < 0 || idx >= totalCards) return false;
+  if (!cardSchEnabled[idx]) return true;          // brak ograniczeń czasowych
+
+  time_t now; time(&now);
+  if (now < 100000000) {                          // zegar nieustawiony (brak NTP)
+    addLog("Odmowa: brak czasu [" + String(users[idx].name) + "]");
+    return false;
+  }
+  struct tm t; localtime_r(&now, &t);
+
+  if (!(cardSchDays[idx] & (1 << t.tm_wday))) return false;   // dzień poza harmonogramem
+  int minutesNow = t.tm_hour * 60 + t.tm_min;
+  return (minutesNow >= cardSchStart[idx] && minutesNow < cardSchEnd[idx]);
 }
 
 // Jedno wejście dla wszystkich mutacji: LittleFS gdy zamontowany, inaczej EEPROM.
@@ -514,6 +560,11 @@ void saveNewCard(byte* uid, String nameStr) {
   memcpy(users[totalCards].uid, uid, 4);
   nameStr.toCharArray(users[totalCards].name, 16);
   isCardActive[totalCards] = true;
+  // Nowa karta bez ograniczeń czasowych — harmonogram włącza dopiero aplikacja.
+  cardSchEnabled[totalCards] = 0;
+  cardSchDays[totalCards]    = 127;   // wszystkie dni
+  cardSchStart[totalCards]   = 0;
+  cardSchEnd[totalCards]     = 1440;
   totalCards++;
   persistCards();
 }
@@ -523,6 +574,12 @@ void deleteUser(int index) {
   for (int i = index; i < totalCards - 1; i++) {
     users[i] = users[i + 1];
     isCardActive[i] = isCardActive[i + 1];
+    // Harmonogramy MUSZĄ przesunąć się razem z kartami — inaczej po usunięciu
+    // jednej karty pozostałe odziedziczyłyby cudze okna czasowe.
+    cardSchEnabled[i] = cardSchEnabled[i + 1];
+    cardSchDays[i]    = cardSchDays[i + 1];
+    cardSchStart[i]   = cardSchStart[i + 1];
+    cardSchEnd[i]     = cardSchEnd[i + 1];
   }
   totalCards--;
   persistCards();
@@ -1224,7 +1281,36 @@ void handleWebServer() {
       delay(1); client.stop();
       blockTelemetry = false; return; 
     }  
-    else if (reqHeader.indexOf("/api/toggle_user_active") != -1) { 
+    // Harmonogram karty z serwera: /api/set_schedule?idx=&en=&days=&start=&end=&pass=
+    // Serwer wysyła to po każdej zmianie w aplikacji (jak rename/toggle/delete).
+    else if (reqHeader.indexOf("/api/set_schedule") != -1) {
+      auto argInt = [&](const String& key, int fallback) -> int {
+        int p = reqHeader.indexOf(key);
+        if (p == -1) return fallback;
+        p += key.length();
+        int e = reqHeader.indexOf("&", p);
+        int sp = reqHeader.indexOf(" ", p);
+        if (e == -1 || (sp != -1 && sp < e)) e = sp;
+        if (e == -1) return fallback;
+        return reqHeader.substring(p, e).toInt();
+      };
+      int targetIdx = argInt("idx=", -1);
+      if (targetIdx >= 0 && targetIdx < totalCards) {
+        cardSchEnabled[targetIdx] = argInt("en=", 0) ? 1 : 0;
+        int d = argInt("days=", 127);
+        cardSchDays[targetIdx]  = (uint8_t)(d < 0 ? 127 : (d > 127 ? 127 : d));
+        int s = argInt("start=", 0);
+        int en = argInt("end=", 1440);
+        cardSchStart[targetIdx] = (uint16_t)(s < 0 ? 0 : (s > 1440 ? 1440 : s));
+        cardSchEnd[targetIdx]   = (uint16_t)(en < 0 ? 0 : (en > 1440 ? 1440 : en));
+        persistCards();
+        addLog("Harmonogram slot [" + String(targetIdx) + "] " + (cardSchEnabled[targetIdx] ? "ON" : "OFF"));
+      }
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
+      delay(1); client.stop();
+      blockTelemetry = false; return;
+    }
+    else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
       int idxPos = reqHeader.indexOf("idx=");
       if (idxPos != -1) { 
         int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
@@ -2082,15 +2168,21 @@ void loop() {
             break; 
           } 
         } 
-        if (valid) { 
-          if (isCardActive[matchedIndex]) { 
-            openDoor(String(users[matchedIndex].name));
-          } else { 
+        if (valid) {
+          if (!isCardActive[matchedIndex]) {
             addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
-            playSound(SND_ACCESS_DENIED); 
+            playSound(SND_ACCESS_DENIED);
             for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
-          } 
-        } else { 
+          } else if (!cardAllowedNow(matchedIndex)) {
+            // Karta poprawna, ale poza swoim oknem czasowym — egzekwowane LOKALNIE.
+            addLog("Odmowa: Poza harmonogramem [" + String(users[matchedIndex].name) + "]");
+            globalDisplayInfo = "POZA HARMONOGRAMEM";
+            playSound(SND_ACCESS_DENIED);
+            for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
+          } else {
+            openDoor(String(users[matchedIndex].name));
+          }
+        } else {
           addLog("Odmowa: Nieznany [" + uidStr + "]");
           playSound(SND_ACCESS_DENIED); 
           for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }

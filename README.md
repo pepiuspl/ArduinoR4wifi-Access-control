@@ -152,7 +152,8 @@ Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `sys
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | POST | /api/auth/login | — | Login, returns JWT |
-| POST | /api/auth/register | — | Create account |
+| POST | /api/auth/register | — | Create account — **now creates it UNVERIFIED**, emails a 6-digit code, returns `{status:"code_sent"}`. Re-registering an unverified email re-sends a fresh code |
+| POST | /api/auth/verify_email | — | Redeem the 6-digit code → activates the account, sends the welcome email, returns a JWT (auto-login) |
 | POST | /api/auth/forgot_password | — | Password reset step 1 |
 | POST | /api/auth/verify_reset_code | — | Password reset step 2 |
 | POST | /api/auth/confirm_password_reset | — | Password reset step 3 |
@@ -160,7 +161,7 @@ Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `sys
 | GET | /api/unlock | JWT | Remote unlock (`?mac=` optional) |
 | GET | /api/toggle_learn | JWT | Toggle RFID learning mode |
 | POST | /api/settings/wifi | JWT | Change ESP32 WiFi credentials |
-| POST | /api/settings/auto_lock | JWT | Set auto-lock delay in seconds (1–60), takes effect on next poll, no restart |
+| POST | /api/devices/auto_lock | JWT | **Owner-only.** Set that device's auto-lock delay, `{mac, seconds}` (1–60). Stored in `devices.auto_lock_delay_ms`, pushed to the ESP32 in the poll response as `auto_lock_delay` (ms). *(An earlier draft of this doc listed `/api/settings/auto_lock` — that endpoint never existed; see §6.7.)* |
 | GET | /api/firmware/version | — | Latest GitHub release check |
 | GET | /api/ota/push | JWT | Push OTA update |
 | GET | /api/hardware/poll | — | ESP32 heartbeat/command poll — carries `?email=<owner_email>` every cycle (used for auto-provisioning) and returns command flags incl. `unlock`, `ota`, and `deregister` (owner-triggered EEPROM wipe → CTRLABLE_SETUP) |
@@ -182,7 +183,7 @@ Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `sys
 | GET | /api/devices/shared_users | JWT | Owner-only: list co-admins on a device |
 | POST | /api/devices/revoke_share | JWT | Owner-only: remove a co-admin |
 | GET | /api/logs/search | JWT | Filtered/paginated log search — `mac`, `category`, `q`, `from`, `to`, `limit`, `offset` |
-| POST | /api/user/rename / toggle_active / delete | JWT | Manage RFID cards **in the server's database** — see §5.8 for the EEPROM-sync caveat |
+| POST | /api/user/rename / toggle_active / delete | JWT | Manage RFID cards **in the server's database** (address by stable `id`; `idx` = hardware slot is only relayed to the device) — see §5.8 for the device-sync caveat |
 
 ---
 
@@ -195,6 +196,18 @@ psql_smartlock_db                          # alias, interactive session as admin
 ### 4.1 Key tables (as of this session)
 
 ```sql
+-- Accounts. NOTE: there is NO `CREATE TABLE accounts` anywhere in this repo — the base
+-- table was created out-of-band and is only ever referenced. Added columns therefore
+-- ship as `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` inside runSchemaMigrations().
+SELECT * FROM accounts;
+-- id, email, password_hash, privacy_policy_accepted_at, reset_token, reset_token_expires,
+-- push_token, push_entries, push_alarms,
+-- licensing:    license_tier, max_cards, max_pins, max_admins, max_devices,
+--               log_retention_days, guest_codes_enabled, pin_changes_per_month,
+--               license_valid_until, p24_customer_ref
+-- verification: email_verified (DEFAULT true → existing accounts are grandfathered;
+--               registration sets it false explicitly), email_verify_code, email_verify_expires
+
 -- Devices (multi-device: one account can own many; device_shares grants co-admin access)
 SELECT * FROM devices;
 -- mac_address (PK, no 'id' column!), account_id, device_name, last_known_ip,
@@ -218,7 +231,7 @@ SELECT * FROM keypad_pins;
 -- schedule_enabled, schedule_days (bitmask, bit0=Sun..bit6=Sat), schedule_start_minutes, schedule_end_minutes,
 -- expires_at, max_uses, use_count, is_guest_code
 
--- RFID cards (server-side record — see §5.7/5.8 for sync caveats with ESP32's own EEPROM)
+-- RFID cards (server-side record — see §5.7/5.8 for sync caveats with the ESP32's own card store)
 SELECT * FROM card_credentials;
 -- id, mac_address, holder_name, card_uid, is_active, hardware_slot_idx,
 -- schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
@@ -242,7 +255,8 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 | Function | GPIO | Notes |
 |---|---|---|
 | RELAY_PIN | 13 | See §5.6 — **actively driven, no floating.** HIGH=unlock, LOW=lock (idle). |
-| BUTTON_PIN | 33 | INPUT_PULLUP |
+| BUTTON_PIN | 33 | INPUT_PULLUP. Tap = open, hold 3 s = learning mode. **No longer does factory reset** — that moved to its own button |
+| RESET_BTN_PIN | 39 (VN) | **Dedicated FACTORY RESET button.** Input-only pin with **no internal pull-up → external 10 kΩ to 3.3 V is mandatory**, button to GND. Hold **3 s during normal operation** (OLED counts down, release = cancel) or **2 s while powering on** → wipes EEPROM + LittleFS and auto-restarts into `CTRLABLE_SETUP`. Note VN/VP are *not* power pins despite the names |
 | LED_GREEN | 25 | |
 | LED_RED | 26 | Now also flashes 2× on RFID card denial (unknown or blocked card) |
 | BUZZER_PIN | 27 | |
@@ -261,8 +275,26 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 ```
 **Must stay as the domain name, not a local IP.** Devices will eventually be field-deployed at customer sites, not on this LAN — a hardcoded local IP would only work here and break everywhere else.
 
-**TLS migration — DONE in firmware (Aug 13 2026), pending bench test.** All 8 outbound cloud calls now use `WiFiClientSecure` on port **443** through NPM (same path as the app), replacing plain-HTTP `WiFiClient` on 3000. Server identity is validated against a **pinned root CA** — `ROOT_CA_LE` holds the Let's Encrypt **ISRG Root X1** PEM (embedded) via `setCACert` — MITM-resistant; the LE leaf renews every ~90 days but the root is stable for years. Local AP/provisioning `server.accept()` clients are unchanged. Poll cadence relaxed 1 s → **2.5 s** and read deadlines widened, because a TLS handshake per poll is heavy.
-- **Bench-test on the dev device before closing port 3000** (§7.1 / hardening step #2): build + OTA, then verify poll (device "online"), keypad PIN, app unlock, and OTA all work over TLS. Only then remove the router's :3000 forward. A CA/chain problem shows up as every cloud call failing while offline RFID still works.
+**TLS migration — DONE and verified in the field (Aug 2026).** All outbound cloud calls use `WiFiClientSecure` on port **443** through NPM (same path as the app), replacing plain-HTTP `WiFiClient` on 3000. Server identity is validated against a **pinned root CA** — `ROOT_CA_LE` holds the Let's Encrypt **ISRG Root X1** PEM (embedded) via `setCACert` — MITM-resistant; the LE leaf renews every ~90 days but the root is stable for years. Local AP/provisioning `server.accept()` clients are unchanged. Poll, keypad PIN, app unlock and OTA are all confirmed working over TLS; port 3000 is closed at the router.
+
+Poll cadence is **1 s**, backing off to **8 s** after 3 consecutive failures. An earlier note here described 2.5 s with "widened read deadlines" — that approach is obsolete and was actively harmful; see §5.2b for why the read must end on a complete JSON body rather than on socket close.
+
+### 5.2b Dual-core split — **NEVER call TLS from `loop()`** (read before touching networking)
+
+A `WiFiClientSecure` handshake to the LE-signed host costs **1.5–4 s on ESP32**. Anything doing that inside `loop()` freezes core 1: LED stops blinking, OLED freezes, buzzer stutters, confirmations lag.
+
+**This was the root cause of the long-running "card reading takes 3–4 s" saga.** The RFID read itself was always instant — what lagged was `transmitCardPayloadToCloud()` running inline in `loop()` after every scan (`/api/hardware/scan` on each tap, `/api/hardware/register` while learning). The physical button had the same bug (the cloud log ran *before* `openDoor()`).
+
+Layout now:
+- **Core 1 (`loop`)** — RFID, relay, OLED, buzzer, keypad, button. Never blocks on the network.
+- **Core 0 (`networkTask`, 12 KB stack)** — every TLS call: poll, card-scan upload, button log, FS report.
+- Hand-off is one-way via `volatile` flags + plain globals: `req_unlock`, `req_ota`, `req_deregister`, `req_usernameUpdated`/`req_username`, `req_cardUpload` (+ `up_uid`/`up_name`/`up_slot`/`up_register`), `req_buttonLog`, `forceSyncNow`. Hardware actions are executed **only** by `loop()`.
+
+**Order inside `networkTask` matters:** poll **first** (it carries the `opened` lock state), then card upload, then button log. Each is a separate handshake, so putting uploads first delayed the open-state report by ~4 s — past the 3 s auto-lock window, so the app showed "Otwarto" only after the lock had already closed.
+
+**Poll timeouts must stay generous** — connect 4000 ms, handshake 6 s, I/O 6000 ms. They were once cut to 500 ms / 2 s / 250 ms (from the era when the poll blocked `loop()`); every poll then failed with `[NET] Serwer nie odpowiada`, and since **device registration happens only via the poll**, the device could never attach to an account.
+
+**Read the response until the JSON is complete, not until the socket closes.** With TLS, `connected()` stays true well after the body arrives, so a "wait for close" loop burns the whole deadline. A 6 s read window made each poll take ~6 s → remote unlock timed out, the device flapped offline for 15–20 s. The loop now counts braces and exits on the closing `}`; the deadline is only a backstop.
 
 ### 5.3 OTA update workflow
 1. Build `.bin` (Arduino IDE or GitHub Actions auto-build on push)
@@ -271,16 +303,31 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 4. Trigger from app: Firmware screen → Check for updates → Update
 5. **Client-facing OTA messages are now simplified** (server-side filtering in `/api/hardware/log`) — users see only 3 states: "Próba nawiązania połączenia...", "Aktualizacja w toku...", "Aktualizacja zakończona pomyślnie ✅". Raw technical detail (byte counts, headers) stays in the file log only.
 
-### 5.4 EEPROM layout
-| Address | Data |
-|---|---|
-| 0 | totalCards |
-| 10+ | User structs (RFID uid + name), 10 slots max |
-| 220+ | isCardActive flags, one byte per slot |
-| 260 | ssid |
-| 292 | pass |
-| 324 | owner_email |
-| 480 | installedReleaseId |
+**⚠️ Factory-reset trap — "app says you're on the newest firmware" when you are not.**
+`installedReleaseId` lives at EEPROM offset 480. `factoryResetSettings()` writes `0xFF` over all 512 bytes, so it reads back as **4294967295** — larger than any real GitHub release id. The comparison `latest > installed` is then always false, so OTA is never offered and the app reports "Jesteś na najnowszej wersji". It is self-locking: the firmware fix can only arrive by OTA, which is exactly what's blocked.
+**Fixed server-side (the durable fix):** any reported `release_id > 4_000_000_000` is treated as `0`, in **both** places — the `otaUpdateTrigger` comparison *and* where `actualLockStates[mac].deviceReleaseId` is stored (that is what `/api/data` feeds to the app's update screen; patching only the first is not enough), plus the stored fallback so a bogus value can't survive later polls.
+Firmware additionally writes `0` to offset 480 on factory reset and zeroes implausible ids at boot. After a USB flash the id is `0`, so one redundant OTA may be offered — acceptable.
+
+**The server only refreshes the GitHub "latest release" at startup, or when the app calls `/api/firmware/version`** (the "🔍 Sprawdź dostępność aktualizacji" button). It never polls GitHub in the background, so a fresh CI build stays invisible until one of those happens.
+
+### 5.4 On-device storage — LittleFS (cards) + EEPROM (config)
+
+**Cards no longer live in EEPROM.** They are stored in **LittleFS `/cards.db`** as fixed-length `FsCard` records (~40 B), capacity `HW_MAX_CARDS = 200`, loaded into `users[]`/`isCardActive[]` at boot. `/pins.db` (`FsPin`, ~73 B) is reserved for stage 2 (local PIN verification) and not used yet.
+
+**EEPROM (512 B) still holds the configuration** — and, in a degraded mode, cards:
+
+| Address | Data | Still current? |
+|---|---|---|
+| 250 | `0x55` magic — "device is configured" | ✅ |
+| 260 | ssid | ✅ |
+| 292 | pass | ✅ |
+| 324 | owner_email | ✅ |
+| 480 | installedReleaseId | ✅ — **factory-reset trap, see §5.3** |
+| 0 / 10+ / 220+ | totalCards / `User` structs / isCardActive flags | ⚠️ **fallback only** — used when LittleFS fails to mount, capped at 10 cards |
+
+**Degradation is deliberate:** if `LittleFS.begin()` fails, `fsMounted = false` and the firmware falls back to the old EEPROM path (10-card cap) instead of losing cards entirely — a lock must never lose its credentials. `persistCards()` dispatches to whichever store is active; on first boot with an existing EEPROM card set it migrates them into `/cards.db` (`[FS] Migracja kart EEPROM->LittleFS`).
+
+`factoryResetSettings()` clears **both**: `0xFF` across all 512 EEPROM bytes (plus `totalCards = 0`, and `0` written back to offset 480) **and** removal of `/cards.db` + `/pins.db`.
 
 ### 5.5 Compiling
 - Board: ESP32 Dev Module, core 3.3.10
@@ -312,14 +359,33 @@ void relayDeactivate() { // lock (idle)
 **If reliability issues return** (module swapped again, or this one degrades) — the diagnostic method that worked: multimeter directly on the relay's IN pin (not through the ESP32), testing 3.3V / GND / true-floating (bare wire, disconnected) as three separate conditions, observing the physical lock state (not just the relay board's own LEDs, which can be misleading). If GPIO-level 3.3V logic genuinely can't reach the module's actual energization threshold, the only real fix is a transistor buffer (NPN, base via 1kΩ from GPIO, collector to IN, emitter to GND, pull-up resistor from IN to the relay module's own supply rail) — this was scoped but not implemented, since the active-HIGH/LOW combination above tested as sufficient.
 
 ### 5.7 RFID architecture — important correction
-**RFID card matching and the unlock decision happen LOCALLY on the ESP32, from its own EEPROM** (`memcmp` against `users[]` array) — **not** server-verified like keypad PINs. `transmitCardPayloadToCloud()` / `/api/hardware/scan` is a fire-and-forget report to the server for logging/push-notification purposes only; it does not gate the physical unlock.
+**RFID card matching and the unlock decision happen LOCALLY on the ESP32, from its own card store** (`memcmp` against the `users[]` array, loaded at boot from LittleFS `/cards.db` — see §5.4) — **not** server-verified like keypad PINs. `transmitCardPayloadToCloud()` / `/api/hardware/scan` is a fire-and-forget report to the server for logging/push-notification purposes only; it does not gate the physical unlock.
 
-**Practical consequence:** the RFID scheduling feature (`/api/user/update_schedule`, enforced in `/api/hardware/scan`) only affects what the *server* logs and whether it queues a push notification — it does **not** actually block the physical door from opening if the card is a match in EEPROM. True RFID schedule enforcement would require the firmware to either sync schedule data locally and check it before calling `openDoor()`, or change the architecture so the ESP32 waits for server permission before opening (network-dependent, undesirable for offline reliability). **This is an open item, not yet built** — flagged in the missing-features PDF as "requires firmware changes."
+**RFID schedules are now enforced locally (Aug 18 2026) — this used to be a real gap.** Previously `/api/user/update_schedule` wrote the schedule to the database and the app displayed it, but the ESP32 decided on UID alone, so a card restricted to "Mon–Fri 8–16" opened the door at any hour. The UI promised access control the product did not deliver.
 
-### 5.8 EEPROM ↔ database sync — known fragility
-Because RFID matching is local (§5.7), the ESP32's own EEPROM card list and the server's `card_credentials` table are **two independent copies** that can drift out of sync — confirmed to happen in practice (a card named "Tomasz 2" existed in EEPROM, fully functional for physical unlock, while completely absent from the server database and invisible in the app).
+How it works now:
+- Schedules live on the device in `FsCard` (LittleFS) — the fields already existed and were written as zeros. In RAM they are kept in **parallel arrays** (`cardSchEnabled/Days/Start/End`), deliberately *not* inside `struct User`: `User` is what the EEPROM fallback writes at offset 10 (10 × 20 B), so widening it would overrun the `isCardActive` flags at offset 220.
+- The server **relays** every schedule change to the device via `/api/set_schedule?idx=&en=&days=&start=&end=&pass=` (same `syncMutationToHardware` pattern as rename/toggle/delete). `idx` is the **hardware slot**, not the DB id (§5.8).
+- `cardAllowedNow(idx)` is checked before `openDoor()`. Denial logs `Odmowa: Poza harmonogramem` and shows `POZA HARMONOGRAMEM` on the OLED.
+- **Unknown clock = deny, for scheduled cards only.** If NTP hasn't set the time (`now < 100000000`), a card with a schedule is refused (`Odmowa: brak czasu`). Fail-closed is safe here precisely because it touches *only* time-restricted cards — an owner card without a schedule always works, so nobody gets locked out by a failed NTP sync.
+- `deleteUser()` shifts the schedule arrays along with the cards; without that, deleting one card would hand its neighbours the wrong time windows.
+- **EEPROM fallback mode carries no schedules** (no room) — cards there behave as unrestricted, and the arrays are explicitly reset on load so stale RAM can't refuse a card.
 
-Causes: learning a card while the server connection is down (EEPROM write succeeds, cloud registration silently fails); deleting/renaming via the app updates the database and *attempts* to relay to the ESP32's local endpoints, but if that relay fails, or if the `idx` used doesn't correspond to the same row on both sides (array-position-based addressing, not a stable ID), the two can end up different.
+**Known limitation:** schedules reach the device only when they are *changed* in the app. Cards whose schedule was set before this feature existed — or a device that has been factory-reset — need the schedule re-saved once to push it down. There is no full reconciliation pass yet (same class of drift as §5.8).
+
+### 5.8 Device ↔ database sync — known fragility
+Because RFID matching is local (§5.7), the ESP32's own card store (LittleFS `/cards.db`, §5.4) and the server's `card_credentials` table are **two independent copies** that can drift out of sync — confirmed to happen in practice (a card named "Tomasz 2" existed on the device, fully functional for physical unlock, while completely absent from the server database and invisible in the app).
+
+Causes: learning a card while the server connection is down (the local write succeeds, cloud registration silently fails); deleting/renaming via the app updates the database and *attempts* to relay to the ESP32's local endpoints, but if that relay fails the two can end up different.
+
+**The `idx` ambiguity is fixed (Aug 17 2026) — it used to corrupt data, not just drift.** `/api/data` returned `idx = hardware_slot_idx` (the EEPROM/LittleFS slot), while every mutation endpoint did `cards.rows[idx]`, treating it as an **array position** in an `ORDER BY id ASC` list. Those agree only by coincidence: after resets or re-enrollment several cards shared the same (or NULL) slot, so **rename / toggle-active / delete could hit the wrong card**, and the app rendered duplicate React keys (two inline editors opening at once).
+Now `card_credentials.id` is the single identity: `/api/data` returns both `id` (stable, used for keys and mutations) and `idx` (hardware slot, used **only** when relaying to the device). Server-side `resolveCardRow(mac, body)` prefers `body.id` and falls back to `body.idx` for older app builds; `cardHwSlot()` picks the slot to send to the firmware (computed *before* the row is deleted). Applied to rename, update_schedule, toggle_active and delete.
+
+**Duplicate enrollment is fixed too:** `saveNewCard()` had no UID check, so re-presenting the same fob in learning mode appended another slot (2 fobs produced 7 entries). It now matches by UID and updates the existing record.
+
+**Card names are capped at ~15 bytes** — the RAM/EEPROM `User` struct is `char name[16]` and Polish UTF-8 characters take 2 bytes ("Nowy Użytkownik" → "Nowy Użytkowni"). It cannot simply be widened: 10 EEPROM records with a longer name would overrun the `isCardActive` flags at offset 220 within the 512-byte EEPROM. `FsCard` (LittleFS) already reserves `name[24]`, but the in-RAM struct still caps it.
+
+**Card naming only started working on Aug 17 2026.** The "new profile name" field wrote to `newName`, but `handleToggleLearn()` called `executeCommand('/api/toggle_learn')` with no parameters, so the name was silently dropped and every card became "Nowy Użytkownik". `/api/toggle_learn` is a **GET** (the helper only POSTs when handed a payload), so the name has to ride in the URL: `?username=...` → `learningQueues[mac]` → poll response `username` → firmware `req_username` → `pendingUsername`.
 
 **To inspect the ESP32's actual EEPROM state directly** (bypasses the cloud/database entirely):
 ```bash
@@ -338,7 +404,13 @@ To delete a stray local-only EEPROM entry directly:
 ```bash
 curl -s 'http://192.168.0.76/api/delete_user?idx=<N>&pass=<factory-password>'
 ```
-**Recommended clean-resync procedure** if the two get out of sync: clear the EEPROM entries via the local endpoint above, confirm `total:0`, then re-learn the card fresh through the app — this writes to both sides simultaneously and keeps them matched.
+**Recommended clean-resync procedure** if the two get out of sync: clear the device-side entries via the local endpoint above, confirm `total:0`, then re-learn the card fresh through the app — this writes to both sides simultaneously and keeps them matched. (These local endpoints address cards by **hardware slot**, which is exactly the ambiguity described above — prefer the app, and use them only for inspection or when the app can't reach the device.)
+
+For a genuinely clean slate, the physical factory reset (§5.1) plus deleting that MAC's rows server-side is more reliable than reconciling by hand:
+```sql
+DELETE FROM card_credentials WHERE mac_address='<MAC>';
+DELETE FROM keypad_pins      WHERE mac_address='<MAC>';
+```
 
 ### 5.9 RFID antenna gain
 ```cpp
@@ -352,8 +424,10 @@ The local setup page (`http://192.168.4.1` in `CTRLABLE_SETUP` AP mode) does **n
 client.println("<input type='password' id='wifi_pass' name='p' placeholder='Password' required>");
 ```
 
-### 5.11 Deregistration command (owner-triggered EEPROM wipe)
-Every poll response is parsed for `"deregister":true` (alongside `unlock`/`ota`/`learn`). When set, the firmware runs the existing `factoryResetSettings()` (writes 0xFF over the whole 512-byte EEPROM + `totalCards=0`) then `ESP.restart()`. On reboot `loadConfiguration()` finds no `0x55` magic at addr 250 → `provisioningMode = true` → `CTRLABLE_SETUP`. This wipes **config data only** (WiFi 260/292, owner_email 324, RFID cards 0/10+/220+) — the program flash is separate and untouched. The server sends `deregister:true` only during the 120 s window after an owner confirms deregistration (§3.6, §6.11), and blocks auto-re-registration during that window so the wiped device can't immediately re-add itself. **This command handling must be present in the deployed firmware** — build + OTA after changing it.
+### 5.11 Deregistration command (owner-triggered device wipe)
+Every poll response is parsed for `"deregister":true` (alongside `unlock`/`ota`/`learn`). When set, the firmware runs `factoryResetSettings()` then `ESP.restart()`. On reboot `loadConfiguration()` finds no `0x55` magic at addr 250 → `provisioningMode = true` → `CTRLABLE_SETUP`. This wipes **stored data only** — 0xFF across the 512-byte EEPROM (WiFi, owner_email, release id, legacy card fallback) **plus** LittleFS `/cards.db` and `/pins.db`; the program flash is separate and untouched.
+
+**A deregister only reaches a device that is online and polling.** A device sitting in `CTRLABLE_SETUP`, or one that can't reach the server, never receives the flag — use the physical reset button (§5.1) instead. Likewise a factory-reset, unprovisioned device blocks in the provisioning `while(true)` loop and never starts `networkTask`, so it sends **no poll and no remote log at all**: total silence server-side is expected until it is provisioned, not a fault. The server sends `deregister:true` only during the 120 s window after an owner confirms deregistration (§3.6, §6.11), and blocks auto-re-registration during that window so the wiped device can't immediately re-add itself. **This command handling must be present in the deployed firmware** — build + OTA after changing it.
 
 ---
 
@@ -390,8 +464,32 @@ lxc.mount.entry: /dev/net dev/net none bind,create=dir
 ```
 Then `pct stop <CTID> && pct start <CTID>`.
 
-### 6.3 Multi-device support
-- The device panel/switcher (`🏠 <name> · Zmień ›`) appears on the dashboard whenever the account has **≥1** device (lowered from ">1" so a single-device owner can also rename/manage it). With multiple devices it also switches the active one.
+### 6.2b Onboarding flow — account first, device second (redesigned Aug 17 2026)
+
+Order is dictated by networking: account steps need the internet, while configuring the device needs the phone joined to `CTRLABLE_SETUP` (which has none). So the account must exist **before** you connect to the AP.
+
+```
+Start → "Jak uruchomić centralkę?"
+  ├─ 🔌 Offline (local) ──────────────────────────────► Device init (CTRLABLE_SETUP → local mode, no account)
+  └─ ☁️ Online → "Masz konto?"
+        ├─ Mam konto → Login ─────────────┐
+        └─ Nowe konto → Register (RODO checkboxes) → 6-digit code screen → activated ┤
+                                                                                     ▼
+                                    Device init (CTRLABLE_SETUP → home WiFi + account email)
+```
+
+- **The firmware no longer creates accounts.** The app sends an **empty `reg_pass`**, so the firmware's `if (decodedRegPass.length() > 0)` block (which used to POST `/api/auth/register` itself) is skipped. It still stores `owner_email` and sends it in every poll — that is what attaches the device to the account.
+- **No fake auto-WiFi.** Expo Go cannot switch networks, so the "connect" step shows step-by-step instructions plus an "Otwórz ustawienia Wi-Fi" shortcut, and only then validates with a real `fetch('http://192.168.4.1/')`. The earlier simulated `NEHotspotConfiguration` dialog just failed silently.
+- **Config send is probed first.** The app pings `192.168.4.1` before submitting; without it the request went nowhere while the UI still claimed success (see below).
+- **"Konfiguracja wysłana ✓" is reported for both success and failure — on purpose.** `WiFi.begin()` moves the SoftAP to the home network's channel, so the phone drops off `CTRLABLE_SETUP` and the HTTP reply almost never arrives even though the GET landed and settings were saved. Real confirmation is the device appearing in the list.
+- **The account email must be persisted.** Switching the phone to `CTRLABLE_SETUP` breaks the Metro connection, so Expo Go reloads the bundle: the JWT survived (AsyncStorage) but the in-memory `email` state did not, and the device was provisioned with an **empty owner email** → it polled forever with `email=''` and never registered. It is now stored under `@lock_account_email` at login/verification, restored on boot, cleared on logout, and the send is hard-blocked when missing.
+
+### 6.3 Multi-device support — the "🏠 Centralki" module (restructured Aug 17 2026)
+
+**All device management lives in one screen** (`currentScreen === 'devices'`), reached from the drawer. It replaced the old "➕ Dodaj centralkę" menu entry, and absorbed the management controls that used to be scattered across the dashboard switcher and Settings. Per device it offers: name, online status, mode, MAC + firmware version, active/select marker, and — for owners — **auto-lock presets (§6.7)**, **rename**, and a jump to **Administratorzy**. At the top: "➕ Dodaj nową centralkę" (re-enters the provisioning flow with the session kept) and "🔑 Mam kod zaproszenia". Shared (non-owned) devices are listed without owner controls.
+
+**The dashboard is deliberately minimal:** the switcher now appears only with **>1** device (nothing to switch with one) and does exactly one thing — pick which centralka the remote-unlock button targets. Its modal no longer carries rename/admin buttons; it links to the Centralki module instead.
+
 - Adding a device needs **no firmware changes** — same `.ino`, provisioned via `CTRLABLE_SETUP`, registered to the same account email.
 - **Rename** (owner-only): "✏️ Zmień nazwę" on the device card → cross-platform `TextInput` modal (was `Alert.prompt`, iOS-only). Any name, e.g. "Garaż". Server `/api/devices/rename` enforces owner via `account_id`; co-admins don't see the button.
 - **Hard removal** is now the deregistration flow in Settings — see §6.11. (The old switcher "🗑️ soft remove" and its `/api/devices/remove` endpoint were both removed: they only deleted the DB row, but the ESP32 re-registers on its next poll because it sends `?email=` every cycle.)
@@ -425,10 +523,17 @@ Web-rendered (not a deep link) because the app runs on Expo Go, where custom-sch
 - Search mode: free-text search, category chips (🚪 Wejścia, ⚠️ Bezpieczeństwo, ⚙️ Konfiguracja, 🔄 Aktualizacje), date range, pagination ("Załaduj więcej").
 - Old log entries predating the categorization migration show as uncategorized (grey dot) — expected, not a bug.
 
-### 6.7 Configurable auto-lock delay
-- Settings screen → "⏱ Opóźnienie auto-blokady" — numeric input (1–60s) + Save.
-- Takes effect on the ESP32's **next poll cycle** (≤1s), no device restart needed.
-- Firmware reads `auto_lock_delay` from every poll response; falls back to 3000ms default if absent/invalid.
+### 6.7 Configurable auto-lock delay — **per device** (implemented for real Aug 17 2026)
+
+> **This section previously described a feature that never worked.** It documented a numeric input in Settings and an endpoint `/api/settings/auto_lock` — neither existed. Only the firmware half was present, and even that was broken (see the off-by-one below). Treat the old text as a warning about documenting intent as if it were shipped.
+
+- **Where:** 🏠 **Centralki** module → each owned device has its own preset row **3s / 5s / 10s / 15s / 30s**. Not in Settings, and not account-wide: a gate needs longer than a front door.
+- **Owner-only** (like rename / WiFi). Co-admins can unlock and manage cards/PINs but not change lock parameters, so the control isn't rendered for them.
+- **Storage:** `devices.auto_lock_delay_ms` (default 3000). `/api/data` exposes it as `autoLockSeconds` both for the active device and per entry in the `devices` list.
+- **Delivery:** the poll response carries `auto_lock_delay` (ms); the ESP32 applies it on the next cycle, no restart. Firmware clamps to 1000–60000 ms and keeps 3000 ms if absent/invalid.
+- **Presets instead of a free numeric field** — makes out-of-range values unrepresentable rather than silently rejected by the firmware.
+- **Firmware off-by-one (fixed):** the parser advanced by **19** characters past `"auto_lock_delay":`, but that key is **18** long — so it dropped the value's first digit (`10000` → `"0000"` → `0`), failed the `>= 1000` check, and silently kept 3 s. The bug sat dormant for as long as the server never sent the field. The length is now derived from the key, not hardcoded.
+- Practical side effect: a longer window (5–10 s) also makes the app's "Otwarto" state comfortably visible, since the event no longer lasts less than the network round-trip.
 
 ### 6.8 Push notifications
 - Now fire on **successful** unlock via all three paths (keypad PIN, RFID card, remote app unlock) — previously only fired on denied/failed attempts.
@@ -451,7 +556,7 @@ npx expo start
 Use `cmd.exe`, not PowerShell, if `npm` is blocked by execution policy. Press `w` for web (needs `npx expo install react-dom react-native-web` first), or scan the QR with Expo Go on a phone on the same WiFi.
 
 ### 6.11 Device deregistration (hard removal) — Settings → "⚠️ Strefa zaawansowana"
-Owner-only, per selected device, two-step with an emailed 6-digit code (the section only renders when the active device's `isOwner` is true). Flow: "🔌 Odłącz i zresetuj centralkę" → `deregister_request` emails a code → enter code → `deregister_confirm`. On confirm the server deletes the device and **all its data** (keypad PINs, cards, logs, co-admin shares) and commands the ESP32 (via poll `deregister:true`) to run `factoryResetSettings()` — wiping **EEPROM only** (WiFi + owner_email + RFID cards); the **firmware/program flash is untouched**. The device reboots into `CTRLABLE_SETUP`; reconnecting means re-provisioning it as new. See §3.6 for the endpoints and §5.11 for the firmware side. **Requires the updated firmware (OTA) to work** — old firmware ignores `deregister` and simply re-registers after the 120 s block.
+Owner-only, per selected device, two-step with an emailed 6-digit code (the section only renders when the active device's `isOwner` is true). Flow: "🔌 Odłącz i zresetuj centralkę" → `deregister_request` emails a code → enter code → `deregister_confirm`. On confirm the server deletes the device and **all its data** (keypad PINs, cards, logs, co-admin shares) and commands the ESP32 (via poll `deregister:true`) to run `factoryResetSettings()` — wiping **stored data only** (EEPROM: WiFi + owner_email + release id; LittleFS: `/cards.db`, `/pins.db`); the **firmware/program flash is untouched**. The device reboots into `CTRLABLE_SETUP`; reconnecting means re-provisioning it as new. See §3.6 for the endpoints and §5.11 for the firmware side. **Requires the updated firmware (OTA) to work** — old firmware ignores `deregister` and simply re-registers after the 120 s block.
 
 ---
 
@@ -579,10 +684,11 @@ Going forward, deploy the app entry directly as `App.js`. Also ensure the pm2 pr
 
 ## 9. Known Open Items (not yet built — see also the standalone roadmap PDF)
 
-- **RFID schedule/expiry enforcement doesn't actually gate physical access** (§5.7) — the UI and server-side plumbing exist, but the ESP32 makes its own local decision from EEPROM regardless. Needs either firmware-side schedule sync + local enforcement, or an architecture change to make RFID server-mediated like keypad (network-dependency tradeoff).
+- **RFID schedule enforcement — DONE (Aug 18 2026, §5.7).** Schedules sync to the device and are checked locally before unlocking. Remaining gap: they are pushed only when changed in the app, so pre-existing schedules (or a factory-reset device) need one re-save; there is no reconciliation sweep yet.
 - ~~**ESP32 firmware transport is unencrypted HTTP**~~ — **migrated to TLS in firmware (Aug 13 2026, §5.2):** `WiFiClientSecure` on 443 through NPM, root-CA pinned. ISRG Root X1 PEM is embedded in `ROOT_CA_LE`. Remaining to fully close this out: (a) bench-test all cloud paths over TLS, (b) then remove the router's port-3000 forward (hardening step #2).
 - **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
-- **LittleFS storage migration + local PIN verification** (in progress, Aug 13 2026) — moving cards/PINs/logs off the 512 B EEPROM to LittleFS on internal flash, adding local (offline) PIN verification (PBKDF2 hash) and a two-axis limit model (hardware floor vs per-account license). **LittleFS is in the ESP32 core and the default `esp32:esp32:esp32` partition scheme (used by the arduino-cli CI build) already has a `spiffs` partition — so it deploys via normal OTA, no partition change / USB / re-provision expected.** `partitions.csv` is only a fallback if `LittleFS.begin()` fails the boot self-test. Full model in `LICENSING.md`. Stage 1a done: LittleFS mount + self-test at boot (`initStorage()`), non-invasive.
+- **LittleFS card storage — DONE (Aug 17 2026), verified on hardware** (`[FS] LittleFS OK … selftest=PASS`). Cards live in `/cards.db`, cap raised 10 → **200**, with EEPROM fallback if the mount fails (§5.4). It deployed over normal OTA as predicted — the default `esp32:esp32:esp32` partition scheme already has a `spiffs` partition, so no partition change / USB / re-provision was needed; `partitions.csv` remains an unused fallback.
+- **Local (offline) PIN verification — STILL OPEN** (stage 2). PINs are verified server-side, so they don't work offline and the check is one of the last blocking TLS calls left in `loop()` (§5.2b). Plan: PBKDF2-HMAC-SHA256 hashes in `/pins.db` (struct already defined and sized). Full model in `LICENSING.md`.
 - **Offline license key (future idea)** — for the "many users, zero cloud, willing to pay" niche: a one-time **signed** license key entered at provisioning that raises the offline-standalone cap **without a server** (firmware validates the signature). Lets the no-cloud brand serve >2-user private clients. Not built; recorded so it isn't lost (`LICENSING.md`).
 - ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
 - Other roadmap items (2FA, data export/deletion, activity-log-triggered features beyond current search, etc.) — see the separate features PDF generated earlier.

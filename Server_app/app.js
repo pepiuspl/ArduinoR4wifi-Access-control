@@ -130,7 +130,9 @@ export default function App() {
     // serwer zapisał kod dla właściwej centralki (bez tego trafiłby na pierwszą).
     if (!isLocalMode && selectedMac) payload.mac = selectedMac;
 
-    if (kpMode === 'guest') {
+    // Tryb gościnny tylko gdy pakiet go obejmuje — inaczej wysyłamy zwykły PIN
+    // (UI i tak jest wyszarzone; to zabezpieczenie na wypadek zmiany pakietu w tle).
+    if (kpMode === 'guest' && (isLocalMode || lockState.entitlements?.guestCodes !== false)) {
       const days = parseInt(kpGuestExpiryDays, 10);
       if (!days || days < 1) { setKpStatus('Podaj liczbę dni ważności (min. 1)'); return; }
       const expiryDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
@@ -782,12 +784,21 @@ export default function App() {
         },
         body: finalPayload ? JSON.stringify(finalPayload) : undefined
       })
-        .then((res) => {
-          if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+        .then(async (res) => {
+          if (!res.ok) {
+            // Serwer odsyła KONKRETNY powód (np. limit pakietu: 403 z {error, limit, used, tier}).
+            // Wcześniej wszystko lądowało pod „Nie udało się wysłać komendy do centralki",
+            // co sugerowało awarię sprzętu, choć realnie chodziło o limit licencji.
+            const data = await res.json().catch(() => ({}));
+            const err = new Error(data.error || `Błąd serwera (HTTP ${res.status})`);
+            err.isLimit = res.status === 403 && (data.limit !== undefined || data.feature !== undefined);
+            throw err;
+          }
           fetchStatus();
         })
-        .catch(() => {
-          Alert.alert('Błąd', 'Nie udało się wysłać komendy do centralki.');
+        .catch((e) => {
+          const msg = e?.message || 'Nie udało się wysłać komendy do centralki.';
+          Alert.alert(e?.isLimit ? 'Limit pakietu' : 'Błąd', msg);
         });
     }
   };
@@ -1812,24 +1823,64 @@ export default function App() {
     <Text style={styles.screenHeaderText}>👥 Lista Użytkowników</Text>
 
     {/* 🌟 SEKCJA PAROWANIA PRZENIESIONA TUTAJ */}
-    <View style={styles.card}>
+    {/* Limit kart z pakietu jest widoczny ZAWCZASU: przy komplecie kart moduł jest
+        wyszarzony i tłumaczy powód, zamiast pozwolić kliknąć i zwrócić błąd 403.
+        Usunięcie karty automatycznie odblokowuje dodawanie. */}
+    {(() => {
+      const maxCards = lockState.entitlements?.maxCards;
+      const cardsFull = !isLocalMode && maxCards != null && lockState.total >= maxCards;
+      const isLearning = lockState.mode === 'Uczenie';
+      return (
+    <View style={[styles.card, cardsFull && !isLearning ? { opacity: 0.55 } : null]}>
       <Text style={styles.sectionHeader}>Dodawanie nowej karty</Text>
-      {lockState.mode === 'Uczenie' ? (
+
+      {cardsFull && !isLearning && (
+        <View style={{ backgroundColor: '#2a1a1a', borderRadius: 8, borderWidth: 1, borderColor: '#5c2b2b', padding: 12, marginBottom: 12 }}>
+          <Text style={{ color: '#ffb300', fontWeight: 'bold', fontSize: 13, marginBottom: 4 }}>
+            Limit kart wyczerpany ({lockState.total}/{maxCards})
+          </Text>
+          <Text style={{ color: '#aaa', fontSize: 12, lineHeight: 17 }}>
+            Twój pakiet {lockState.entitlements?.tier === 'free' ? 'darmowy' : lockState.entitlements?.tier} obejmuje {maxCards} {maxCards === 1 ? 'kartę' : 'karty'}.
+            Usuń jedną z listy poniżej, aby dodać inną — albo zwiększ pakiet.
+          </Text>
+          <TouchableOpacity style={{ marginTop: 10 }} onPress={() => { navigateTo('pakiet'); loadLicense(); }}>
+            <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 12 }}>💳 Zobacz pakiety ›</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {isLearning ? (
         <Text style={styles.learningAlertText}>⚠️ Urządzenie oczekuje na zbliżenie fizycznego klucza RFID do czytnika...</Text>
       ) : (
-        <TextInput style={styles.inputField} placeholder="Nazwa nowego profilu (np. Jan Kowalski)" placeholderTextColor="#555" value={newName} onChangeText={setNewName} />
+        <TextInput
+          style={[styles.inputField, cardsFull ? { color: '#666' } : null]}
+          placeholder="Nazwa nowego profilu (np. Jan Kowalski)"
+          placeholderTextColor="#555"
+          editable={!cardsFull}
+          value={newName}
+          onChangeText={setNewName}
+        />
       )}
       <TouchableOpacity
-        style={[styles.secondaryBtn, lockState.mode === 'Uczenie' ? { backgroundColor: '#cc3333' } : { backgroundColor: '#333' }]}
+        style={[styles.secondaryBtn, isLearning ? { backgroundColor: '#cc3333' } : { backgroundColor: cardsFull ? '#242424' : '#333' }]}
         onPress={handleToggleLearn}
+        disabled={cardsFull && !isLearning}
       >
-        <Text style={styles.btnText}>{lockState.mode === 'Uczenie' ? '🛑 Wyłącz Wykrywanie Czytnika' : 'Uruchom Tryb Uczenia'}</Text>
+        <Text style={[styles.btnText, cardsFull && !isLearning ? { color: '#777' } : null]}>
+          {isLearning ? '🛑 Wyłącz Wykrywanie Czytnika' : (cardsFull ? '🔒 Limit kart osiągnięty' : 'Uruchom Tryb Uczenia')}
+        </Text>
       </TouchableOpacity>
     </View>
+      );
+    })()}
 
     {/* LISTA UŻYTKOWNIKÓW */}
     <View style={styles.card}>
-      <Text style={styles.sectionHeader}>Zarejestrowane Karty ({lockState.total}/10)</Text>
+      {/* Licznik pokazuje limit z PAKIETU (nie zaszyte „/10" z czasów EEPROM-u —
+          urządzenie mieści 200 kart, a realnie wiąże licencja). */}
+      <Text style={styles.sectionHeader}>
+        Zarejestrowane Karty ({lockState.total}{lockState.entitlements?.maxCards != null ? `/${lockState.entitlements.maxCards}` : ''})
+      </Text>
               {/* Klucz i mutacje po STABILNYM user.id (nie po slocie sprzętowym!).
                   Wcześniej key={user.idx} powodował duplikaty kluczy React (dwa edytory
                   naraz) i mutacje trafiające w niewłaściwą kartę. Fallback na idx dla
@@ -1945,9 +1996,37 @@ export default function App() {
                 {keypadPins.length === 0 && (
                   <Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginBottom: 12 }}>Brak skonfigurowanych PINów</Text>
                 )}
-                {keypadPins.length < 20 && (
+                {/* Limit PIN-ów bierzemy z PAKIETU (dawniej zaszyte 20). Przy komplecie
+                    pokazujemy powód zamiast chować formularz bez wyjaśnienia. */}
+                {(() => {
+                  const maxPins = lockState.entitlements?.maxPins;
+                  const pinsFull = !isLocalMode && maxPins != null && keypadPins.length >= maxPins;
+                  if (!pinsFull) return null;
+                  return (
+                    <View style={{ backgroundColor: '#2a1a1a', borderRadius: 8, borderWidth: 1, borderColor: '#5c2b2b', padding: 12, marginTop: 8 }}>
+                      <Text style={{ color: '#ffb300', fontWeight: 'bold', fontSize: 13, marginBottom: 4 }}>
+                        Limit PIN-ów wyczerpany ({keypadPins.length}/{maxPins})
+                      </Text>
+                      <Text style={{ color: '#aaa', fontSize: 12, lineHeight: 17 }}>
+                        Usuń istniejący PIN, aby dodać nowy — albo zwiększ pakiet.
+                      </Text>
+                      <TouchableOpacity style={{ marginTop: 10 }} onPress={() => { navigateTo('pakiet'); loadLicense(); }}>
+                        <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 12 }}>💳 Zobacz pakiety ›</Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })()}
+
+                {(isLocalMode || lockState.entitlements?.maxPins == null || keypadPins.length < lockState.entitlements.maxPins) && (
                   <>
-                    <View style={{ flexDirection: 'row', marginTop: 8, marginBottom: 12, backgroundColor: '#0f0f11', borderRadius: 8, padding: 4 }}>
+                    {/* Kody gościnne to funkcja PŁATNA (Silver+). Na pakiecie darmowym
+                        zakładka jest wyszarzona i od razu tłumaczy dlaczego — klient nie
+                        dowiaduje się o tym dopiero po wypełnieniu formularza. */}
+                    {(() => {
+                      const guestAllowed = isLocalMode || lockState.entitlements?.guestCodes !== false;
+                      return (
+                    <>
+                    <View style={{ flexDirection: 'row', marginTop: 8, marginBottom: guestAllowed ? 12 : 6, backgroundColor: '#0f0f11', borderRadius: 8, padding: 4 }}>
                       <TouchableOpacity
                         style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: kpMode === 'normal' ? '#1a3a5c' : 'transparent', alignItems: 'center' }}
                         onPress={() => setKpMode('normal')}
@@ -1955,12 +2034,30 @@ export default function App() {
                         <Text style={{ color: kpMode === 'normal' ? '#fff' : '#666', fontWeight: 'bold', fontSize: 13 }}>Stały PIN</Text>
                       </TouchableOpacity>
                       <TouchableOpacity
-                        style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: kpMode === 'guest' ? '#5c33cf' : 'transparent', alignItems: 'center' }}
-                        onPress={() => setKpMode('guest')}
+                        style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: (guestAllowed && kpMode === 'guest') ? '#5c33cf' : 'transparent', alignItems: 'center', opacity: guestAllowed ? 1 : 0.45 }}
+                        onPress={() => guestAllowed && setKpMode('guest')}
+                        disabled={!guestAllowed}
                       >
-                        <Text style={{ color: kpMode === 'guest' ? '#fff' : '#666', fontWeight: 'bold', fontSize: 13 }}>👤 Kod gościnny</Text>
+                        <Text style={{ color: guestAllowed ? (kpMode === 'guest' ? '#fff' : '#666') : '#555', fontWeight: 'bold', fontSize: 13 }}>
+                          {guestAllowed ? '👤 Kod gościnny' : '🔒 Kod gościnny'}
+                        </Text>
                       </TouchableOpacity>
                     </View>
+
+                    {!guestAllowed && (
+                      <TouchableOpacity
+                        style={{ backgroundColor: '#161622', borderRadius: 8, borderWidth: 1, borderColor: '#2a2a3e', padding: 10, marginBottom: 12 }}
+                        onPress={() => { navigateTo('pakiet'); loadLicense(); }}
+                      >
+                        <Text style={{ color: '#aaa', fontSize: 12, lineHeight: 17 }}>
+                          🔒 <Text style={{ fontWeight: 'bold', color: '#ccc' }}>Kody gościnne</Text> (PIN z datą ważności i limitem użyć) są dostępne od pakietu <Text style={{ fontWeight: 'bold', color: '#ccc' }}>Silver</Text>.
+                        </Text>
+                        <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 12, marginTop: 6 }}>💳 Zobacz pakiety ›</Text>
+                      </TouchableOpacity>
+                    )}
+                    </>
+                      );
+                    })()}
 
                     <Text style={styles.inputLabelText}>Nazwa osoby</Text>
                     <TextInput style={styles.inputField} placeholder="np. Mama, Tata, Gość"
@@ -1974,7 +2071,7 @@ export default function App() {
                       keyboardType="numeric" secureTextEntry maxLength={8}
                       value={kpNewConfirm} onChangeText={setKpNewConfirm} />
 
-                    {kpMode === 'guest' && (
+                    {kpMode === 'guest' && (isLocalMode || lockState.entitlements?.guestCodes !== false) && (
                       <>
                         <Text style={styles.inputLabelText}>Ważny przez (dni)</Text>
                         <TextInput style={styles.inputField} placeholder="np. 3"
@@ -1990,9 +2087,16 @@ export default function App() {
                     {kpStatus ? (
                       <Text style={{ color: kpStatus.startsWith('✓') ? '#81c784' : '#ef4444', fontSize: 12, marginBottom: 8 }}>{kpStatus}</Text>
                     ) : null}
-                    <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: kpMode === 'guest' ? '#5c33cf' : '#1a3a5c', width: '100%' }]} onPress={kpAdd}>
-                      <Text style={styles.btnText}>{kpMode === 'guest' ? '👤 Utwórz kod gościnny' : '➕ Dodaj PIN'}</Text>
-                    </TouchableOpacity>
+                    {(() => {
+                      // Gdy pakiet spadł do darmowego, a w stanie został wybrany tryb gościnny —
+                      // traktujemy to jak zwykły PIN, żeby przycisk nie obiecywał niedostępnej funkcji.
+                      const guestActive = kpMode === 'guest' && (isLocalMode || lockState.entitlements?.guestCodes !== false);
+                      return (
+                        <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: guestActive ? '#5c33cf' : '#1a3a5c', width: '100%' }]} onPress={kpAdd}>
+                          <Text style={styles.btnText}>{guestActive ? '👤 Utwórz kod gościnny' : '➕ Dodaj PIN'}</Text>
+                        </TouchableOpacity>
+                      );
+                    })()}
                   </>
                 )}
               </View>
@@ -2306,6 +2410,8 @@ export default function App() {
           <ScrollView contentContainerStyle={styles.scrollWrapper}>
             <Text style={styles.screenHeaderText}>🏠 Centralki</Text>
 
+            {/* Liczba centralek NIE jest limitowana pakietem (decyzja produktowa) —
+                pakiet ogranicza pojemność każdej z nich: karty, PIN-y, administratorów. */}
             <TouchableOpacity
               style={[styles.secondaryBtn, { backgroundColor: '#2e7d32', marginBottom: 8 }]}
               onPress={() => {
@@ -2441,23 +2547,55 @@ export default function App() {
                         ))
                       )}
 
-                      <Text style={[styles.inputLabelText, { marginTop: 14 }]}>Zaproś administratora (e-mail):</Text>
-                      <TextInput
-                        style={styles.inputField}
-                        placeholder="np. jan.kowalski@email.com"
-                        placeholderTextColor="#555"
-                        autoCapitalize="none"
-                        keyboardType="email-address"
-                        value={inviteEmails[d.mac] || ''}
-                        onChangeText={(t) => setInviteEmails((prev) => ({ ...prev, [d.mac]: t }))}
-                      />
-                      <TouchableOpacity
-                        style={[styles.secondaryBtn, { backgroundColor: '#0284c7', width: '100%', marginTop: 10, opacity: teamBusyMac === d.mac ? 0.5 : 1 }]}
-                        disabled={teamBusyMac === d.mac}
-                        onPress={() => submitInvite(d.mac)}
-                      >
-                        <Text style={styles.btnText}>{teamBusyMac === d.mac ? 'Wysyłanie…' : '✉️ Wyślij zaproszenie'}</Text>
-                      </TouchableOpacity>
+                      {/* Limit administratorów z pakietu — max_admins LICZY WŁAŚCICIELA,
+                          więc przy limicie 1 nie ma miejsca na żadnego współadmina.
+                          Wyszarzamy zawczasu zamiast odsyłać 403 po wysłaniu zaproszenia. */}
+                      {(() => {
+                        const maxAdmins = lockState.entitlements?.maxAdmins;
+                        const usedAdmins = 1 + (teamByMac[d.mac]?.length || 0); // właściciel + współadmini
+                        const adminsFull = maxAdmins != null && usedAdmins >= maxAdmins;
+                        if (adminsFull) {
+                          return (
+                            <View style={{ backgroundColor: '#2a1a1a', borderRadius: 8, borderWidth: 1, borderColor: '#5c2b2b', padding: 12, marginTop: 14 }}>
+                              <Text style={{ color: '#ffb300', fontWeight: 'bold', fontSize: 13, marginBottom: 4 }}>
+                                Limit administratorów wyczerpany ({usedAdmins}/{maxAdmins})
+                              </Text>
+                              <Text style={{ color: '#aaa', fontSize: 12, lineHeight: 17 }}>
+                                {maxAdmins === 1
+                                  ? 'Pakiet darmowy obejmuje wyłącznie właściciela centralki. Współadministratorzy są dostępni od pakietu Silver.'
+                                  : 'Odbierz dostęp jednemu z administratorów, aby zaprosić kogoś innego — albo zwiększ pakiet.'}
+                              </Text>
+                              <TouchableOpacity style={{ marginTop: 10 }} onPress={() => { navigateTo('pakiet'); loadLicense(); }}>
+                                <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 12 }}>💳 Zobacz pakiety ›</Text>
+                              </TouchableOpacity>
+                            </View>
+                          );
+                        }
+                        return (
+                          <>
+                            <Text style={[styles.inputLabelText, { marginTop: 14 }]}>
+                              Zaproś administratora (e-mail):
+                              {maxAdmins != null ? <Text style={{ color: '#666', fontWeight: 'normal' }}>  ({usedAdmins}/{maxAdmins})</Text> : null}
+                            </Text>
+                            <TextInput
+                              style={styles.inputField}
+                              placeholder="np. jan.kowalski@email.com"
+                              placeholderTextColor="#555"
+                              autoCapitalize="none"
+                              keyboardType="email-address"
+                              value={inviteEmails[d.mac] || ''}
+                              onChangeText={(t) => setInviteEmails((prev) => ({ ...prev, [d.mac]: t }))}
+                            />
+                            <TouchableOpacity
+                              style={[styles.secondaryBtn, { backgroundColor: '#0284c7', width: '100%', marginTop: 10, opacity: teamBusyMac === d.mac ? 0.5 : 1 }]}
+                              disabled={teamBusyMac === d.mac}
+                              onPress={() => submitInvite(d.mac)}
+                            >
+                              <Text style={styles.btnText}>{teamBusyMac === d.mac ? 'Wysyłanie…' : '✉️ Wyślij zaproszenie'}</Text>
+                            </TouchableOpacity>
+                          </>
+                        );
+                      })()}
                     </View>
                   );
                 })
@@ -2500,7 +2638,7 @@ export default function App() {
                     <Text style={{ color: '#aaa', fontSize: 13, lineHeight: 21 }}>
                       Retencja logów: {license.limits?.logRetentionDays} dni{'\n'}
                       Kody gościnne: {license.limits?.guestCodes ? 'tak' : '—'}{'\n'}
-                      Centralki: {license.devicesUsed}/{license.limits?.maxDevices}
+                      Centralki: {license.devicesUsed}{license.limits?.maxDevices != null ? `/${license.limits.maxDevices}` : ' (bez limitu)'}
                     </Text>
                   </View>
 

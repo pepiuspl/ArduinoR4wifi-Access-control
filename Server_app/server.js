@@ -916,10 +916,25 @@ const server = http.createServer(async (req, res) => {
           }
         }
 
+        // Uprawnienia pakietu dołączone do KAŻDEJ odpowiedzi /api/data. Dzięki temu
+        // ekrany kart/PIN-ów mogą wyszarzyć niedostępne funkcje ZAWCZASU, zamiast
+        // pozwalać klientowi kliknąć i dopiero wtedy pokazywać błąd 403. Właściciel
+        // urządzenia wyznacza limity — współadmin widzi limity centralki, na której działa.
+        const dataEnt = await deviceOwnerEntitlements(primaryMac).catch(() => null);
+
         //DANE Z BAZY W POSTACI JSON
         return sendJSON(res, 200, {
           auth: true,
           account: appAccountContext,
+          entitlements: dataEnt ? {
+            tier: dataEnt.license_tier,
+            maxCards: dataEnt.max_cards,
+            maxPins: dataEnt.max_pins,
+            maxAdmins: dataEnt.max_admins,
+            maxDevices: dataEnt.max_devices,
+            guestCodes: !!dataEnt.guest_codes_enabled,
+            pinChangesPerMonth: dataEnt.pin_changes_per_month,
+          } : null,
           mode: isOffline ? 'Offline' : primaryDevice.operational_mode,
           lock: lockValue,
           total: processedUsersList.length,
@@ -993,7 +1008,21 @@ const server = http.createServer(async (req, res) => {
           [scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, card.id]
         );
         writeToLocalLogFile('User Mutation', `[Node: ${targetMac}] Schedule updated for card id=${card.id}`);
-        return sendJSON(res, 200, { success: true });
+
+        // RELAY DO CENTRALKI — bez tego harmonogram żył wyłącznie w bazie i w UI,
+        // a urządzenie i tak otwierało drzwi po samym UID (patrz README §5.7).
+        // Egzekwowanie jest lokalne, więc dane MUSZĄ trafić na urządzenie.
+        const schedPass = getFactoryAdminPassword(targetMac);
+        const schedSync = await syncMutationToHardware(
+          dev.rows[0].last_known_ip,
+          `/api/set_schedule?idx=${cardHwSlot(card, body)}` +
+          `&en=${scheduleEnabled ? 1 : 0}` +
+          `&days=${scheduleDays != null ? scheduleDays : 127}` +
+          `&start=${scheduleStartMinutes != null ? scheduleStartMinutes : 0}` +
+          `&end=${scheduleEndMinutes != null ? scheduleEndMinutes : 1440}` +
+          `&pass=${schedPass}`
+        );
+        return sendJSON(res, 200, { success: true, hardwareSynced: schedSync });
       }
 
       // =========================================================================
@@ -2012,18 +2041,9 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/device/provision' && req.method === 'POST') {
         const { mac, ownerId, currentIp, firmware } = body;
-        // Limit centralek na konto wg pakietu — tylko dla NOWEJ centralki
-        // (ponowny provisioning istniejącego MAC to ON CONFLICT = update, wolny).
-        const provExists = await dbPool.query('SELECT 1 FROM devices WHERE mac_address = $1', [mac]);
-        if (provExists.rows.length === 0) {
-          const dEnt = await getEntitlements(ownerId);
-          const dc = await dbPool.query('SELECT COUNT(*) FROM devices WHERE account_id = $1', [ownerId]);
-          if (parseInt(dc.rows[0].count) >= dEnt.max_devices)
-            return sendJSON(res, 403, {
-              error: `Limit centralek (${dEnt.max_devices}) osiągnięty w pakiecie ${dEnt.license_tier}. Zwiększ pakiet, aby dodać kolejną.`,
-              limit: dEnt.max_devices, tier: dEnt.license_tier, feature: 'max_devices'
-            });
-        }
+        // LIMIT CENTRALEK ZNIESIONY — liczba urządzeń na koncie nie jest sprzedawana.
+        // Pakiet ogranicza pojemność KAŻDEJ centralki (karty/PIN-y/administratorzy),
+        // więc dołożenie kolejnego urządzenia nie omija limitów, tylko dokłada sprzęt.
         await dbPool.query(
           `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version)
            VALUES ($1, $2, $3, $4)
@@ -2123,15 +2143,10 @@ const server = http.createServer(async (req, res) => {
               // PROVISIONING: Automatyczne dodanie nowej centralki do bazy danych
               const accountRes = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [query.email.trim().toLowerCase()]);
               if (accountRes.rows.length > 0) {
-                // Limit centralek na konto wg pakietu. Nowa centralka ponad limit
-                // się NIE rejestruje (zostaje w trybie setup) — właściciel musi
-                // zwiększyć pakiet. Nie dotyczy już zarejestrowanych (te trafiają
-                // wyżej w checkDev/checkDevRev, więc tu jest zawsze NOWY MAC).
-                const provEnt = await getEntitlements(accountRes.rows[0].id);
-                const provCnt = await dbPool.query('SELECT COUNT(*) FROM devices WHERE account_id = $1', [accountRes.rows[0].id]);
-                if (parseInt(provCnt.rows[0].count) >= provEnt.max_devices) {
-                  writeToLocalLogFile('Provisioning', `[Node: ${mac}] ODRZUCONO: limit centralek (${provEnt.max_devices}) pakietu ${provEnt.license_tier} dla konta ${query.email}.`);
-                } else {
+                // LIMIT CENTRALEK ZNIESIONY — każda nowa centralka rejestruje się
+                // niezależnie od pakietu. Limity dotyczą pojemności urządzenia
+                // (karty/PIN-y/administratorzy), nie liczby samych urządzeń.
+                {
                   await dbPool.query(
                     `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
                     VALUES ($1, $2, $3, $4, 'Czuwanie')`,
@@ -2716,10 +2731,11 @@ mailTransport.verify((error, success) => {
 // i webhook P24 ustawiają konto na jeden z nich (albo na wartości "individual").
 // =========================================================================
 const TIER_PRESETS = {
-  free:       { max_cards: 2,   max_pins: 2,   max_admins: 1,  max_devices: 1,  log_retention_days: 15, guest_codes_enabled: false, pin_changes_per_month: 4 },
-  silver:     { max_cards: 10,  max_pins: 10,  max_admins: 3,  max_devices: 2,  log_retention_days: 45, guest_codes_enabled: true,  pin_changes_per_month: null },
-  gold:       { max_cards: 50,  max_pins: 50,  max_admins: 99, max_devices: 99, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
-  individual: { max_cards: 200, max_pins: 200, max_admins: 99, max_devices: 99, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
+  // max_devices: null = BEZ LIMITU (limit centralek zniesiony 2026-08-17).
+  free:       { max_cards: 2,   max_pins: 2,   max_admins: 1,  max_devices: null, log_retention_days: 15, guest_codes_enabled: false, pin_changes_per_month: 4 },
+  silver:     { max_cards: 10,  max_pins: 10,  max_admins: 3,  max_devices: null, log_retention_days: 45, guest_codes_enabled: true,  pin_changes_per_month: null },
+  gold:       { max_cards: 50,  max_pins: 50,  max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
+  individual: { max_cards: 200, max_pins: 200, max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
 };
 
 // Odczyt efektywnych uprawnień konta. Wygasła licencja (license_valid_until w
@@ -2741,7 +2757,11 @@ async function getEntitlements(accountId) {
       max_cards:             row.max_cards ?? FREE.max_cards,
       max_pins:              row.max_pins ?? FREE.max_pins,
       max_admins:            row.max_admins ?? FREE.max_admins,
-      max_devices:           row.max_devices ?? FREE.max_devices,
+      // LIMIT CENTRALEK ZNIESIONY (decyzja produktowa 2026-08-17): null = bez limitu.
+      // Wymuszamy tu, w jednym punkcie, żeby stare wartości w bazie (np. max_devices=1
+      // na kontach darmowych) nie blokowały ani rejestracji, ani UI. Sprzedajemy
+      // pojemność NA centralkę (karty/PIN-y/admini), a nie liczbę samych urządzeń.
+      max_devices:           null,
       log_retention_days:    row.log_retention_days ?? FREE.log_retention_days,
       guest_codes_enabled:   row.guest_codes_enabled ?? false,
       pin_changes_per_month: row.pin_changes_per_month, // null = bez limitu
