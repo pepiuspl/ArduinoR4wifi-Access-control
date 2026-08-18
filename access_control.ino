@@ -94,7 +94,7 @@ void saveConfiguration(String newSSID, String newPass);
 void factoryResetSettings(); 
 void loadConfiguration(); 
 void loadCards();
-void saveNewCard(byte* uid, String nameStr);
+int saveNewCard(byte* uid, String nameStr);
 void deleteUser(int index);
 void initStorage();          // LittleFS (etap 1)
 void storageSelfTest();
@@ -541,7 +541,11 @@ void loadCards() {
   eepromLoadCards();                                 // fallback bez LittleFS
 }
 
-void saveNewCard(byte* uid, String nameStr) {
+// Zwraca INDEKS slotu, pod którym karta wylądowała (albo -1, gdy brak miejsca).
+// To istotne: przy deduplikacji karta trafia pod SWÓJ stary indeks, a nie na koniec.
+// Zgłaszanie do chmury "totalCards-1" wpisywało wtedy do bazy zły hardware_slot_idx,
+// przez co zmiana nazwy i harmonogram relayowane były do NIEWŁAŚCIWEGO slotu.
+int saveNewCard(byte* uid, String nameStr) {
   int cap = fsMounted ? HW_MAX_CARDS : 10;
   // DEDUPLIKACJA: ta sama karta zbliżona ponownie w trybie uczenia NIE tworzy
   // kolejnego slotu — aktualizujemy istniejący wpis. Bez tego jeden brelok
@@ -552,10 +556,10 @@ void saveNewCard(byte* uid, String nameStr) {
       nameStr.toCharArray(users[i].name, sizeof(users[i].name));
       isCardActive[i] = true;
       persistCards();
-      return;
+      return i;                       // slot ISTNIEJĄCEJ karty
     }
   }
-  if (totalCards >= cap) return;
+  if (totalCards >= cap) return -1;
   memset(&users[totalCards], 0, sizeof(User));
   memcpy(users[totalCards].uid, uid, 4);
   nameStr.toCharArray(users[totalCards].name, 16);
@@ -565,8 +569,10 @@ void saveNewCard(byte* uid, String nameStr) {
   cardSchDays[totalCards]    = 127;   // wszystkie dni
   cardSchStart[totalCards]   = 0;
   cardSchEnd[totalCards]     = 1440;
+  int newIdx = totalCards;
   totalCards++;
   persistCards();
+  return newIdx;
 }
 
 void deleteUser(int index) {
@@ -2146,8 +2152,9 @@ void loop() {
       // handshake TLS wykona networkTask na rdzeniu 0. Kolejkujemy PO ewentualnym
       // zapisie karty (niżej), żeby wysłać właściwy numer slotu.
       bool wasLearning = learningMode;
+      int savedSlot = -1;
       if (learningMode) {
-        saveNewCard(rfid.uid.uidByte, pendingUsername);
+        savedSlot = saveNewCard(rfid.uid.uidByte, pendingUsername);
         addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]");
         globalAnimFrame = 0; 
         globalDisplayInfo = "DODANO KARTE"; 
@@ -2193,7 +2200,10 @@ void loop() {
       if (WiFi.status() == WL_CONNECTED && !req_cardUpload) {
         uidStr.toCharArray(up_uid, sizeof(up_uid));
         pendingUsername.toCharArray(up_name, sizeof(up_name));
-        up_slot = (totalCards > 0) ? totalCards - 1 : 0;
+        // Slot RZECZYWIŚCIE użyty przez saveNewCard (przy deduplikacji to stary indeks
+        // karty, nie koniec listy) — inaczej baza dostaje zły hardware_slot_idx i
+        // zmiana nazwy/harmonogram lecą potem do niewłaściwej karty.
+        up_slot = (savedSlot >= 0) ? savedSlot : ((totalCards > 0) ? totalCards - 1 : 0);
         up_register = wasLearning;
         req_cardUpload = true;
       }

@@ -2362,7 +2362,11 @@ const server = http.createServer(async (req, res) => {
         }
 
         if (credentialRes.rows.length > 0 && credentialRes.rows[0].is_active && !scheduleBlocked) {
-          unlockQueues[mac] = true;
+          // NIE kolejkujemy tu otwarcia! Centralka podjęła decyzję LOKALNIE i już
+          // otworzyła rygiel — `unlockQueues[mac] = true` powodowało, że przy najbliższym
+          // pollu dostawała `unlock:true` i otwierała DRUGI RAZ, sekundę po zamknięciu.
+          // Dodatkowo omijało to lokalny harmonogram (zdalne otwarcie go nie sprawdza).
+          // Ten endpoint jest wyłącznie RAPORTEM (log + push) — zgodnie z §5.7 README.
           await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [mac, `Otwarto: ${credentialRes.rows[0].holder_name}`, 'entries']);
           writeToLocalLogFile('Access Granted', `[Node: ${mac}] Matched name description: ${credentialRes.rows[0].holder_name}`);
 
