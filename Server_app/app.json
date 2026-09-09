@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "CTRLABLE",
+    "slug": "ctrlable-lock",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/ctrlable_logo.png",
+    "userInterfaceStyle": "dark",
+    "primaryColor": "#5c33cf",
+    "splash": {
+      "image": "./assets/ctrlable_logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0f0f11"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.pepiuspl.ctrlablelock",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocalNetworkUsageDescription": "Aplikacja łączy się z centralką CTRLABLE w Twojej sieci lokalnej (Wi-Fi CTRLABLE_SETUP, adres 192.168.4.1), aby ją skonfigurować i nią zarządzać. Bez tej zgody nie da się dodać ani ustawić centralki.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.pepiuspl.ctrlablelock",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/ctrlable_logo.png",
+        "backgroundColor": "#0f0f11"
+      },
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "POST_NOTIFICATIONS",
+        "VIBRATE"
+      ]
+    },
+    "extra": {
+      "eas": {
+        "projectId": "f64190e7-e6e5-425c-8767-5638bddde8d7"
+      }
+    },
+    "owner": "pepiuspl",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/f64190e7-e6e5-425c-8767-5638bddde8d7"
+    }
+  }
+}
