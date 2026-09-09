@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions, KeyboardAvoidingView, Platform, Switch, Linking, ActivityIndicator} from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, ScrollView, SafeAreaView, Alert, Animated, Dimensions, KeyboardAvoidingView, Platform, Switch, Linking, ActivityIndicator, Share} from 'react-native';
 import * as Haptics from 'expo-haptics';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
@@ -76,6 +76,11 @@ export default function App() {
   const [renameDeviceInput, setRenameDeviceInput] = useState('');
   const [acceptCodeVisible, setAcceptCodeVisible] = useState(false); // modal "Mam kod zaproszenia"
   const [acceptCodeInput, setAcceptCodeInput] = useState('');
+  // RODO art. 17 — usunięcie konta (modal + kod z maila)
+  const [accDelVisible, setAccDelVisible] = useState(false);
+  const [accDelCode, setAccDelCode] = useState('');
+  const [accDelBusy, setAccDelBusy] = useState(false);
+  const [accDelInfo, setAccDelInfo] = useState({ devices: 0, coAdmins: 0 });
   const [deregVisible, setDeregVisible] = useState(false);   // modal deregistracji centralki
   const [deregStep, setDeregStep] = useState('request');     // 'request' → 'code'
   const [deregCodeInput, setDeregCodeInput] = useState('');
@@ -831,6 +836,84 @@ export default function App() {
     setDeregVisible(true);
   };
 
+  // --- RODO art. 20: eksport danych konta ---
+  const exportMyData = () => {
+    fetch(`${backendUrl}/api/account/export`, {
+      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+    })
+      .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { Alert.alert('Błąd', d.error || 'Nie udało się pobrać danych.'); return; }
+        Alert.alert(
+          'Twoje dane',
+          `Konto: ${d.account?.email}\nCentralki: ${d.devices?.length || 0}\nKarty: ${d.cards?.length || 0}\nPIN-y: ${d.keypad_pins?.length || 0}\nZdarzenia: ${d.events?.length || 0}\n\nUdostępnić kopię (JSON)?`,
+          [
+            { text: 'Zamknij', style: 'cancel' },
+            {
+              text: 'Udostępnij', onPress: () => {
+                // Share przyjmuje tekst — użytkownik zapisuje go w plikach/mailu.
+                Share.share({
+                  title: 'Moje dane CTRLABLE',
+                  message: JSON.stringify(d, null, 2)
+                }).catch(() => {});
+              }
+            }
+          ]
+        );
+      })
+      .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
+  };
+
+  // --- RODO art. 17: usunięcie konta (dwa kroki, potwierdzenie kodem z maila) ---
+  const startAccountDelete = () => {
+    Alert.alert(
+      'Usunąć konto na stałe?',
+      'Ta operacja jest NIEODWRACALNA.\n\nUsunięte zostaną: konto, wszystkie karty i PIN-y, cała historia wejść oraz aktywna licencja.\n\nTwoje centralki zostaną zresetowane do ustawień fabrycznych, a współadministratorzy stracą dostęp.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Wyślij kod', style: 'destructive', onPress: () => {
+            fetch(`${backendUrl}/api/account/delete_request`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) }
+            })
+              .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+              .then(({ ok, d }) => {
+                if (!ok) { Alert.alert('Błąd', d.error || 'Nie udało się wysłać kodu.'); return; }
+                setAccDelCode('');
+                setAccDelInfo({ devices: d.devices || 0, coAdmins: d.coAdmins || 0 });
+                setAccDelVisible(true);
+              })
+              .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
+          }
+        }
+      ]
+    );
+  };
+
+  const submitAccountDelete = () => {
+    const code = accDelCode.trim();
+    if (code.length < 6) { Alert.alert('Błąd', 'Wpisz 6-cyfrowy kod z maila.'); return; }
+    setAccDelBusy(true);
+    fetch(`${backendUrl}/api/account/delete_confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ code })
+    })
+      .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+      .then(async ({ ok, d }) => {
+        setAccDelBusy(false);
+        if (!ok) { Alert.alert('Błąd', d.error || 'Nieprawidłowy kod.'); return; }
+        setAccDelVisible(false);
+        // Konto nie istnieje — czyścimy sesję lokalnie i wracamy na ekran startowy.
+        await AsyncStorage.multiRemove(['@lock_account_id', '@lock_auth_token', '@lock_account_email', '@lock_local_mode', '@lock_local_admin_pass']);
+        setAuthToken(null); setAccountId(null); setEmail(''); setPassword('');
+        setIsConfigured(false); setAuthStep('mode');
+        Alert.alert('Konto usunięte', `Twoje dane zostały trwale usunięte. Zresetowanych centralek: ${d.devicesWiped || 0}.\n\nKopie zapasowe mogą zawierać dane jeszcze do 30 dni — nie są wykorzystywane do niczego poza odtworzeniem po awarii.`);
+      })
+      .catch(() => { setAccDelBusy(false); Alert.alert('Błąd', 'Brak połączenia.'); });
+  };
+
   const requestDeregisterCode = () => {
     if (!selectedMac) return;
     setDeregBusy(true);
@@ -1152,6 +1235,57 @@ export default function App() {
       : '/api/toggle_learn';
     executeCommand(endpoint);
     if (!isLeaving) setNewName('');
+  };
+
+  // --- Wybór kart, które mają przetrwać zejście z pakietu (mechanizm GŁÓWNY) ---
+  // Wysyłamy PEŁNĄ listę kart; PIN-ów nie ruszamy (endpoint aktualizuje częściowo).
+  const toggleKeepOnDowngrade = (cardId) => {
+    const freeMax = lockState.entitlements?.freeMaxCards ?? 2;
+    const current = (lockState.users || []).filter(u => u.keep_on_downgrade).map(u => u.id);
+    const next = current.includes(cardId) ? current.filter(i => i !== cardId) : [...current, cardId];
+    if (next.length > freeMax) {
+      Alert.alert('Limit pakietu darmowego', `Po wygaśnięciu licencji działać będą maksymalnie ${freeMax} karty. Odznacz inną, aby wybrać tę.`);
+      return;
+    }
+    fetch(`${backendUrl}/api/license/keep_selection`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ mac: selectedMac || lockState.activeMac, cardIds: next })
+    })
+      .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { Alert.alert('Błąd', d.error || 'Nie udało się zapisać wyboru.'); return; }
+        fetchStatus();
+      })
+      .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
+  };
+
+  // --- Oznaczenie karty jako należącej do właściciela ---
+  // Taka karta nigdy nie zostanie automatycznie wyłączona przy spadku pakietu.
+  const markOwnerCard = (cardId) => {
+    if (!cardId) return;
+    Alert.alert(
+      'Oznaczyć jako Twoją kartę?',
+      'Ta karta nigdy nie zostanie automatycznie wyłączona przy zmianie lub wygaśnięciu pakietu — dzięki temu nie stracisz dostępu do własnej centralki.\n\nOznaczenie może mieć tylko jedna karta; poprzednia je straci.',
+      [
+        { text: 'Anuluj', style: 'cancel' },
+        {
+          text: 'Oznacz', onPress: () => {
+            fetch(`${backendUrl}/api/user/set_owner_card`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+              body: JSON.stringify({ id: cardId, mac: selectedMac || lockState.activeMac, type: 'card' })
+            })
+              .then((res) => res.json().then(d => ({ ok: res.ok, d })))
+              .then(({ ok, d }) => {
+                if (!ok) { Alert.alert('Błąd', d.error || 'Nie udało się oznaczyć karty.'); return; }
+                fetchStatus();
+              })
+              .catch(() => Alert.alert('Błąd', 'Brak połączenia.'));
+          }
+        }
+      ]
+    );
   };
 
   // --- Zmiana nazwy użytkownika (karty RFID) — jednolity wzorzec z PIN-ami:
@@ -1874,6 +2008,39 @@ export default function App() {
       );
     })()}
 
+    {/* MONIT O KOŃCZĄCEJ SIĘ LICENCJI — mechanizm główny: klient sam decyduje,
+        co ma dalej działać. Pokazujemy, gdy zostało ≤30 dni albo już wygasła,
+        i tylko gdy realnie ma więcej kart, niż obejmie pakiet darmowy. */}
+    {(() => {
+      const ent = lockState.entitlements;
+      if (!ent || isLocalMode || !lockState.isOwner) return null;
+      const days = ent.daysToExpiry;
+      const freeMax = ent.freeMaxCards ?? 2;
+      const total = (lockState.users || []).length;
+      if (days == null || days > 30 || total <= freeMax) return null;
+
+      const chosen = (lockState.users || []).filter(u => u.keep_on_downgrade).length;
+      const expired = days <= 0;
+      return (
+        <View style={{ backgroundColor: '#2a2416', borderRadius: 10, borderWidth: 1, borderColor: expired ? '#7f1d1d' : '#5c4a1a', padding: 14, marginBottom: 12 }}>
+          <Text style={{ color: expired ? '#e57373' : '#ffb300', fontWeight: 'bold', fontSize: 14, marginBottom: 6 }}>
+            {expired ? '⚠️ Licencja wygasła — wymagana decyzja' : `⚠️ Licencja kończy się za ${days} ${days === 1 ? 'dzień' : 'dni'}`}
+          </Text>
+          <Text style={{ color: '#ccc', fontSize: 12, lineHeight: 18 }}>
+            Masz {total} kart, a pakiet darmowy obejmuje {freeMax}. {expired ? 'Nadmiarowe karty zostały już wyłączone.' : `Po wygaśnięciu ${total - freeMax} z nich przestanie otwierać drzwi.`}
+            {'\n\n'}<Text style={{ fontWeight: 'bold', color: '#fff' }}>Chcesz zachować wszystkie?</Text> Przedłuż licencję — nic nie stracisz.
+            {'\n'}<Text style={{ fontWeight: 'bold', color: '#fff' }}>Nie przedłużasz?</Text> Zaznacz poniżej 🔒 przy {freeMax} kartach, które mają dalej działać. Reszta zostanie wyłączona, ale <Text style={{ fontWeight: 'bold' }}>nie usunięta</Text> — wróci, jeśli kiedyś wykupisz wyższy pakiet.
+          </Text>
+          <Text style={{ color: chosen === freeMax ? '#81c784' : '#ffb300', fontSize: 12, fontWeight: 'bold', marginTop: 10 }}>
+            Wybrano: {chosen}/{freeMax}{chosen === 0 ? '  — bez wyboru zostaną Twoja karta i najstarsze' : ''}
+          </Text>
+          <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', marginTop: 12 }]} onPress={() => { navigateTo('pakiet'); loadLicense(); }}>
+            <Text style={styles.btnText}>💳 Przedłuż licencję</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    })()}
+
     {/* LISTA UŻYTKOWNIKÓW */}
     <View style={styles.card}>
       {/* Licznik pokazuje limit z PAKIETU (nie zaszyte „/10" z czasów EEPROM-u —
@@ -1905,11 +2072,37 @@ export default function App() {
                   ) : (
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                       <View style={{ flex: 1 }}>
-                        <Text style={{ color: user.active ? '#fff' : '#666', fontSize: 15 }}>{user.name}</Text>
+                        <Text style={{ color: user.active ? '#fff' : '#666', fontSize: 15 }}>
+                          {user.is_owner_card ? '⭐ ' : ''}{user.name}
+                        </Text>
                         {user.schedule_enabled && (
                           <Text style={{ color: '#64b5f6', fontSize: 10, marginTop: 2 }}>📅 Harmonogram</Text>
                         )}
+                        {/* Karta wyłączona przez PAKIET, nie przez człowieka — inny komunikat,
+                            bo klient inaczej szukałby przyczyny u siebie. */}
+                        {user.license_locked && (
+                          <Text style={{ color: '#ffb300', fontSize: 10, marginTop: 2 }}>🔒 Wyłączona — poza limitem pakietu</Text>
+                        )}
+                        {user.is_owner_card && (
+                          <Text style={{ color: '#81c784', fontSize: 10, marginTop: 2 }}>Twoja karta — chroniona przed limitem</Text>
+                        )}
                       </View>
+                      {/* 🔒 „zachowaj po wygaśnięciu" — pokazujemy tylko, gdy decyzja
+                          jest realnie potrzebna (licencja się kończy i kart jest za dużo). */}
+                      {lockState.isOwner && !isLocalMode
+                        && lockState.entitlements?.daysToExpiry != null
+                        && lockState.entitlements.daysToExpiry <= 30
+                        && (lockState.users || []).length > (lockState.entitlements.freeMaxCards ?? 2) && (
+                        <TouchableOpacity onPress={() => toggleKeepOnDowngrade(user.id)} style={{ paddingHorizontal: 8 }}>
+                          <Text style={{ fontSize: 14 }}>{user.keep_on_downgrade ? '🔒' : '🔓'}</Text>
+                        </TouchableOpacity>
+                      )}
+                      {/* Oznaczenie „moja karta" — fallback, gdy klient nic nie wybierze. */}
+                      {lockState.isOwner && !user.is_owner_card && (
+                        <TouchableOpacity onPress={() => markOwnerCard(user.id)} style={{ paddingHorizontal: 8 }}>
+                          <Text style={{ color: '#666', fontSize: 14 }}>☆</Text>
+                        </TouchableOpacity>
+                      )}
                       <TouchableOpacity onPress={() => { setCardRenameIdx(cardKey); setCardRenameRef(mutationRef); setCardRenameName(user.name); }} style={{ paddingHorizontal: 8 }}>
                         <Text style={{ color: '#64b5f6', fontSize: 12 }}>Zmień</Text>
                       </TouchableOpacity>
@@ -2399,6 +2592,31 @@ export default function App() {
                 </View>
               )}
 
+              {/* RODO: prawa użytkownika — eksport danych (art. 20) i usunięcie konta (art. 17).
+                  Dostępne dla KAŻDEGO konta w chmurze, nie tylko właściciela centralki. */}
+              {!isLocalMode && (
+                <View style={[styles.card, { borderColor: '#5c1a1a', borderWidth: 1 }]}>
+                  <Text style={[styles.sectionHeader, { color: '#e57373' }]}>🔒 Twoje dane (RODO)</Text>
+
+                  <Text style={[styles.inputLabelText, { marginBottom: 10 }]}>
+                    Masz prawo pobrać kopię swoich danych oraz trwale usunąć konto.
+                  </Text>
+
+                  <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#1a3a5c', width: '100%' }]} onPress={exportMyData}>
+                    <Text style={styles.btnText}>📦 Pobierz moje dane</Text>
+                  </TouchableOpacity>
+
+                  <Text style={[styles.inputLabelText, { marginTop: 18, color: '#e57373' }]}>
+                    Usunięcie konta jest nieodwracalne. Znikną: konto, wszystkie karty i PIN-y, cała historia wejść oraz aktywna licencja (bez zwrotu za niewykorzystany okres).
+                    {'\n\n'}Wszystkie Twoje centralki zostaną odłączone i zresetowane do ustawień fabrycznych, a współadministratorzy stracą do nich dostęp.
+                    {'\n\n'}Dane mogą pozostać w kopiach zapasowych do 30 dni od usunięcia — nie są wtedy wykorzystywane do niczego poza odtworzeniem po awarii.
+                  </Text>
+                  <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#7f1d1d', width: '100%', marginTop: 12 }]} onPress={startAccountDelete}>
+                    <Text style={styles.btnText}>🗑️ Usuń moje konto</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
             </ScrollView>
           </KeyboardAvoidingView>
         )}
@@ -2629,6 +2847,24 @@ export default function App() {
                       <Text style={{ color: '#e57373', fontSize: 13, marginBottom: 6, lineHeight: 19 }}>
                         Licencja wygasła — obowiązują limity darmowe. Istniejące karty/PIN-y działają dalej, ale nie dodasz nowych ponad limit.
                       </Text>
+                    )}
+
+                    {/* Ostrzeżenie o utracie historii przy zejściu na niższy pakiet.
+                        Retencja jest realnie egzekwowana (purgeExpiredData co 24 h), więc
+                        po spadku limitu starsze zdarzenia znikają — klient musi o tym
+                        wiedzieć ZANIM to się stanie, żeby zdążył wyeksportować dane. */}
+                    {(license.limits?.logRetentionDays ?? 15) > 15 && (
+                      <View style={{ backgroundColor: '#2a2416', borderRadius: 8, borderWidth: 1, borderColor: '#5c4a1a', padding: 10, marginBottom: 10 }}>
+                        <Text style={{ color: '#ffb300', fontSize: 12, fontWeight: 'bold', marginBottom: 4 }}>
+                          ⚠️ Co się stanie po wygaśnięciu licencji
+                        </Text>
+                        <Text style={{ color: '#aaa', fontSize: 12, lineHeight: 18 }}>
+                          Historia zdarzeń jest przechowywana przez {license.limits?.logRetentionDays} dni w Twoim pakiecie.
+                          Po wygaśnięciu licencji lub przejściu na niższy pakiet okres ten spada do <Text style={{ fontWeight: 'bold', color: '#ccc' }}>15 dni</Text>,
+                          a <Text style={{ fontWeight: 'bold', color: '#ccc' }}>starsze wpisy zostaną trwale usunięte</Text> — nie da się ich odzyskać.
+                          {'\n\n'}Karty, PIN-y i dostęp do centralki działają dalej bez zmian. Jeśli chcesz zachować historię, pobierz ją wcześniej: Ustawienia → Twoje dane (RODO) → Pobierz moje dane.
+                        </Text>
+                      </View>
                     )}
                     {license.validUntil && (
                       <Text style={{ color: '#888', fontSize: 12, marginBottom: 6 }}>
@@ -2888,6 +3124,43 @@ export default function App() {
         )}
 
         {/* ── MODAL: DEREGISTRACJA CENTRALKI (2 kroki, potwierdzenie kodem z maila) ── */}
+        {/* ── MODAL: USUNIĘCIE KONTA (RODO art. 17) — potwierdzenie kodem z maila ── */}
+        {accDelVisible && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '88%' }}>
+              <View style={{ backgroundColor: '#16161a', borderRadius: 14, padding: 20, borderWidth: 1, borderColor: '#5c1a1a' }}>
+                <Text style={{ color: '#e57373', fontWeight: 'bold', fontSize: 17, marginBottom: 10 }}>Trwałe usunięcie konta</Text>
+                <Text style={{ color: '#aaa', fontSize: 13, lineHeight: 19, marginBottom: 14 }}>
+                  Wysłaliśmy 6-cyfrowy kod na Twój adres e-mail. Po potwierdzeniu {accDelInfo.devices > 0 ? `${accDelInfo.devices} centralka/i zostanie zresetowana do ustawień fabrycznych` : 'konto zostanie usunięte'}
+                  {accDelInfo.coAdmins > 0 ? `, a ${accDelInfo.coAdmins} współadministrator(ów) straci dostęp` : ''}.
+                  {'\n\n'}Tej operacji nie da się cofnąć.
+                </Text>
+                <TextInput
+                  style={[styles.inputField, { textAlign: 'center', fontSize: 24, letterSpacing: 8, fontFamily: 'monospace' }]}
+                  placeholder="______"
+                  placeholderTextColor="#444"
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  editable={!accDelBusy}
+                  value={accDelCode}
+                  onChangeText={(t) => setAccDelCode(t.replace(/[^0-9]/g, ''))}
+                  autoFocus
+                />
+                <TouchableOpacity
+                  style={[styles.secondaryBtn, { backgroundColor: accDelCode.length === 6 ? '#7f1d1d' : '#333', width: '100%', marginTop: 6 }]}
+                  onPress={submitAccountDelete}
+                  disabled={accDelBusy || accDelCode.length < 6}
+                >
+                  <Text style={styles.btnText}>{accDelBusy ? 'Usuwanie…' : '🗑️ Usuń konto na stałe'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={{ marginTop: 14 }} onPress={() => { setAccDelVisible(false); setAccDelCode(''); }}>
+                  <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 13, textAlign: 'center' }}>Anuluj</Text>
+                </TouchableOpacity>
+              </View>
+            </KeyboardAvoidingView>
+          </View>
+        )}
+
         {deregVisible && (
           <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ width: '85%' }}>

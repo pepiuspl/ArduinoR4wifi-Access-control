@@ -93,7 +93,9 @@ docker exec nginx-proxy-manager grep -rl "node.ctrlable" /data/nginx/
 |---|---|
 | Server code | `/opt/smartlock-server/server.js` |
 | Environment | `/opt/smartlock-server/.env` |
-| App code | `/opt/smartlock-server/app/App.js` |
+| App code | `/opt/smartlock-server/app/App.js` — **capital A**, see the casing trap in §8 |
+| App config | `/opt/smartlock-server/app/{app.json,package.json,eas.json}` — versioned in `Server_app/`, **not** shipped by `deploy.sh` (changing them needs `npm install` / a Metro restart, so it stays a deliberate manual step) |
+| License-code generator | `/opt/smartlock-server/licensekey.js` — run **on the server**; procedure in `LICENSING.md` §6.1 |
 | OTA cache | `/opt/smartlock-server/updates/` |
 | Master log | `/var/log/smartlock/smartlock_system.log` |
 | Categorized logs | `/var/log/smartlock/{entries,connections,updates,security,provisioning,mail}/YYYY-MM-DD.log` |
@@ -588,6 +590,20 @@ See §6.2 for the LXC host-side TUN config needed to run it inside this privileg
 
 ### 7.5 Credential rotation
 All in `.env`. Edit, `pm2 restart ctrlable-server` — `override: true` means no other steps needed for the server to pick it up.
+
+### 7.6 Two kinds of "keys" — how each is produced
+
+Easy to confuse, so worth stating plainly: **license codes come from a script, device admin passwords do not exist as stored secrets at all.**
+
+**License codes → `licensekey.js`, run on the server.** Registered in the `license_codes` table before being handed to a customer; redeemed in the app. Full operational procedure (periods, format, one-time-use guarantee, manual tier override) is in **`LICENSING.md` §6.1** — not duplicated here.
+
+**Device admin password → computed, never stored.** `getFactoryAdminPassword(mac)` exists **twice**, identically, in `server.js` and in `access_control.ino`: take the device MAC, append the fixed salt `CTRLABLE_KEY_2026`, accumulate `char * (i+1)` over the string, return `"CN"` + the first 5 digits (e.g. `CN39468`). Both sides derive the same value independently, so it is never transmitted or persisted. The device also returns it once in the offline-provisioning JSON so the app can talk to it locally.
+
+It authorises the device's own local endpoints (`?pass=` on `/api/rename_user`, `/api/delete_user`, `/api/toggle_user_active`, `/api/set_schedule`, `/api/save_settings`) — the ones the server calls over LAN via `syncMutationToHardware`.
+
+> ⚠️ **Known weakness — this is obfuscation, not authentication.** The salt is embedded in the firmware and the "hash" is a simple weighted sum. Anyone who owns one unit can extract the salt, and the MAC of any other unit is visible on its own AP — so the password of *any* device is derivable. It is adequate to stop casual poking at the local panel; it is **not** a defence against a motivated attacker on the same LAN. Any future hardening (per-device random secret provisioned at first boot, HMAC challenge-response) is a firmware+server change and would need a migration path for already-deployed units.
+>
+> Also note both copies must stay **byte-for-byte identical** — any drift silently breaks every server→device mutation (§8).
 
 ---
 

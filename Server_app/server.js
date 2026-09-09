@@ -218,6 +218,87 @@ async function resolveTargetDevice(accountId, requestedMac, columns = 'mac_addre
   return dbPool.query(`SELECT ${cols} FROM devices d WHERE ${DEVICE_ACCESS_CONDITION} ORDER BY d.mac_address ASC LIMIT 1`, [accountId]);
 }
 
+// --- Egzekwowanie limitów pakietu na ISTNIEJĄCYCH poświadczeniach --------------
+// Decyzja produktowa (18.08.2026), zastępuje wcześniejszy „grandfathering" z §3.4
+// LICENSING.md: po spadku pakietu klient korzysta z TYLU poświadczeń, ile obejmuje
+// jego pakiet — nadmiarowe przestają działać.
+//
+// Zasady wyboru, które zostają (ustalone z właścicielem produktu):
+//   1. poświadczenia WSKAZANE PRZEZ KLIENTA (`keep_on_downgrade`) — mechanizm główny;
+//      aplikacja prosi o ten wybór, zanim licencja wygaśnie,
+//   2. karta/PIN oznaczony jako WŁAŚCICIELA — FALLBACK, gdy klient nic nie wybrał
+//      (chroni przed zamknięciem właściciela przed własnym budynkiem),
+//   3. potem najstarsze wg daty dodania,
+//   4. reszta → dezaktywacja z `license_locked = true`.
+//
+// DEZAKTYWACJA, NIE KASOWANIE — po powrocie do wyższego pakietu przywracamy dokładnie
+// te wpisy, które zablokował system (`license_locked`), nie ruszając tych, które
+// właściciel zamroził świadomie. Dane nigdy nie giną przez samą zmianę pakietu.
+async function enforceLicenseLimits(accountId) {
+  try {
+    const ent = await getEntitlements(accountId);
+    const devs = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1', [accountId]);
+
+    for (const dev of devs.rows) {
+      const mac = dev.mac_address;
+
+      // --- KARTY: właściciel pierwszy, potem najstarsze wg id ---
+      const cards = await dbPool.query(
+        `SELECT id, hardware_slot_idx, is_active, license_locked
+           FROM card_credentials WHERE mac_address = $1
+          ORDER BY keep_on_downgrade DESC, is_owner_card DESC, id ASC`, [mac]);
+
+      for (let i = 0; i < cards.rows.length; i++) {
+        const c = cards.rows[i];
+        const withinLimit = i < ent.max_cards;
+
+        if (!withinLimit && c.is_active) {
+          await dbPool.query('UPDATE card_credentials SET is_active = false, license_locked = true WHERE id = $1', [c.id]);
+          await syncMutationToHardware(dev.last_known_ip,
+            `/api/toggle_user_active?idx=${c.hardware_slot_idx ?? i}&pass=${getFactoryAdminPassword(mac)}`);
+          writeToLocalLogFile('License', `[Node: ${mac}] Karta id=${c.id} wyłączona — limit pakietu ${ent.license_tier} (${ent.max_cards}).`);
+        } else if (withinLimit && c.license_locked && !c.is_active) {
+          // Wróciliśmy w limit — przywracamy to, co zablokował system.
+          await dbPool.query('UPDATE card_credentials SET is_active = true, license_locked = false WHERE id = $1', [c.id]);
+          await syncMutationToHardware(dev.last_known_ip,
+            `/api/toggle_user_active?idx=${c.hardware_slot_idx ?? i}&pass=${getFactoryAdminPassword(mac)}`);
+          writeToLocalLogFile('License', `[Node: ${mac}] Karta id=${c.id} przywrócona po zwiększeniu pakietu.`);
+        }
+      }
+
+      // --- PIN-y: ta sama zasada (weryfikacja jest serwerowa, więc bez sync do sprzętu) ---
+      const pins = await dbPool.query(
+        `SELECT id, active, license_locked FROM keypad_pins WHERE mac_address = $1
+          ORDER BY keep_on_downgrade DESC, is_owner_pin DESC, created_at ASC, id ASC`, [mac]);
+
+      for (let i = 0; i < pins.rows.length; i++) {
+        const p = pins.rows[i];
+        const withinLimit = i < ent.max_pins;
+        if (!withinLimit && p.active) {
+          await dbPool.query('UPDATE keypad_pins SET active = false, license_locked = true WHERE id = $1', [p.id]);
+          writeToLocalLogFile('License', `[Node: ${mac}] PIN id=${p.id} wyłączony — limit pakietu ${ent.license_tier} (${ent.max_pins}).`);
+        } else if (withinLimit && p.license_locked && !p.active) {
+          await dbPool.query('UPDATE keypad_pins SET active = true, license_locked = false WHERE id = $1', [p.id]);
+          writeToLocalLogFile('License', `[Node: ${mac}] PIN id=${p.id} przywrócony po zwiększeniu pakietu.`);
+        }
+      }
+
+      // --- WSPÓŁADMINISTRATORZY: max_admins LICZY właściciela, więc miejsc jest (max-1).
+      // Odbieramy dostęp NAJNOWSZYM — najstarsi współpracownicy zostają.
+      const slots = Math.max(0, (ent.max_admins || 1) - 1);
+      const shares = await dbPool.query(
+        'SELECT id FROM device_shares WHERE mac_address = $1 ORDER BY created_at ASC, id ASC', [mac]);
+      if (shares.rows.length > slots) {
+        const toRevoke = shares.rows.slice(slots).map(r => r.id);
+        await dbPool.query('DELETE FROM device_shares WHERE id = ANY($1)', [toRevoke]);
+        writeToLocalLogFile('License', `[Node: ${mac}] Odebrano dostęp ${toRevoke.length} współadministratorom — limit pakietu ${ent.license_tier}.`);
+      }
+    }
+  } catch (e) {
+    writeToLocalLogFile('Core Daemon', `[License] Błąd egzekwowania limitów dla konta ${accountId}: ${e.message}`);
+  }
+}
+
 // --- Tożsamość karty RFID -----------------------------------------------------
 // HISTORIA BŁĘDU: `/api/data` zwracało `idx` = hardware_slot_idx (slot w EEPROM/LittleFS),
 // a endpointy mutacji używały `cards.rows[idx]`, czyli POZYCJI w liście. Te dwie rzeczy
@@ -281,6 +362,9 @@ const pendingUnlocks = {};
 // (factory reset) i blokujemy jego automatyczną ponowną rejestrację w pollu.
 const deregisterCodes = {};
 const deregisterQueues = {};
+// Kody potwierdzające USUNIĘCIE KONTA (RODO art. 17) — w pamięci, ważne 15 min.
+// Świadomie nie w bazie: to jednorazowy sekret operacji, która i tak kasuje konto.
+const accountDeleteCodes = {};
 // provisionSkipLog[mac] = ostatni czas zalogowania POMINIĘTEJ rejestracji (throttle 60s),
 // żeby diagnostyka „czemu centralka się nie rejestruje" nie zalała logu przy pollu co 1–8s.
 const provisionSkipLog = {};
@@ -869,7 +953,8 @@ const server = http.createServer(async (req, res) => {
 
         const usersRes = await dbPool.query(
           `SELECT id, holder_name as name, is_active as active, card_uid as uid, hardware_slot_idx,
-                  schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
+                  schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes,
+                  is_owner_card, license_locked, keep_on_downgrade
            FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC`, [primaryMac]);
         const logsRes = await dbPool.query('SELECT event_time, message FROM system_events WHERE mac_address = $1 ORDER BY event_time DESC LIMIT 30', [primaryMac]);
         const kpPinsRes = await dbPool.query(
@@ -888,6 +973,9 @@ const server = http.createServer(async (req, res) => {
           schedule_days: row.schedule_days,
           schedule_start_minutes: row.schedule_start_minutes,
           schedule_end_minutes: row.schedule_end_minutes,
+          is_owner_card: !!row.is_owner_card,     // gwiazdka w UI, chroniona przed limitem
+          license_locked: !!row.license_locked,   // wyłączona przez pakiet, nie przez człowieka
+          keep_on_downgrade: !!row.keep_on_downgrade,  // wskazana przez klienta „ma zostać"
         }));
 
         const localizedLogsFeed = logsRes.rows.map(r => {
@@ -934,6 +1022,15 @@ const server = http.createServer(async (req, res) => {
             maxDevices: dataEnt.max_devices,
             guestCodes: !!dataEnt.guest_codes_enabled,
             pinChangesPerMonth: dataEnt.pin_changes_per_month,
+            validUntil: dataEnt.license_valid_until || null,
+            // Ile dni do wygaśnięcia (null = bezterminowa). Aplikacja na tej podstawie
+            // pokazuje monit „licencja się kończy — wymagana decyzja”.
+            daysToExpiry: dataEnt.license_valid_until
+              ? Math.ceil((new Date(dataEnt.license_valid_until) - Date.now()) / 86400000)
+              : null,
+            // Limity pakietu DARMOWEGO — do czego spadnie konto po wygaśnięciu.
+            freeMaxCards: TIER_PRESETS.free.max_cards,
+            freeMaxPins: TIER_PRESETS.free.max_pins,
           } : null,
           mode: isOffline ? 'Offline' : primaryDevice.operational_mode,
           lock: lockValue,
@@ -982,6 +1079,82 @@ const server = http.createServer(async (req, res) => {
         `/api/rename_user?idx=${cardHwSlot(card, body)}&name=${encodeURIComponent(name)}&pass=${currentDynamicPassword}`
         );
         return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
+      }
+
+      // =========================================================================
+      // WYBÓR POŚWIADCZEŃ NA WYPADEK ZEJŚCIA Z PAKIETU — POST { mac, cardIds[], pinIds[] }
+      // Mechanizm GŁÓWNY: klient decyduje, co ma dalej działać, zanim licencja wygaśnie.
+      // Zapisujemy pełną listę (nie pojedyncze przełączenia), żeby stan w aplikacji
+      // i w bazie nie mógł się rozjechać przy równoległych zmianach.
+      // =========================================================================
+      if (pathname === '/api/license/keep_selection' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const targetMac = String(body.mac || '').toUpperCase();
+        // AKTUALIZACJA CZĘŚCIOWA: brak pola = „nie ruszaj tej kategorii”. Bez tego
+        // aplikacja wysyłająca tylko karty kasowałaby wybór PIN-ów (nie zna go, bo
+        // /api/data nie zwraca ich flag).
+        const cardIds = Array.isArray(body.cardIds) ? body.cardIds.map(n => parseInt(n, 10)).filter(Number.isFinite) : null;
+        const pinIds  = Array.isArray(body.pinIds)  ? body.pinIds.map(n => parseInt(n, 10)).filter(Number.isFinite)  : null;
+        if (!targetMac) return sendJSON(res, 400, { error: 'Brak mac.' });
+
+        const owned = await dbPool.query(
+          'SELECT 1 FROM devices WHERE mac_address = $1 AND account_id = $2', [targetMac, accountId]);
+        if (owned.rows.length === 0)
+          return sendJSON(res, 403, { error: 'Tylko właściciel centralki może wybrać poświadczenia.' });
+
+        // Limit docelowy = pakiet DARMOWY (tam trafia konto po wygaśnięciu).
+        const FREE = TIER_PRESETS.free;
+        if (cardIds && cardIds.length > FREE.max_cards)
+          return sendJSON(res, 400, { error: `Możesz zachować maksymalnie ${FREE.max_cards} kart(y).`, limit: FREE.max_cards });
+        if (pinIds && pinIds.length > FREE.max_pins)
+          return sendJSON(res, 400, { error: `Możesz zachować maksymalnie ${FREE.max_pins} PIN-ów.`, limit: FREE.max_pins });
+
+        if (cardIds) {
+          await dbPool.query('UPDATE card_credentials SET keep_on_downgrade = false WHERE mac_address = $1', [targetMac]);
+          if (cardIds.length)
+            await dbPool.query('UPDATE card_credentials SET keep_on_downgrade = true WHERE mac_address = $1 AND id = ANY($2)', [targetMac, cardIds]);
+        }
+        if (pinIds) {
+          await dbPool.query('UPDATE keypad_pins SET keep_on_downgrade = false WHERE mac_address = $1', [targetMac]);
+          if (pinIds.length)
+            await dbPool.query('UPDATE keypad_pins SET keep_on_downgrade = true WHERE mac_address = $1 AND id = ANY($2)', [targetMac, pinIds]);
+        }
+
+        writeToLocalLogFile('License', `[Node: ${targetMac}] Wybór na wypadek zejścia z pakietu: karty=${cardIds ? cardIds.length : 'bez zmian'}, PIN-y=${pinIds ? pinIds.length : 'bez zmian'}.`);
+        // Jeśli licencja JUŻ wygasła, wybór stosujemy natychmiast.
+        await enforceLicenseLimits(accountId);
+        return sendJSON(res, 200, { status: 'ok', cards: cardIds ? cardIds.length : null, pins: pinIds ? pinIds.length : null });
+      }
+
+      // =========================================================================
+      // OZNACZENIE KARTY/PIN-u WŁAŚCICIELA — POST { id, mac, type: 'card'|'pin' }
+      // Tylko właściciel centralki. Taka karta NIGDY nie jest automatycznie wyłączana
+      // przy spadku pakietu (patrz enforceLicenseLimits) — chroni przed sytuacją,
+      // w której właściciel zostaje zamknięty przed własnym budynkiem.
+      // Jedna karta i jeden PIN na centralkę; ustawienie nowej zdejmuje flagę z poprzedniej.
+      // =========================================================================
+      if (pathname === '/api/user/set_owner_card' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const { id, mac, type } = body;
+        const targetMac = String(mac || '').toUpperCase();
+        if (!id || !targetMac) return sendJSON(res, 400, { error: 'Brak id lub mac.' });
+
+        const owned = await dbPool.query(
+          'SELECT 1 FROM devices WHERE mac_address = $1 AND account_id = $2', [targetMac, accountId]);
+        if (owned.rows.length === 0)
+          return sendJSON(res, 403, { error: 'Tylko właściciel centralki może oznaczyć swoją kartę.' });
+
+        if (type === 'pin') {
+          await dbPool.query('UPDATE keypad_pins SET is_owner_pin = false WHERE mac_address = $1', [targetMac]);
+          await dbPool.query('UPDATE keypad_pins SET is_owner_pin = true WHERE id = $1 AND mac_address = $2', [id, targetMac]);
+        } else {
+          await dbPool.query('UPDATE card_credentials SET is_owner_card = false WHERE mac_address = $1', [targetMac]);
+          await dbPool.query('UPDATE card_credentials SET is_owner_card = true WHERE id = $1 AND mac_address = $2', [id, targetMac]);
+        }
+        writeToLocalLogFile('User Mutation', `[Node: ${targetMac}] Oznaczono ${type === 'pin' ? 'PIN' : 'kartę'} id=${id} jako należącą do właściciela.`);
+        // Zmiana priorytetu może odblokować/zablokować inne poświadczenia.
+        await enforceLicenseLimits(accountId);
+        return sendJSON(res, 200, { status: 'ok' });
       }
 
       // =========================================================================
@@ -1280,6 +1453,8 @@ const server = http.createServer(async (req, res) => {
            p.log_retention_days, p.guest_codes_enabled, p.pin_changes_per_month, days, accountId]
         );
         writeToLocalLogFile('License', `Account ${accountId} aktywował kod ${code}: ${tier} (${days > 0 ? days + ' dni' : 'bezterminowo'})`);
+        // Podniesienie pakietu przywraca poświadczenia zablokowane wcześniej limitem.
+        await enforceLicenseLimits(accountId);
         return sendJSON(res, 200, { success: true, tier });
       }
 
@@ -1327,6 +1502,160 @@ const server = http.createServer(async (req, res) => {
       // Uwaga: dawny "miękki" endpoint /api/devices/remove usunięto — kasował tylko
       // wiersz w bazie, a centralka i tak rejestrowała się z powrotem przy najbliższym
       // pollu (wysyła ?email= co cykl). Twarde odłączenie realizuje deregistracja poniżej.
+
+      // =========================================================================
+      // RODO art. 17 — USUNIĘCIE KONTA, KROK 1: prośba o kod potwierdzający.
+      // Decyzja produktowa: właściciel jest superadminem. Usunięcie konta kasuje
+      // WSZYSTKIE jego centralki wraz z danymi, a współadministratorzy tracą dostęp
+      // (nie są pytani o zgodę). Centralki dostają komendę wipe i wracają do trybu setup.
+      // =========================================================================
+      if (pathname === '/api/account/delete_request' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+
+        const acc = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
+        if (acc.rows.length === 0) return sendJSON(res, 404, { error: 'Nie znaleziono konta.' });
+        const accEmail = acc.rows[0].email;
+
+        // Ile danych zniknie — pokazujemy w mailu, żeby decyzja była świadoma.
+        const owned = await dbPool.query('SELECT mac_address, device_name FROM devices WHERE account_id = $1', [accountId]);
+        const shareCount = await dbPool.query(
+          `SELECT COUNT(*) FROM device_shares WHERE mac_address IN (SELECT mac_address FROM devices WHERE account_id = $1)`,
+          [accountId]);
+
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        accountDeleteCodes[accountId] = { code, expiresAt: Date.now() + 15 * 60 * 1000 };
+
+        const deviceList = owned.rows.length > 0
+          ? owned.rows.map(d => `<li>${escapeHtml(d.device_name || d.mac_address)}</li>`).join('')
+          : '<li><i>brak przypisanych centralek</i></li>';
+
+        mailTransport.sendMail({
+          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          to: accEmail,
+          subject: 'Potwierdzenie USUNIĘCIA KONTA CTRLABLE',
+          html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; color:#333;">
+                 <h2 style="color:#c62828;">Żądanie trwałego usunięcia konta</h2>
+                 <p>Otrzymaliśmy prośbę o usunięcie konta <b>${escapeHtml(accEmail)}</b>. Operacja jest <b>nieodwracalna</b>.</p>
+                 <p><b>Zostaną trwale usunięte:</b></p>
+                 <ul>
+                   <li>konto wraz z danymi logowania</li>
+                   <li>wszystkie karty RFID i kody PIN</li>
+                   <li>cała historia wejść i zdarzeń</li>
+                   <li>aktywna licencja (bez zwrotu okresu)</li>
+                 </ul>
+                 <p><b>Twoje centralki (${owned.rows.length}) zostaną odłączone i zresetowane do ustawień fabrycznych:</b></p>
+                 <ul>${deviceList}</ul>
+                 ${parseInt(shareCount.rows[0].count) > 0
+                   ? `<p style="color:#c62828;"><b>Uwaga:</b> ${shareCount.rows[0].count} współadministrator(ów) straci dostęp do Twoich centralek.</p>`
+                   : ''}
+                 <p>Aby potwierdzić, wpisz w aplikacji ten kod:</p>
+                 <h1 style="color:#c62828; font-family:monospace; letter-spacing:4px;">${code}</h1>
+                 <p style="font-size:12px; color:#888;">Kod ważny 15 minut. Jeśli to nie Ty — zignoruj tę wiadomość, nic się nie stanie.</p>
+                 </div>`
+        }, (err) => { if (err) writeToLocalLogFile('Błąd serwera SMTP', err.message); });
+
+        writeToLocalLogFile('Authentication Panel', `RODO: żądanie usunięcia konta ${accEmail} (id=${accountId}), centralek: ${owned.rows.length}.`);
+        return sendJSON(res, 200, { status: 'ok', devices: owned.rows.length, coAdmins: parseInt(shareCount.rows[0].count) });
+      }
+
+      // =========================================================================
+      // RODO art. 17 — USUNIĘCIE KONTA, KROK 2: potwierdzenie kodem → kasacja.
+      // =========================================================================
+      if (pathname === '/api/account/delete_confirm' && req.method === 'POST') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+        const code = String(body.code || '').trim();
+        if (!code) return sendJSON(res, 400, { error: 'Brak kodu potwierdzającego.' });
+
+        const pending = accountDeleteCodes[accountId];
+        if (!pending || pending.code !== code || Date.now() > pending.expiresAt) {
+          return sendJSON(res, 400, { error: 'Kod jest nieprawidłowy lub wygasł.' });
+        }
+
+        const acc = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
+        if (acc.rows.length === 0) return sendJSON(res, 404, { error: 'Nie znaleziono konta.' });
+        const accEmail = acc.rows[0].email;
+
+        const owned = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1', [accountId]);
+        const macs = owned.rows.map(r => r.mac_address);
+
+        // 1) Dane przypięte do centralek właściciela (kolejność: dzieci → rodzic).
+        for (const mac of macs) {
+          await dbPool.query('DELETE FROM keypad_pins      WHERE mac_address = $1', [mac]);
+          await dbPool.query('DELETE FROM card_credentials WHERE mac_address = $1', [mac]);
+          await dbPool.query('DELETE FROM system_events    WHERE mac_address = $1', [mac]);
+          await dbPool.query('DELETE FROM device_shares    WHERE mac_address = $1', [mac]);
+          await dbPool.query('DELETE FROM device_invites   WHERE mac_address = $1', [mac]);
+          await dbPool.query('DELETE FROM pin_change_events WHERE mac_address = $1', [mac]).catch(() => {});
+          await dbPool.query('DELETE FROM devices          WHERE mac_address = $1', [mac]);
+          // Komenda wipe — centralka wyczyści EEPROM+LittleFS przy najbliższym pollu.
+          deregisterQueues[mac] = Date.now() + 120 * 1000;
+        }
+
+        // 2) Dostępy tego konta do CUDZYCH centralek (jako współadmin) — też znikają.
+        await dbPool.query('DELETE FROM device_shares WHERE account_id = $1', [accountId]);
+        await dbPool.query('DELETE FROM device_invites WHERE invited_by = $1', [accountId]).catch(() => {});
+        await dbPool.query('DELETE FROM pin_change_events WHERE account_id = $1', [accountId]).catch(() => {});
+
+        // 3) Tombstone — hash e-maila (NIE sam e-mail, żeby nie tworzyć nowego zbioru
+        //    danych osobowych). Służy do ponownego zastosowania usunięcia, gdyby
+        //    kiedykolwiek odtworzono kopię zapasową sprzed kasacji.
+        const emailHash = crypto.createHash('sha256').update(accEmail).digest('hex');
+        await dbPool.query(
+          'INSERT INTO erasure_requests (email_hash, account_id, requested_at) VALUES ($1, $2, NOW())',
+          [emailHash, accountId]
+        ).catch((e) => writeToLocalLogFile('Core Daemon', `[RODO] Nie zapisano tombstone: ${e.message}`));
+
+        // 4) Samo konto (license_codes.used_by i tak ma ON DELETE SET NULL).
+        await dbPool.query('DELETE FROM accounts WHERE id = $1', [accountId]);
+        delete accountDeleteCodes[accountId];
+
+        writeToLocalLogFile('Authentication Panel', `RODO: konto id=${accountId} USUNIĘTE. Centralek zresetowanych: ${macs.length}.`);
+        return sendJSON(res, 200, { status: 'deleted', devicesWiped: macs.length });
+      }
+
+      // =========================================================================
+      // RODO art. 20 — EKSPORT DANYCH (prawo do przenoszenia). Zwraca komplet
+      // danych konta w JSON-ie; aplikacja pozwala go zapisać/udostępnić.
+      // =========================================================================
+      if (pathname === '/api/account/export' && req.method === 'GET') {
+        const accountId = requireAuth(req, res); if (!accountId) return;
+
+        const acc = await dbPool.query(
+          `SELECT email, privacy_policy_accepted_at, license_tier, license_valid_until, email_verified
+             FROM accounts WHERE id = $1`, [accountId]);
+        if (acc.rows.length === 0) return sendJSON(res, 404, { error: 'Nie znaleziono konta.' });
+
+        const devs = await dbPool.query(
+          'SELECT mac_address, device_name, operational_mode, firmware_version, last_heartbeat FROM devices WHERE account_id = $1',
+          [accountId]);
+        const macs = devs.rows.map(r => r.mac_address);
+
+        const cards = macs.length ? (await dbPool.query(
+          `SELECT mac_address, holder_name, card_uid, is_active, schedule_enabled, schedule_days,
+                  schedule_start_minutes, schedule_end_minutes
+             FROM card_credentials WHERE mac_address = ANY($1)`, [macs])).rows : [];
+        // PIN-y BEZ hashy — hash to dane uwierzytelniające, nie treść do wydania.
+        const pins = macs.length ? (await dbPool.query(
+          `SELECT mac_address, name, active, is_guest_code, expires_at, max_uses, use_count, created_at
+             FROM keypad_pins WHERE mac_address = ANY($1)`, [macs])).rows : [];
+        const events = macs.length ? (await dbPool.query(
+          `SELECT mac_address, event_time, message, category FROM system_events
+            WHERE mac_address = ANY($1) ORDER BY event_time DESC LIMIT 5000`, [macs])).rows : [];
+        const shares = macs.length ? (await dbPool.query(
+          `SELECT ds.mac_address, a.email AS admin_email, ds.created_at
+             FROM device_shares ds JOIN accounts a ON a.id = ds.account_id
+            WHERE ds.mac_address = ANY($1)`, [macs])).rows : [];
+
+        writeToLocalLogFile('Authentication Panel', `RODO: eksport danych konta id=${accountId}.`);
+        return sendJSON(res, 200, {
+          exported_at: new Date().toISOString(),
+          account: acc.rows[0],
+          devices: devs.rows,
+          cards, keypad_pins: pins, co_admins: shares,
+          events_note: 'Historia zdarzeń ograniczona do 5000 najnowszych wpisów.',
+          events
+        });
+      }
 
       // =========================================================================
       // DEREGISTRACJA — KROK 1: właściciel prosi o kod potwierdzający (mail)
@@ -2875,6 +3204,22 @@ async function runSchemaMigrations() {
     // brama wjazdowa potrzebuje dłużej niż drzwi wejściowe. Firmware przyjmuje
     // 1000–60000 ms i sam pilnuje zakresu; serwer wysyła to w odpowiedzi polla.
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS auto_lock_delay_ms INT DEFAULT 3000`,
+    // Egzekwowanie limitów po spadku pakietu (decyzja produktowa 18.08.2026):
+    // poświadczenia PONAD limit są DEZAKTYWOWANE, nie kasowane.
+    //  * is_owner_card / is_owner_pin — „to moja karta/PIN", nigdy nie wyłączana
+    //    automatycznie, żeby właściciel nie został zamknięty przed własnym budynkiem.
+    //  * license_locked — wyłączone PRZEZ LIMIT, nie przez człowieka. Rozróżnienie
+    //    jest konieczne, żeby po powrocie do wyższego pakietu przywrócić dokładnie te,
+    //    które system sam zablokował, a nie te celowo zamrożone przez właściciela.
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS is_owner_card BOOLEAN DEFAULT false`,
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS license_locked BOOLEAN DEFAULT false`,
+    `ALTER TABLE keypad_pins      ADD COLUMN IF NOT EXISTS is_owner_pin  BOOLEAN DEFAULT false`,
+    `ALTER TABLE keypad_pins      ADD COLUMN IF NOT EXISTS license_locked BOOLEAN DEFAULT false`,
+    // WYBÓR KLIENTA przed wygaśnięciem licencji — mechanizm GŁÓWNY. Właściciel
+    // wskazuje, które poświadczenia mają przetrwać zejście na niższy pakiet.
+    // Karta właściciela (is_owner_card) to tylko FALLBACK, gdy nikt nic nie wybrał.
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS keep_on_downgrade BOOLEAN DEFAULT false`,
+    `ALTER TABLE keypad_pins      ADD COLUMN IF NOT EXISTS keep_on_downgrade BOOLEAN DEFAULT false`,
     // Podniesienie darmowego limitu administratorów z 1 na 2 (decyzja 2026-09-09,
     // LICENSING.md §3.1). Kolumna powstała z DEFAULT 1, więc konta założone wcześniej
     // miałyby stare ograniczenie. Idempotentne: po pierwszym przebiegu żaden wiersz
@@ -2928,6 +3273,18 @@ async function runSchemaMigrations() {
        created_at TIMESTAMP DEFAULT NOW()
      )`,
     `CREATE INDEX IF NOT EXISTS idx_pin_change_events_mac_time ON pin_change_events(mac_address, created_at)`,
+    // RODO art. 17 — rejestr żądań usunięcia („tombstone"). Trzymamy WYŁĄCZNIE
+    // hash e-maila, nigdy samego adresu: inaczej lista usuniętych osób sama byłaby
+    // zbiorem danych osobowych. Służy do ponownego zastosowania kasacji, gdyby
+    // odtworzono kopię zapasową sprzed usunięcia (wymóg „beyond use" dla backupów).
+    // Bez FK do accounts — wiersz ma przeżyć skasowanie konta.
+    `CREATE TABLE IF NOT EXISTS erasure_requests (
+       id SERIAL PRIMARY KEY,
+       email_hash VARCHAR(64) NOT NULL,
+       account_id INT,
+       requested_at TIMESTAMP DEFAULT NOW()
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_erasure_email_hash ON erasure_requests(email_hash)`,
   ];
 
   let successCount = 0;
@@ -2987,6 +3344,26 @@ async function purgeExpiredData() {
 }
 purgeExpiredData();
 setInterval(purgeExpiredData, 24 * 60 * 60 * 1000);
+
+// =========================================================================
+// EGZEKWOWANIE LIMITÓW PAKIETU na istniejących poświadczeniach — przy starcie
+// i co 6 h. Wygaśnięcie licencji nie generuje żadnego zdarzenia (to po prostu
+// upływ daty), więc ktoś musi je zauważyć — stąd cykliczny przebieg.
+// Co 6 h, a nie raz na dobę, żeby po wygaśnięciu nadmiarowe karty nie działały
+// jeszcze przez prawie cały dzień.
+// =========================================================================
+async function enforceLimitsForAllAccounts() {
+  try {
+    const accs = await dbPool.query('SELECT DISTINCT account_id FROM devices WHERE account_id IS NOT NULL');
+    for (const row of accs.rows) await enforceLicenseLimits(row.account_id);
+    if (accs.rows.length > 0)
+      writeToLocalLogFile('Core Daemon', `[License] Przegląd limitów zakończony dla ${accs.rows.length} kont.`);
+  } catch (e) {
+    writeToLocalLogFile('Core Daemon', `[License] BŁĄD przeglądu limitów: ${e.message}`);
+  }
+}
+enforceLimitsForAllAccounts();
+setInterval(enforceLimitsForAllAccounts, 6 * 60 * 60 * 1000);
 
 server.listen(3000, () => {
   console.log('⚡ Multi-Tenant SmartLock Engine live on port 3000. Writing local filesystem archives at /var/log/smartlock/');

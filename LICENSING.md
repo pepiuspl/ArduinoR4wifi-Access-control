@@ -135,20 +135,79 @@ Klient kupuje **plan na konto**, nie na sztukę sprzętu. Skutki:
 ## 6. Realizacja techniczna
 
 **Na koncie (serwer, tabela `accounts`)** — pola liczbowe, nie sztywny enum:
-- `max_cards`, `max_pins` — limit użytkowników (wg pakietu)
-- `max_admins`, `max_devices` — na darmowym poziomie `max_admins=2` (właściciel + 1 współadmin), `max_devices=1`
+- `max_cards`, `max_pins` — limit poświadczeń **na centralkę** (wg pakietu)
+- `max_admins` — **łącznie z właścicielem**; darmowy `2` (właściciel + 1 współadmin), Silver `3`, Gold/Indywidualna `99`
+- `max_devices` — **NIEUŻYWANE, limit centralek zniesiony (18.08.2026).** `getEntitlements()` zwraca tu zawsze `null`, żeby stare wartości w bazie nikogo nie blokowały. Kolumna została w schemacie, ale nic nie egzekwuje. Uzasadnienie: sprzedajemy **pojemność centralki**, nie liczbę pudełek.
 - `log_retention_days`
 - `guest_codes_enabled` (bool) — kody gościnne tylko od Silver w górę
-- `pin_changes_per_month` — limit zmian PIN (tylko „Bez licencji"; np. 4)
-- `license_tier` — nazwa presetu (Bez licencji/Silver/Gold/Individual), tylko dla czytelności/UI
+- `pin_changes_per_month` — limit zmian PIN (`null` = bez limitu; darmowy: 4)
+- `license_tier` — nazwa presetu (free/silver/gold/individual), tylko dla czytelności/UI
 - `license_valid_until` — opcjonalnie, ważność umowy; po upływie **degradacja z grandfatheringiem**, nie blokada — patrz §3.4
+- `email_verified`, `email_verify_code`, `email_verify_expires` — weryfikacja konta kodem 6-cyfrowym (niezwiązane z licencją, ta sama tabela)
 
-**Tier = preset tych liczb.** „Indywidualna" = ustawiasz liczby ręcznie. Dzięki temu każda prywatna umowa jest możliwa bez zmian w firmwarze ani w kodzie.
+**Tier = preset tych liczb** (`TIER_PRESETS` w `server.js`). „Indywidualna" = inne liczby, bez zmian w kodzie ani firmware.
 
-**Egzekwowanie:**
-- **Serwer**: przy `POST /api/user/...` i `POST /api/keypad/add` sprawdza limit konta i licznik zmian PIN; blokuje ponad pakiet. Kody gościnne odrzuca, gdy `guest_codes_enabled=false`. Zwraca limity do aplikacji (pasek „8/10 kart").
-- **Centralka**: pilnuje **sufitu sprzętowego (500)** — twardy bezpiecznik niezależny od serwera; weryfikuje lokalnie.
-- **Aplikacja**: pokazuje wykorzystanie/limit, ukrywa/blokuje kody gościnne bez licencji, informuje o limicie zmian PIN.
+**Egzekwowanie (stan faktyczny):**
+- **Serwer**: `/api/toggle_learn` (blokuje wejście w Uczenie po wyczerpaniu `max_cards`), `/api/keypad/add` (`max_pins`, brama `guest_codes_enabled`, licznik `pin_changes_per_month`), `/api/devices/invite` (`max_admins` = współadmini + zaproszenia + właściciel). Odrzucenie to **403** z `{error, limit, used, tier, feature}`.
+- **Centralka**: sufit sprzętowy `HW_MAX_CARDS = 200` kart w LittleFS (`/cards.db`), w trybie awaryjnym EEPROM 10 — twardy bezpiecznik niezależny od serwera.
+- **Aplikacja**: limity przychodzą w **każdej** odpowiedzi `/api/data` (pole `entitlements`), więc moduły są **wyszarzane zawczasu** — przy komplecie kart/PIN-ów przycisk jest nieaktywny z wyjaśnieniem i skrótem do pakietów, a kody gościnne mają kłódkę i informację „dostępne od Silver". Klient nie dowiaduje się o limicie dopiero po kliknięciu.
+
+### 6.0 Retencja danych — DWIE niezależne osie (ważne dla RODO i dla polityki prywatności)
+
+Łatwo je pomylić, a w polityce prywatności muszą być opisane **osobno**, bo rządzą się inną logiką:
+
+| | Historia zdarzeń (dane żywe) | Kopie zapasowe |
+|---|---|---|
+| Okres | **zależy od pakietu**: 15 / 45 / 90 dni | jeden, stały dla wszystkich |
+| Po co | funkcja sprzedawana klientowi | odtworzenie po awarii |
+| Kto ustala | `accounts.log_retention_days` | harmonogram Proxmoksa |
+| Dostępne dla klienta | tak, w aplikacji | nie — „poza użyciem" |
+
+**Retencja per-pakiet jest realnie egzekwowana**, nie jest deklaracją: `purgeExpiredData()` w `server.js` chodzi przy starcie i co 24 h, kasując `system_events` starsze niż `log_retention_days` **właściciela urządzenia**, z globalnym `LOG_RETENTION_DAYS` jako bezpiecznikiem dla zdarzeń osieroconych (MAC bez urządzenia). Sprząta też zużyte zaproszenia, bo trzymają e-maile.
+
+**Skutek uboczny, który trzeba opisać klientowi:** po wygaśnięciu licencji konto schodzi do limitów darmowych (§3.4), więc `log_retention_days` spada np. z 90 na 15 — i **przy najbliższym przebiegu starsze zdarzenia zostaną usunięte**. To spójne z zasadą minimalizacji danych, ale dla klienta jest zaskoczeniem, jeśli nikt go nie uprzedził. Warto ująć to w regulaminie i rozważyć ostrzeżenie w aplikacji przed wygaśnięciem.
+
+**Kopie zapasowe:** okres retencji musi być **skończony i udokumentowany** — to warunek postawienia ich „poza użyciem" przy żądaniu usunięcia danych. Nie rozpakowuje się backupów, żeby wyciąć jedną osobę; zamiast tego kasuje się z produkcji, kopia wygasa sama, a przy ewentualnym odtworzeniu stosuje się ponownie rejestr `erasure_requests` (hash e-maila, nigdy sam adres). **Liczba dni podawana klientowi w aplikacji i w polityce prywatności musi odpowiadać faktycznemu harmonogramowi Proxmoksa** — inaczej deklaracja jest nieprawdziwa.
+
+### 6.1 Jak wystawić kod licencyjny (procedura operacyjna)
+
+Kody generuje **skrypt na serwerze** — `licensekey.js`. Musi działać na backendzie, bo zapisuje kod do bazy (dostęp przez `.env`):
+
+```bash
+cd /opt/smartlock-server && node licensekey.js <silver|gold|individual> [okres]
+```
+
+Okres: `month` `quarter` `halfyear` `year` `2y` `3y` `5y` `lifetime` — albo liczba dni. Domyślnie `year`.
+
+```bash
+node licensekey.js gold year        # Gold na 12 miesięcy
+node licensekey.js individual 5y    # Indywidualna na 5 lat
+node licensekey.js silver month     # Silver na 30 dni
+```
+
+Skrypt wypisuje gotowy kod, np. `GOLD-A7K2-M9PX-3TRW`.
+
+**Format:** 16 znaków — prefiks tieru (`SLVR`/`GOLD`/`INDV`) + 12 losowych z alfabetu bez mylących `0 O 1 I L`. W bazie (`license_codes`) leży bez myślników; przy aktywacji i tak jest normalizowany, więc klient może wpisać z myślnikami lub bez, wielkimi lub małymi literami.
+
+**Aktywacja:** klient wpisuje kod w aplikacji → **💳 Pakiet i licencja → Aktywuj**. `POST /api/license/redeem` robi atomowe `UPDATE ... WHERE used_by IS NULL RETURNING`, więc jednego kodu **nie da się użyć dwa razy** nawet przy równoległych próbach. Po aktywacji konto dostaje liczby z `TIER_PRESETS[tier]`, a `license_valid_until` = `NOW() + dni` (albo `NULL` przy `lifetime`).
+
+**Ważne dla modelu sprzedaży:** kod jest **rekordem w bazie**, nie podpisem kryptograficznym. Konsekwencje:
+- kod musi zostać wygenerowany **na naszym serwerze, zanim** go wydasz klientowi — nie da się go wystawić „offline"
+- nie zadziała w instalacji bez naszej chmury (patrz pomysł licencji offline w §7 — to osobna, jeszcze niezaprojektowana sprawa)
+- kody można wygenerować z zapasem i trzymać (np. do wydruku/faktury) — do czasu aktywacji są po prostu nieużyte
+
+Podgląd wystawionych i wykorzystanych kodów:
+```sql
+SELECT code, tier, days, used_by, used_at, created_at FROM license_codes ORDER BY created_at DESC LIMIT 20;
+```
+
+Ręczna zmiana pakietu bez kodu (np. do testów albo przy umowie indywidualnej) — te same wartości, co ustawiłby preset:
+```sql
+UPDATE accounts SET license_tier='free', max_cards=2, max_pins=2, max_admins=1,
+       log_retention_days=15, guest_codes_enabled=false, pin_changes_per_month=4,
+       license_valid_until=NULL
+ WHERE email='klient@example.com';
+```
 
 **Aktualizacje:** krytyczne łatki bezpieczeństwa — kanał wspólny dla wszystkich (także „Bez licencji"). Nowe funkcje (flagi typu `guest_codes_enabled`) — tylko wg pakietu.
 
