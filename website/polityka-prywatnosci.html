@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polityka Prywatności | Ctrlable</title>
+<meta name="description" content="Polityka prywatności Ctrlable — jakie dane zbieramy w aplikacji Ctrlable Access i systemie kontroli dostępu, w jakim celu i na jakiej podstawie prawnej (RODO).">
+<meta name="robots" content="index,follow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#060D16;--ink-2:#0A131F;--panel:#101E2E;--panel-2:#16273A;
+  --line:rgba(255,255,255,.075);--line-2:rgba(255,255,255,.14);
+  --text:#E9F0F7;--muted:#93A9C0;--dim:#6C819A;
+  --accent:#1E6FE8;--accent-2:#4D9BFF;--accent-soft:rgba(30,111,232,.12);
+  --ok:#3FD48B;--no:#E86A55;--wrap:1180px;--ease:cubic-bezier(.22,.68,.32,1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:90px}
+body{background:var(--ink);color:var(--text);font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:17px;line-height:1.68;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+.wrap{max-width:var(--wrap);margin:0 auto;padding:0 28px}
+h1,h2,h3,h4{font-family:"Archivo",system-ui,sans-serif;font-stretch:112%;line-height:1.1;letter-spacing:-.02em;font-weight:700}
+p{color:var(--muted)}
+a{color:inherit;text-decoration:none}
+img{max-width:100%;display:block}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--accent-2);display:inline-flex;align-items:center;gap:9px}
+.eyebrow:before{content:"";width:22px;height:1px;background:var(--accent)}
+
+/* progress */
+#bar{position:fixed;top:0;left:0;height:2px;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));z-index:99;transition:width .1s linear}
+
+/* nav */
+.nav{position:sticky;top:0;z-index:80;background:rgba(6,13,22,.82);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);transition:height .3s var(--ease)}
+.nav-in{display:flex;align-items:center;justify-content:space-between;gap:18px;height:74px;transition:height .3s var(--ease)}
+.nav.small .nav-in{height:62px}
+.brand{display:flex;align-items:center;gap:11px}
+.brand-txt{font-family:"Archivo",sans-serif;font-stretch:112%;font-weight:600;font-size:20px;letter-spacing:-.02em}
+.nav-links{display:flex;gap:6px;align-items:center}
+.nav-links a{font-size:14.5px;color:var(--muted);padding:8px 13px;border-radius:4px;position:relative;transition:color .2s}
+.nav-links a:hover{color:var(--text)}
+.nav-links a.on{color:var(--text)}
+.nav-links a.on:after{content:"";position:absolute;left:13px;right:13px;bottom:2px;height:1.5px;background:var(--accent)}
+.nav-cta{font-family:"IBM Plex Mono",monospace;font-size:14px;font-weight:500;color:#04101F;background:var(--accent-2);padding:10px 17px;border-radius:4px;white-space:nowrap;transition:.2s}
+.nav-cta:hover{background:#7AB4FF;box-shadow:0 0 26px rgba(77,155,255,.4)}
+.burger{display:none;background:none;border:1px solid var(--line-2);border-radius:4px;width:40px;height:38px;cursor:pointer;color:var(--text);align-items:center;justify-content:center}
+.drawer{display:none;flex-direction:column;gap:2px;padding:14px 0 22px;border-top:1px solid var(--line)}
+.drawer.open{display:flex}
+.drawer a{padding:11px 4px;color:var(--muted);font-size:16px;border-bottom:1px solid var(--line)}
+
+/* legal document */
+.legal{padding:56px 0 30px}
+.legal .doc{max-width:840px}
+.legal h1{font-size:clamp(2rem,5vw,3.1rem);margin:16px 0 10px}
+.legal .updated{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;margin-bottom:14px}
+.legal .lead{font-size:1.08rem;color:var(--muted);max-width:70ch;margin-bottom:34px}
+.legal h2{font-size:1.4rem;margin:40px 0 14px;padding-top:14px;border-top:1px solid var(--line)}
+.legal h3{font-size:1.05rem;font-weight:600;color:var(--text);margin:22px 0 8px}
+.legal p{margin-bottom:14px}
+.legal ul,.legal ol{margin:4px 0 18px 22px}
+.legal li{margin-bottom:8px;color:var(--muted)}
+.legal a.ln{color:var(--accent-2);text-decoration:underline}
+.legal strong{color:var(--text);font-weight:600}
+.legal .fill{background:rgba(232,106,85,.12);border:1px dashed rgba(232,106,85,.5);border-radius:4px;padding:1px 7px;color:#F0A99B;font-family:"IBM Plex Mono",monospace;font-size:.85em}
+.legal .note{background:var(--panel);border:1px solid var(--line-2);border-left:3px solid var(--accent);border-radius:6px;padding:16px 18px;margin:22px 0;font-size:14.5px;color:var(--muted)}
+.legal .toc{background:var(--ink-2);border:1px solid var(--line);border-radius:8px;padding:22px 26px;margin:8px 0 30px}
+.legal .toc h4{font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--accent-2);margin-bottom:14px}
+.legal .toc ol{margin:0 0 0 20px;columns:2;column-gap:34px}
+.legal .toc li{margin-bottom:6px;font-size:14px}
+.legal .toc a{color:var(--muted);transition:color .2s}
+.legal .toc a:hover{color:var(--accent-2)}
+.ltab{width:100%;border-collapse:collapse;margin:6px 0 22px;font-size:14px}
+.ltab th,.ltab td{text-align:left;padding:11px 13px;border:1px solid var(--line);vertical-align:top}
+.ltab th{background:var(--panel-2);color:var(--text);font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.ltab td{color:var(--muted)}
+@media(max-width:640px){.ltab,.ltab tbody,.ltab tr,.ltab td,.ltab th{display:block}.ltab th{border-bottom:0}.ltab td{border-top:0}.legal .toc ol{columns:1}}
+
+/* footer */
+footer{position:relative;background:var(--ink-2);border-top:1px solid var(--line);overflow:hidden}
+.foot-circuit{position:absolute;top:0;left:0;width:100%;height:70px;pointer-events:none;opacity:.8}
+.foot-mega{position:absolute;left:50%;bottom:-.14em;transform:translateX(-50%);font-family:"Archivo",sans-serif;font-stretch:112%;font-weight:700;font-size:clamp(6rem,17vw,15rem);letter-spacing:-.03em;line-height:1;white-space:nowrap;color:transparent;-webkit-text-stroke:1px rgba(77,155,255,.10);user-select:none;pointer-events:none;z-index:0}
+footer .wrap{position:relative;z-index:2}
+.foot-grid{display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr;gap:42px;padding:76px 0 54px}
+@media(max-width:960px){.foot-grid{grid-template-columns:1fr 1fr;gap:36px 28px}.foot-brand{grid-column:1/-1}}
+@media(max-width:480px){.foot-grid{grid-template-columns:1fr;gap:30px}}
+.foot-brand p{font-size:13.8px;max-width:255px;margin:16px 0 24px}
+.foot-contact{display:flex;flex-direction:column;gap:11px}
+.foot-contact a{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:14px;transition:color .2s}
+.foot-contact a:hover{color:var(--text)}
+.foot-tel{display:inline-flex;align-items:center;gap:12px;margin-top:2px;padding:13px 20px;border-radius:6px;background:var(--accent);color:#fff !important;font-family:"IBM Plex Mono",monospace;font-size:16.5px;font-weight:500;letter-spacing:.02em;transition:.25s var(--ease)}
+.foot-tel:hover{background:var(--accent-2);transform:translateY(-2px);box-shadow:0 10px 32px rgba(30,111,232,.45);color:#fff !important}
+.foot-col h4{font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:500;letter-spacing:.22em;text-transform:uppercase;margin-bottom:18px;color:var(--accent-2);display:flex;align-items:center;gap:8px}
+.foot-col h4:before{content:"";width:5px;height:5px;background:var(--accent);transform:rotate(45deg)}
+.foot-col a{display:block;font-size:14px;color:var(--muted);padding:5.5px 0;transition:.22s var(--ease);position:relative}
+.foot-col a:hover{color:var(--text);padding-left:16px}
+.foot-bar{border-top:1px solid var(--line);padding:20px 0;display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;font-size:12.5px;color:var(--dim);align-items:center}
+.foot-up{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border:1px solid var(--line-2);border-radius:5px;color:var(--muted);transition:.25s var(--ease)}
+.foot-up:hover{color:#fff;background:var(--accent);border-color:var(--accent);transform:translateY(-3px)}
+@media(max-width:960px){.foot-mega{font-size:23vw}}
+
+:focus-visible{outline:2px solid var(--accent-2);outline-offset:3px;border-radius:2px}
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:16px;top:16px;z-index:120;background:var(--accent);color:#fff;padding:11px 17px;border-radius:4px}
+@media(max-width:960px){.nav-links{display:none}.burger{display:flex}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<a class="skip" href="#main">Przejdź do treści</a>
+<nav class="nav">
+  <div class="wrap">
+    <div class="nav-in">
+      <a class="brand" href="index.html">
+        <svg width="30" height="30" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+          <path d="M88.3 93.7 A44 44 0 1 1 88.3 26.3" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+          <path d="M78.6 82.2 A29 29 0 1 1 78.6 37.8" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+          <circle cx="60" cy="60" r="15.5" fill="#4D9BFF"/>
+          <circle cx="60" cy="56.2" r="4.5" fill="#0A131F"/>
+          <rect x="57.8" y="58.8" width="4.4" height="9.2" rx="2.2" fill="#0A131F"/>
+        </svg>
+        <span class="brand-txt">Ctrlable</span>
+      </a>
+      <div class="nav-links">
+        <a href="uslugi.html">Usługi</a>
+        <a href="node.html">Ctrlable Node</a>
+        <a href="access.html">Ctrlable Access</a>
+        <a href="kontakt.html">Kontakt</a>
+      </div>
+      <a class="nav-cta" href="tel:+48696088602">696 088 602</a>
+      <button class="burger" aria-label="Menu" aria-expanded="false">
+        <svg width="19" height="19" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+    <div class="drawer">
+      <a href="uslugi.html">Usługi</a>
+      <a href="node.html">Ctrlable Node</a>
+      <a href="access.html">Ctrlable Access</a>
+      <a href="kontakt.html">Kontakt</a>
+    </div>
+  </div>
+</nav>
+
+<main id="main" class="legal"><span id="top"></span>
+  <div class="wrap">
+    <div class="doc">
+      <span class="eyebrow">Dokument</span>
+      <h1>Polityka Prywatności</h1>
+      <p class="updated">Ostatnia aktualizacja: 13 sierpnia 2026</p>
+      <p class="lead">Niniejsza Polityka wyjaśnia, jakie dane osobowe przetwarzamy w związku z korzystaniem z aplikacji <strong>Ctrlable Access</strong> oraz systemu kontroli dostępu <strong>Ctrlable Node</strong>, w jakim celu, na jakiej podstawie prawnej i jakie prawa Ci przysługują — zgodnie z RODO (rozporządzenie UE 2016/679).</p>
+
+      <div class="toc">
+        <h4>Spis treści</h4>
+        <ol>
+          <li><a href="#administrator">Administrator danych</a></li>
+          <li><a href="#zakres">Jakie dane zbieramy</a></li>
+          <li><a href="#cele">Cele i podstawy prawne</a></li>
+          <li><a href="#odbiorcy">Odbiorcy i podmioty przetwarzające</a></li>
+          <li><a href="#eog">Przekazywanie poza EOG</a></li>
+          <li><a href="#okres">Okres przechowywania</a></li>
+          <li><a href="#prawa">Twoje prawa</a></li>
+          <li><a href="#cookies">Pliki cookies i strona WWW</a></li>
+          <li><a href="#bezpieczenstwo">Bezpieczeństwo danych</a></li>
+          <li><a href="#zmiany">Zmiany Polityki</a></li>
+        </ol>
+      </div>
+
+      <h2 id="administrator">1. Administrator danych</h2>
+      <p>Administratorem Twoich danych osobowych jest <strong>CTRLABLE Tomasz Plewka</strong>, ul. Józefa Franciszka Buhla 11a/2, 45-626 Opole, NIP 7543381955 (dalej „Administrator", „my").</p>
+      <p>Kontakt w sprawach danych osobowych:</p>
+      <ul>
+        <li>e-mail: <a class="ln" href="mailto:node@ctrlable.pl">node@ctrlable.pl</a></li>
+        <li>telefon: <a class="ln" href="tel:+48696088602">696 088 602</a></li>
+      </ul>
+      <p>Nie wyznaczyliśmy Inspektora Ochrony Danych — we wszystkich sprawach dotyczących przetwarzania danych możesz kontaktować się bezpośrednio pod powyższymi danymi.</p>
+
+      <h2 id="zakres">2. Jakie dane zbieramy</h2>
+      <p>Zakres danych zależy od tego, jak korzystasz z systemu. Przetwarzamy wyłącznie dane niezbędne do świadczenia usługi kontroli dostępu:</p>
+      <table class="ltab">
+        <thead><tr><th>Kategoria</th><th>Dane</th></tr></thead>
+        <tbody>
+          <tr><td>Konto</td><td>Adres e-mail, hasło (przechowywane wyłącznie w postaci zaszyfrowanego skrótu — bcrypt, nigdy jawnie), data i fakt akceptacji Regulaminu i Polityki Prywatności.</td></tr>
+          <tr><td>Urządzenia (centralki)</td><td>Nazwa urządzenia, adres sprzętowy (MAC), lokalny adres IP, wersja oprogramowania, status i czas ostatniej łączności, ustawienia (np. czas auto-blokady).</td></tr>
+          <tr><td>Uprawnienia dostępu</td><td>Kody PIN (przechowywane wyłącznie jako skrót bcrypt), identyfikatory kart/breloków RFID (UID), nazwy nadane użytkownikom przepustek, harmonogramy i daty ważności.</td></tr>
+          <tr><td>Rejestr zdarzeń</td><td>Historia wejść i prób dostępu (data, godzina, metoda, wynik, nazwa użytkownika/przepustki), zdarzenia bezpieczeństwa i serwisowe.</td></tr>
+          <tr><td>Współadministrowanie</td><td>Adresy e-mail osób zapraszanych do zarządzania urządzeniem oraz relacje udostępnień między kontami.</td></tr>
+          <tr><td>Powiadomienia</td><td>Token powiadomień push (identyfikator urządzenia mobilnego w usłudze Expo) oraz Twoje preferencje powiadomień.</td></tr>
+          <tr><td>Dane techniczne</td><td>Adres IP łączącego się urządzenia oraz zapisy w logach serwera, tworzone m.in. w celu zapewnienia bezpieczeństwa i ograniczenia nadużyć.</td></tr>
+        </tbody>
+      </table>
+      <p>Nie zbieramy danych szczególnych kategorii (np. danych biometrycznych) — karta RFID i PIN są traktowane jako identyfikatory dostępu, nie jako dane biometryczne.</p>
+
+      <h2 id="cele">3. Cele i podstawy prawne przetwarzania</h2>
+      <ul>
+        <li><strong>Świadczenie usługi</strong> (założenie konta, zarządzanie urządzeniami, nadawanie dostępu, otwieranie drzwi) — art. 6 ust. 1 lit. b RODO (wykonanie umowy).</li>
+        <li><strong>Rejestr wejść i zdarzeń oraz bezpieczeństwo systemu</strong> (wykrywanie nadużyć, ograniczanie liczby prób, ochrona przed nieautoryzowanym dostępem) — art. 6 ust. 1 lit. f RODO (prawnie uzasadniony interes Administratora oraz właściciela obiektu polegający na zapewnieniu bezpieczeństwa).</li>
+        <li><strong>Powiadomienia push</strong> o zdarzeniach — art. 6 ust. 1 lit. a RODO (zgoda, którą możesz w każdej chwili wycofać w ustawieniach aplikacji).</li>
+        <li><strong>Kontakt i obsługa zgłoszeń</strong> — art. 6 ust. 1 lit. f RODO (uzasadniony interes w postaci komunikacji z użytkownikiem).</li>
+        <li><strong>Obowiązki prawne</strong> (np. podatkowe, rozpatrywanie reklamacji) — art. 6 ust. 1 lit. c RODO.</li>
+      </ul>
+
+      <h2 id="odbiorcy">4. Odbiorcy danych i podmioty przetwarzające</h2>
+      <p>Dane rejestru dostępu (użytkownicy, PIN-y, karty, historia wejść) przechowywane są na <strong>serwerze lokalnym</strong> powiązanym z systemem — nie są udostępniane publicznej chmurze w celach marketingowych. Wiadomości systemowe (rejestracja, reset hasła, zaproszenia do współadministrowania) wysyłane są z <strong>własnego serwera pocztowego</strong> Administratora, bez pośrednictwa zewnętrznego dostawcy poczty. Korzystamy z następujących podmiotów przetwarzających, wyłącznie w zakresie niezbędnym do działania usługi:</p>
+      <ul>
+        <li><strong>Dostawca usługi powiadomień push</strong> (Expo oraz odpowiednio Apple APNs i Google FCM) — w celu dostarczenia powiadomień na Twój telefon.</li>
+        <li><strong>Dostawca infrastruktury internetowej</strong> (OVH) — w zakresie utrzymania domeny i strony internetowej.</li>
+      </ul>
+      <p>Poza powyższymi, niezbędnymi do działania usługi, nie korzystamy z innych podmiotów przetwarzających ani nie udostępniamy danych podmiotom trzecim.</p>
+      <p>Nie sprzedajemy Twoich danych. Możemy je udostępnić uprawnionym organom, jeżeli wynika to z obowiązujących przepisów.</p>
+
+      <h2 id="eog">5. Przekazywanie danych poza EOG</h2>
+      <p>Co do zasady dane przetwarzamy w Europejskim Obszarze Gospodarczym. Korzystanie z usług powiadomień push (Apple, Google, Expo) może wiązać się z przekazaniem ograniczonego zakresu danych technicznych (token urządzenia) do podmiotów w USA — w takim przypadku odbywa się to na podstawie mechanizmów zgodnych z RODO (m.in. standardowe klauzule umowne lub program Data Privacy Framework).</p>
+
+      <h2 id="okres">6. Okres przechowywania</h2>
+      <ul>
+        <li>Dane konta i urządzeń — przez czas korzystania z usługi; po usunięciu konta lub urządzenia dane są usuwane, z wyjątkiem tych, które musimy zachować na podstawie przepisów.</li>
+        <li>Rejestr zdarzeń (logi wejść) — domyślnie do 90 dni, po czym jest automatycznie usuwany. Okres może zostać dostosowany do potrzeb obiektu.</li>
+        <li>Kody jednorazowe (reset hasła, zaproszenia) — wygasają automatycznie (zaproszenia po 48 godzinach).</li>
+        <li>Dane niezbędne do obowiązków prawnych (np. rozliczenia) — przez okres wymagany przepisami.</li>
+      </ul>
+
+      <h2 id="prawa">7. Twoje prawa</h2>
+      <p>W związku z przetwarzaniem danych masz prawo do:</p>
+      <ul>
+        <li>dostępu do swoich danych oraz uzyskania ich kopii,</li>
+        <li>sprostowania (poprawienia) danych,</li>
+        <li>usunięcia danych („prawo do bycia zapomnianym"),</li>
+        <li>ograniczenia przetwarzania,</li>
+        <li>przenoszenia danych,</li>
+        <li>wniesienia sprzeciwu wobec przetwarzania opartego na uzasadnionym interesie,</li>
+        <li>cofnięcia zgody w dowolnym momencie (bez wpływu na zgodność z prawem przetwarzania przed jej cofnięciem),</li>
+        <li>wniesienia skargi do Prezesa Urzędu Ochrony Danych Osobowych (ul. Stawki 2, 00-193 Warszawa).</li>
+      </ul>
+      <p>Aby skorzystać z powyższych praw, napisz na <a class="ln" href="mailto:node@ctrlable.pl">node@ctrlable.pl</a>. Pamiętaj, że jeżeli jesteś użytkownikiem przepustki (kartą/PIN-em) na cudzym obiekcie, część danych może być administrowana przez właściciela tego obiektu — wtedy skierujemy Cię do właściwego administratora.</p>
+
+      <h2 id="cookies">8. Pliki cookies i strona internetowa</h2>
+      <p>Strona <strong>ctrlable.pl</strong> jest statyczna i nie stosuje własnych plików cookies do celów marketingowych ani profilujących. Strona ładuje czcionki z usługi Google Fonts, co może wiązać się z przekazaniem adresu IP do Google w celu dostarczenia plików czcionek. Aplikacja mobilna nie używa cookies przeglądarkowych; do działania wykorzystuje lokalną pamięć urządzenia (m.in. do zapamiętania sesji logowania).</p>
+
+      <h2 id="bezpieczenstwo">9. Bezpieczeństwo danych</h2>
+      <p>Stosujemy środki techniczne i organizacyjne odpowiednie do ryzyka, w tym: przechowywanie haseł i PIN-ów wyłącznie w postaci skrótów kryptograficznych (bcrypt), uwierzytelnianie tokenami, ograniczanie liczby prób logowania oraz szyfrowanie połączenia aplikacji z serwerem (HTTPS/TLS). Dbamy o to, aby dostęp do danych miały wyłącznie osoby i systemy, które go potrzebują.</p>
+
+      <h2 id="zmiany">10. Zmiany Polityki</h2>
+      <p>Polityka może być aktualizowana, np. w związku ze zmianą przepisów lub zakresu usługi. Aktualna wersja jest zawsze dostępna na tej stronie, z datą ostatniej aktualizacji na górze dokumentu. W razie istotnych zmian poinformujemy o nich w aplikacji lub e-mailem.</p>
+
+      <p style="margin-top:34px"><a class="ln" href="regulamin.html">Zobacz także: Regulamin serwisu →</a></p>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <svg class="foot-circuit" viewBox="0 0 1400 70" preserveAspectRatio="none" aria-hidden="true">
+    <path id="fc1" d="M0 35 H260 L300 12 H560 L600 58 H900 L940 35 H1400" stroke="rgba(30,111,232,.14)" stroke-width="1" fill="none"/>
+    <circle cx="300" cy="12" r="3" fill="rgba(30,111,232,.4)"/>
+    <circle cx="600" cy="58" r="3" fill="rgba(30,111,232,.4)"/>
+    <circle cx="940" cy="35" r="3" fill="rgba(30,111,232,.4)"/>
+  </svg>
+  <div class="foot-mega" aria-hidden="true">CTRLABLE</div>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="brand" href="index.html">
+          <svg width="34" height="34" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+            <path d="M88.3 93.7 A44 44 0 1 1 88.3 26.3" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+            <path d="M78.6 82.2 A29 29 0 1 1 78.6 37.8" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+            <circle cx="60" cy="60" r="15.5" fill="#4D9BFF"/>
+            <circle cx="60" cy="56.2" r="4.5" fill="#0A131F"/>
+            <rect x="57.8" y="58.8" width="4.4" height="9.2" rx="2.2" fill="#0A131F"/>
+          </svg>
+          <span class="brand-txt">Ctrlable</span>
+        </a>
+        <p>Strony internetowe, kontrola dostępu, smart home i systemy bezpieczeństwa. Jedna firma, jeden numer.</p>
+        <div class="foot-contact">
+          <a class="foot-tel" href="tel:+48696088602"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>696 088 602</a>
+          <a href="mailto:node@ctrlable.pl"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>node@ctrlable.pl</a>
+          <a href="kontakt.html"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 1 8 8c0 5.4-8 12-8 12S4 15.4 4 10a8 8 0 0 1 8-8z"/></svg>Opole i okolice</a>
+        </div>
+      </div>
+      <div class="foot-col"><h4>Usługi</h4>
+        <a href="uslugi.html#web">Strony internetowe</a>
+        <a href="uslugi.html#access">Kontrola dostępu</a>
+        <a href="uslugi.html#smart">Smart home</a>
+        <a href="uslugi.html#security">Monitoring i alarmy</a>
+      </div>
+      <div class="foot-col"><h4>Produkty</h4>
+        <a href="node.html">Ctrlable Node</a>
+        <a href="access.html">Ctrlable Access</a>
+        <a href="node.html#spec">Specyfikacja</a>
+        <a href="kontakt.html">Wycena</a>
+      </div>
+      <div class="foot-col"><h4>Firma</h4>
+        <a href="index.html">Strona główna</a>
+        <a href="kontakt.html">Kontakt</a>
+        <a href="polityka-prywatnosci.html">Polityka prywatności</a>
+        <a href="regulamin.html">Regulamin</a>
+      </div>
+    </div>
+    <div class="foot-bar">
+      <span>© <span id="yr">2026</span> Ctrlable. Wszelkie prawa zastrzeżone.</span>
+      <a class="foot-up" href="#top" aria-label="Wróć na górę strony"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></a>
+    </div>
+  </div>
+</footer>
+<script>
+(function(){
+  var yr=document.getElementById('yr'); if(yr) yr.textContent=new Date().getFullYear();
+  var bar=document.getElementById('bar'), nav=document.querySelector('.nav');
+  function onScroll(){var h=document.documentElement.scrollHeight-window.innerHeight; if(bar) bar.style.width=(h>0?(window.scrollY/h)*100:0)+'%'; if(nav) nav.classList.toggle('small',window.scrollY>40);}
+  window.addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  var burger=document.querySelector('.burger'), drawer=document.querySelector('.drawer');
+  if(burger&&drawer){burger.addEventListener('click',function(){var open=drawer.classList.toggle('open'); burger.setAttribute('aria-expanded',open?'true':'false');});}
+})();
+</script>
+</body>
+</html>

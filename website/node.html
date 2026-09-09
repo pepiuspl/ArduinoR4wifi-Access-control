@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ctrlable Node — centrala kontroli dostępu: PIN, karta, aplikacja | Ctrlable</title>
+<title>Ctrlable Node — centrala kontroli dostępu bez abonamentu | Ctrlable</title>
 <!-- CTRLABLE INLINE BUILD v10 -->
-<meta name="description" content="Ctrlable Node to autorska centrala kontroli dostępu: PIN, karta i aplikacja. Karty i harmonogramy sprawdzane lokalnie w urządzeniu, aktualizacje OTA, praca w trybie online z kontem albo offline-standalone bez chmury.">
+<meta name="description" content="Ctrlable Node to autorska centrala kontroli dostępu: PIN, karta i aplikacja, karty RFID działają też bez internetu, brak abonamentu i dane pozostające na obiekcie.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -364,13 +364,13 @@ footer .wrap{position:relative;z-index:2}
   <div>
     <span class="eyebrow">Produkt własny · sprzęt</span>
     <h1 style="margin:20px 0 20px">Ctrlable <span class="hl">Node</span></h1>
-    <p class="lead">Centrala kontroli dostępu montowana przy przejściu. Otwiera zamek, czyta kartę i PIN, zapisuje każde zdarzenie. Karty i ich harmonogramy trzyma we własnej pamięci, więc otwierają drzwi także wtedy, gdy padnie łącze.</p>
+    <p class="lead">Centrala kontroli dostępu montowana przy przejściu. Otwiera zamek, czyta kartę i PIN, zapisuje każde zdarzenie. Karta RFID otwiera drzwi nawet przy braku łącza — dane kart są w pamięci urządzenia; PIN i zdalne otwarcie wymagają połączenia z serwerem.</p>
     <div class="cta-row">
       <a class="btn btn-primary" href="kontakt.html">Zapytaj o wdrożenie</a>
       <a class="btn btn-ghost" href="#spec">Specyfikacja</a>
     </div>
     <div class="hero-meta">
-      <span class="chip">SPRZĘT BEZ ABONAMENTU</span><span class="chip">ONLINE LUB OFFLINE</span><span class="chip">AKTUALIZACJE OTA</span>
+      <span class="chip">BEZ ABONAMENTU</span><span class="chip">BEZ CHMURY</span><span class="chip">AKTUALIZACJE ZDALNE</span>
     </div>
   </div>
   <div class="pmark">
@@ -384,7 +384,7 @@ footer .wrap{position:relative;z-index:2}
     <div class="metrics rv">
       <div class="metric"><b data-count="1">0</b><span>przejście na moduł</span></div>
       <div class="metric"><b data-count="3">0</b><span>metody wejścia</span></div>
-      <div class="metric"><b data-count="200">0</b><span>kart w pamięci centralki</span></div>
+      <div class="metric"><b data-count="0" data-suffix=" ms">0</b><span>zależności od chmury</span></div>
       <div class="metric"><b data-count="12" data-suffix=" V">0</b><span>zasilania</span></div>
     </div>
   </div>
@@ -396,45 +396,8 @@ footer .wrap{position:relative;z-index:2}
     <p>Dotąd wybór wyglądał tak: renomowani producenci, u których jedno przejście potrafi kosztować tysiące, albo tanie zamki na baterie z azjatyckich platform — bez serwisu i o nieznanej żywotności. Node to gotowe urządzenie polskiej produkcji: z montażem, serwisem i stale rozwijanym oprogramowaniem.</p></div>
     <div class="grid g3">
       <article class="card rv"><span class="ch">01</span><h3>Polskie wykonanie</h3><p>Zaprojektowany i składany w Polsce — od płytki po firmware. Zasilanie sieciowe 12 V zamiast baterii, które padają w najgorszym momencie.</p></article>
-      <article class="card rv"><span class="ch">02</span><h3>Sprzęt bez abonamentu</h3><p>Za urządzenie i montaż płacisz raz — ułamek ceny rozwiązań integratorskich. W zestawie nie ma żadnego klucza z datą ważności: plan bezpłatny (2 karty, 2 PIN-y, 2 osoby z aplikacją) działa <strong>bezterminowo</strong>. Dopłacasz dopiero wtedy, gdy potrzebujesz więcej — kodów gościnnych, większej listy osób albo dłuższej historii wejść.</p></article>
-      <article class="card rv"><span class="ch">03</span><h3>Serwis i aktualizacje</h3><p>Oprogramowanie rozwijam stale, a poprawki bezpieczeństwa dostaje każdy — również plan bezpłatny. W trybie online wgrywają się zdalnie (OTA), w trybie offline wgrywam je serwisowo.</p></article>
-    </div>
-  </div>
-</section>
-
-<section style="padding-top:0">
-  <div class="wrap">
-    <div class="sec-head"><span class="eyebrow">Tryby pracy</span><h2>Zdecyduj, czy centralka ma mieć konto</h2>
-    <p>Tryb wybierasz przy uruchomieniu. Różnicą nie jest jakość zamka, tylko to, co dochodzi po stronie serwera: historia wejść, zdalne otwieranie i zarządzanie z dowolnego miejsca.</p></div>
-    <div class="grid g2">
-      <article class="card rv">
-        <span class="ch">OFFLINE</span>
-        <h3 style="margin-bottom:6px">Offline-standalone</h3>
-        <p>Bez konta i bez internetu — maksimum prywatności przy pojedynczym przejściu. Wszystko rozstrzyga się w urządzeniu.</p>
-        <dl class="spec">
-          <div><dt>Konto i serwer</dt><dd>brak</dd></div>
-          <div><dt>Karty i PIN-y</dt><dd>2 + 2</dd></div>
-          <div><dt>Osoby z aplikacją</dt><dd>aplikacja nie działa bez konta</dd></div>
-          <div><dt>Historia wejść</dt><dd>tylko w urządzeniu</dd></div>
-          <div><dt>Zdalne otwieranie</dt><dd>niedostępne</dd></div>
-          <div><dt>Kody gościnne</dt><dd>niedostępne</dd></div>
-          <div><dt>Aktualizacje</dt><dd>serwisowo, na miejscu</dd></div>
-        </dl>
-      </article>
-      <article class="card rv">
-        <span class="ch">ONLINE</span>
-        <h3 style="margin-bottom:6px">Online z kontem Ctrlable</h3>
-        <p>Centralka melduje się na serwerze i pojawia w aplikacji. Karty nadal sprawdzane są lokalnie, więc zanik łącza nie zatrzymuje wejść na kartę.</p>
-        <dl class="spec">
-          <div><dt>Konto i serwer</dt><dd>tak, połączenie szyfrowane</dd></div>
-          <div><dt>Karty i PIN-y</dt><dd>2 + 2 bezterminowo za darmo, więcej wg pakietu</dd></div>
-          <div><dt>Osoby z aplikacją</dt><dd>2 w planie bezpłatnym</dd></div>
-          <div><dt>Historia wejść</dt><dd>na serwerze, z wyszukiwarką</dd></div>
-          <div><dt>Zdalne otwieranie</dt><dd>z aplikacji, z dowolnego miejsca</dd></div>
-          <div><dt>Kody gościnne</dt><dd>od pakietu Silver</dd></div>
-          <div><dt>Aktualizacje</dt><dd>OTA, jednym dotknięciem</dd></div>
-        </dl>
-      </article>
+      <article class="card rv"><span class="ch">02</span><h3>Zero opłat cyklicznych</h3><p>Bez abonamentu i konta w chmurze. Płacisz raz — za sprzęt i montaż — ułamek ceny rozwiązań integratorskich.</p></article>
+      <article class="card rv"><span class="ch">03</span><h3>Serwis i aktualizacje</h3><p>Oprogramowanie rozwijam stale, poprawki wgrywam zdalnie. Rejestr wejść zostaje na lokalnym serwerze — u Ciebie, nie w chmurze.</p></article>
     </div>
   </div>
 </section>
@@ -444,15 +407,13 @@ footer .wrap{position:relative;z-index:2}
     <div class="frow rv">
       <div>
         <span class="eyebrow">Identyfikacja</span>
-        <h2 style="margin:16px 0 14px;font-size:1.7rem">Trzy sposoby wejścia, jedna lista uprawnień</h2>
+        <h2 style="margin:16px 0 14px;font-size:1.7rem">Trzy sposoby wejścia i wyjście awaryjne, jedna lista uprawnień</h2>
         <p>PIN dla ekipy sprzątającej, karta dla pracowników, aplikacja dla właściciela. Każda metoda trafia do tego samego rejestru, więc historia wejść pozostaje spójna.</p>
         <ul style="list-style:none;margin-top:20px">
           <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Kod PIN na klawiaturze przy drzwiach</li>
           <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Karta i brelok zbliżeniowy</li>
           <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Otwarcie z aplikacji Ctrlable Access</li>
           <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Przycisk wyjścia i otwarcie awaryjne</li>
-          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Harmonogramy: dni tygodnia i godziny dla kart i PIN-ów</li>
-          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Kody gościnne z datą wygaśnięcia i limitem użyć</li>
         </ul>
       </div>
       <div class="fart">
@@ -460,10 +421,9 @@ footer .wrap{position:relative;z-index:2}
           <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;color:var(--dim);margin-bottom:14px">TOR AUTORYZACJI</div>
           <div style="display:flex;flex-direction:column;gap:9px">
             <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">01</span><span style="font-size:13.5px">Odczyt karty lub PIN-u</span></div>
-            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">02</span><span style="font-size:13.5px">Karta — sprawdzenie w pamięci centralki</span></div>
-            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">03</span><span style="font-size:13.5px">PIN — weryfikacja po stronie konta</span></div>
-            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">04</span><span style="font-size:13.5px">Zwolnienie zamka, auto-rygiel po 3–30 s</span></div>
-            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--ok)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--ok)">05</span><span style="font-size:13.5px">Zapis zdarzenia w rejestrze</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">02</span><span style="font-size:13.5px">Uprawnienia: karta lokalnie, PIN na serwerze</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">03</span><span style="font-size:13.5px">Zwolnienie zamka</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--ok)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--ok)">04</span><span style="font-size:13.5px">Zapis zdarzenia w rejestrze</span></div>
           </div>
         </div>
       </div>
@@ -474,14 +434,14 @@ footer .wrap{position:relative;z-index:2}
         <span class="eyebrow">Utrzymanie</span>
         <h2 style="margin:16px 0 14px;font-size:1.7rem">Aktualizacje bez wizyty serwisu</h2>
         <p>Nowe wersje firmware'u wgrywają się zdalnie (OTA) — bez wizyty i bez demontażu urządzenia. Wystarczy jedno dotknięcie w aplikacji.</p>
-        <p style="margin-top:14px">Ustawienia przeżywają zanik zasilania — uprawnienia i harmonogramy zapisane są w pamięci nieulotnej. Czas auto-ryglowania ustawiasz osobno dla każdej centralki: 3, 5, 10, 15 albo 30 sekund, bo brama potrzebuje dłuższej chwili niż drzwi wejściowe.</p>
+        <p style="margin-top:14px">Karty i konfiguracja Wi-Fi zapisane są w pamięci nieulotnej urządzenia i przeżywają zanik zasilania. PIN-y i harmonogramy przechowuje serwer.</p>
       </div>
       <div class="fart">
         <div class="term" style="width:100%;box-shadow:none;border-color:var(--line)">
           <div class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title"><b>firmware</b> · aktualizacja</span><span class="term-tag">OK</span></div>
           <div class="log" style="height:auto;padding:16px">
             <div class="log-row" style="grid-template-columns:1fr auto"><span>pobieranie pakietu</span><span class="ok">zakończone</span></div>
-            <div class="log-row" style="grid-template-columns:1fr auto"><span>weryfikacja certyfikatu</span><span class="ok">zgodny</span></div>
+            <div class="log-row" style="grid-template-columns:1fr auto"><span>weryfikacja pakietu</span><span class="ok">OK</span></div>
             <div class="log-row" style="grid-template-columns:1fr auto"><span>instalacja</span><span class="ok">02:14</span></div>
             <div class="log-row" style="grid-template-columns:1fr auto"><span>ponowny start</span><span class="ok">gotowy</span></div>
           </div>
@@ -501,9 +461,8 @@ footer .wrap{position:relative;z-index:2}
           <div><dt>Przejścia na moduł</dt><dd>1</dd></div>
           <div><dt>Zasilanie</dt><dd>12 V DC</dd></div>
           <div><dt>Wyjścia</dt><dd>przekaźnikowe, bezpotencjałowe</dd></div>
-          <div><dt>Wejścia</dt><dd>przycisk wyjścia, tamper (opcjonalnie)</dd></div>
-          <div><dt>Peryferia</dt><dd>czytnik RFID, klawiatura 4×3, wyświetlacz OLED</dd></div>
-          <div><dt>Łączność</dt><dd>WiFi 2,4 GHz</dd></div>
+          <div><dt>Wejścia</dt><dd>przycisk wyjścia</dd></div>
+          <div><dt>Peryferia</dt><dd>czytnik RFID, klawiatura, OLED</dd></div>
           <div><dt>Montaż</dt><dd>puszka podtynkowa lub szafka</dd></div>
         </dl>
       </article>
@@ -511,13 +470,13 @@ footer .wrap{position:relative;z-index:2}
         <h3 style="margin-bottom:6px">System</h3>
         <dl class="spec">
           <div><dt>Identyfikacja</dt><dd>PIN, karta, aplikacja</dd></div>
-          <div><dt>Użytkownicy</dt><dd>karty RFID i PIN-y imienne, wg pakietu</dd></div>
-          <div><dt>Pojemność</dt><dd>do 200 kart w centralce</dd></div>
-          <div><dt>Harmonogramy</dt><dd>dni tygodnia i godziny</dd></div>
+          <div><dt>Użytkownicy</dt><dd>karty RFID i PIN-y imienne</dd></div>
+          <div><dt>Administratorzy</dt><dd>wielu, na zaproszenie</dd></div>
+          <div><dt>Auto-blokada</dt><dd>opóźnienie 1–60 s</dd></div>
+          <div><dt>Sabotaż</dt><dd>czujnik tamper + alert</dd></div>
           <div><dt>Powiadomienia</dt><dd>push na telefon</dd></div>
-          <div><dt>Tryb pracy</dt><dd>online (konto) lub offline-standalone</dd></div>
-          <div><dt>Połączenie</dt><dd>szyfrowane (TLS) do serwera Ctrlable</dd></div>
-          <div><dt>Aktualizacje</dt><dd>zdalne (OTA) w trybie online</dd></div>
+          <div><dt>Chmura</dt><dd>brak — serwer lokalny</dd></div>
+          <div><dt>Aktualizacje</dt><dd>zdalne (OTA)</dd></div>
         </dl>
       </article>
     </div>
@@ -563,7 +522,7 @@ footer .wrap{position:relative;z-index:2}
         <p>Strony internetowe, kontrola dostępu, smart home i systemy bezpieczeństwa. Jedna firma, jeden numer.</p>
         <div class="foot-contact">
           <a class="foot-tel" href="tel:+48696088602"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>696 088 602</a>
-          <a href="mailto:kontakt@ctrlable.pl"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>kontakt@ctrlable.pl</a>
+          <a href="mailto:node@ctrlable.pl"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>node@ctrlable.pl</a>
           <a href="kontakt.html"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 1 8 8c0 5.4-8 12-8 12S4 15.4 4 10a8 8 0 0 1 8-8z"/></svg>Opole i okolice</a>
         </div>
       </div>
@@ -582,8 +541,8 @@ footer .wrap{position:relative;z-index:2}
       <div class="foot-col"><h4>Firma</h4>
         <a href="index.html">Strona główna</a>
         <a href="kontakt.html">Kontakt</a>
-        <a href="#">Polityka prywatności</a>
-        <a href="#">Regulamin</a>
+        <a href="polityka-prywatnosci.html">Polityka prywatności</a>
+        <a href="regulamin.html">Regulamin</a>
       </div>
     </div>
     <div class="foot-status">
@@ -733,7 +692,7 @@ footer .wrap{position:relative;z-index:2}
         'Telefon: ' + (d.get('tel') || '') + '\n' +
         'Zakres: ' + (d.get('zakres') || '') + '\n\n' +
         (d.get('tresc') || '');
-      window.location.href = 'mailto:kontakt@ctrlable.pl?subject=' +
+      window.location.href = 'mailto:node@ctrlable.pl?subject=' +
         encodeURIComponent('Zapytanie ze strony — ' + (d.get('zakres') || 'Ctrlable')) +
         '&body=' + encodeURIComponent(body);
     });

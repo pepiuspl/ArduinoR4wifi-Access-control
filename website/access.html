@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ctrlable Access — aplikacja do kontroli dostępu | Ctrlable</title>
 <!-- CTRLABLE INLINE BUILD v10 -->
-<meta name="description" content="Ctrlable Access to aplikacja do zarządzania dostępem: karty i PIN-y, harmonogramy, kody gościnne, wielu administratorów, rejestr wejść i otwieranie drzwi z telefonu. Android i iOS.">
+<meta name="description" content="Ctrlable Access to aplikacja do zarządzania dostępem: nadawanie uprawnień, harmonogramy, rejestr wejść i otwieranie drzwi z telefonu. Android i iOS.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -364,13 +364,13 @@ footer .wrap{position:relative;z-index:2}
   <div>
     <span class="eyebrow">Produkt własny · aplikacja</span>
     <h1 style="margin:20px 0 20px">Ctrlable <span class="hl">Access</span></h1>
-    <p class="lead">Zarządzanie dostępem z telefonu. Dodajesz osobę, wybierasz drzwi i godziny — zmiana obowiązuje natychmiast, bez wizyty serwisu i bez dzwonienia do instalatora.</p>
+    <p class="lead">Zarządzanie dostępem z telefonu. Dodajesz osobę, wybierasz drzwi, a kodom PIN nadajesz godziny i daty ważności — zmiana obowiązuje natychmiast, bez wizyty serwisu i bez dzwonienia do instalatora.</p>
     <div class="cta-row">
       <a class="btn btn-primary" href="kontakt.html">Zapytaj o wdrożenie</a>
       <a class="btn btn-ghost" href="node.html">Zobacz kontroler <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
     </div>
     <div class="hero-meta">
-      <span class="chip">ANDROID</span><span class="chip">iOS</span><span class="chip">POŁĄCZENIE SZYFROWANE</span>
+      <span class="chip">ANDROID</span><span class="chip">iOS</span><span class="chip">BEZ KONTA W CHMURZE</span>
     </div>
   </div>
   <div class="pmark">
@@ -384,9 +384,11 @@ footer .wrap{position:relative;z-index:2}
     <div class="sec-head"><span class="eyebrow">Do czego służy</span><h2>Cała lista dostępów w jednym miejscu</h2>
     <p>Zamiast zeszytu z numerami kart i pytań „kto ma jeszcze klucz" — jedna lista, którą sam kontrolujesz. Nadanie i odebranie dostępu zajmuje kilkanaście sekund.</p></div>
     <div class="grid g3">
-      <article class="card rv"><span class="ch">DOSTĘP</span><h3>Nadawanie i odbieranie</h3><p>Nowy pracownik dostaje uprawnienia od ręki. Osoba odchodząca traci je natychmiast, bez wymiany zamków i kart. Zarządzanie możesz przekazać drugiej osobie — zaproszenie idzie e-mailem.</p></article>
+      <article class="card rv"><span class="ch">DOSTĘP</span><h3>Nadawanie i odbieranie</h3><p>Nowy pracownik dostaje uprawnienia od ręki. Osoba odchodząca traci je natychmiast, bez wymiany zamków i kart.</p></article>
       <article class="card rv"><span class="ch">ZDALNIE</span><h3>Otwarcie z telefonu</h3><p>Kurier przy bramie, a Ty w pracy? Otwierasz jednym dotknięciem, a wpis ląduje w historii.</p></article>
-      <article class="card rv"><span class="ch">HISTORIA</span><h3>Rejestr wejść</h3><p>Kto, gdzie i o której. Podgląd na żywo albo wyszukiwarka: kategorie zdarzeń, zakres dat i widoczne próby nieudane.</p></article>
+      <article class="card rv"><span class="ch">HISTORIA</span><h3>Rejestr wejść</h3><p>Kto, gdzie i o której. Filtrowanie po kategorii, tekście i zakresie dat, z widocznymi próbami nieudanymi.</p></article>
+      <article class="card rv"><span class="ch">GOŚCIE</span><h3>Kody gościnne</h3><p>PIN z datą ważności i opcjonalnym limitem użyć — dla ekipy, kuriera czy najmu krótkoterminowego. Wygasa sam, sprawdzany po stronie serwera.</p></article>
+      <article class="card rv"><span class="ch">HARMONOGRAM</span><h3>Godziny dostępu dla PIN</h3><p>Każdemu kodowi PIN ustawiasz dni tygodnia i przedział godzin. Poza oknem czasowym serwer odmawia otwarcia — bez ingerencji w urządzenie.</p></article>
     </div>
   </div>
 </section>
@@ -398,7 +400,7 @@ footer .wrap{position:relative;z-index:2}
         <span class="eyebrow">Codzienna praca</span>
         <h2 style="margin:16px 0 14px;font-size:1.7rem">Otwarcie drzwi jednym dotknięciem</h2>
         <p>Stan zamka, ostatnie zdarzenia i przycisk otwarcia na jednym ekranie. Widzisz też od razu, czy urządzenie jest online — zanim ktoś zadzwoni, że coś nie działa.</p>
-        <p style="margin-top:14px">Aplikacja łączy się z serwerem Ctrlable po szyfrowanym połączeniu — tak samo w budynku, jak i poza nim. Centralka rozmawia z serwerem tym samym kanałem, z przypiętym certyfikatem.</p>
+        <p style="margin-top:14px">Aplikacja łączy się z kontrolerem w sieci lokalnej. Poza budynkiem działa przez bezpieczne połączenie, które konfiguruję przy wdrożeniu.</p>
       </div>
       <div class="fart">
         <div class="phone">
@@ -432,6 +434,24 @@ footer .wrap{position:relative;z-index:2}
         </div>
       </div>
     </div>
+
+    <div class="frow rv">
+      <div>
+        <span class="eyebrow">Zespół</span>
+        <h2 style="margin:16px 0 14px;font-size:1.7rem">Współadministratorzy na zaproszenie</h2>
+        <p>Właściciel zaprasza kolejne osoby e-mailem (link lub kod) — osobno dla każdej centralki. Współadministrator otwiera drzwi, zarządza kartami i PIN-ami oraz widzi rejestr, ale nie zmieni ustawień sieciowych ani nie usunie urządzenia. Dostęp odbierasz jednym dotknięciem.</p>
+      </div>
+      <div class="fart">
+        <div style="width:100%;max-width:300px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;color:var(--dim);margin-bottom:14px">ADMINISTRATORZY · WEJŚCIE GŁÓWNE</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;justify-content:space-between;padding:11px 13px;background:var(--panel-2);border-radius:6px;font-size:13.5px"><span>tomek@firma.pl · właściciel</span><span style="color:var(--accent-2);font-family:'IBM Plex Mono',monospace;font-size:11px">PEŁNE</span></div>
+            <div style="display:flex;justify-content:space-between;padding:11px 13px;background:var(--panel-2);border-radius:6px;font-size:13.5px"><span>anna@firma.pl · admin</span><span style="color:var(--ok);font-family:'IBM Plex Mono',monospace;font-size:11px">AKTYWNY</span></div>
+            <div style="display:flex;justify-content:space-between;padding:11px 13px;background:var(--panel-2);border-radius:6px;font-size:13.5px;opacity:.55"><span>biuro@firma.pl · zaproszony</span><span style="color:var(--dim);font-family:'IBM Plex Mono',monospace;font-size:11px">OCZEKUJE</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -442,30 +462,113 @@ footer .wrap{position:relative;z-index:2}
       <article class="card rv">
         <h3 style="margin-bottom:6px">Zarządzanie</h3>
         <dl class="spec">
-          <div><dt>Karty RFID</dt><dd>dodawanie, nazwa, blokada</dd></div>
+          <div><dt>Użytkownicy</dt><dd>dodawanie i blokowanie</dd></div>
           <div><dt>PIN-y</dt><dd>nazwa, blokada, usunięcie</dd></div>
-          <div><dt>Kody gościnne</dt><dd>wygasanie i limit użyć</dd></div>
-          <div><dt>Harmonogramy</dt><dd>dni tygodnia i godziny</dd></div>
           <div><dt>Zdalne otwarcie</dt><dd>jedno dotknięcie</dd></div>
-          <div><dt>Auto-rygiel</dt><dd>3–30 s, osobno dla centralki</dd></div>
-          <div><dt>Administratorzy</dt><dd>zaproszenia e-mail</dd></div>
+          <div><dt>Wiele centralek</dt><dd>przełącznik urządzeń</dd></div>
+          <div><dt>Nazwy urządzeń</dt><dd>edycja z aplikacji</dd></div>
           <div><dt>WiFi urządzenia</dt><dd>zmiana z aplikacji</dd></div>
         </dl>
       </article>
       <article class="card rv">
         <h3 style="margin-bottom:6px">Podgląd</h3>
         <dl class="spec">
-          <div><dt>Rejestr zdarzeń</dt><dd>na żywo i wyszukiwarka</dd></div>
-          <div><dt>Kategorie zdarzeń</dt><dd>wejścia, bezpieczeństwo, konfiguracja</dd></div>
-          <div><dt>Zakres dat</dt><dd>filtrowanie i doczytywanie</dd></div>
+          <div><dt>Rejestr zdarzeń</dt><dd>pełna historia</dd></div>
+          <div><dt>Wyszukiwarka</dt><dd>tekst, kategoria, daty</dd></div>
           <div><dt>Aktualizacje</dt><dd>firmware OTA z aplikacji</dd></div>
           <div><dt>Stan urządzeń</dt><dd>online i offline</dd></div>
-          <div><dt>Wiele centralek</dt><dd>jedno konto, własne nazwy</dd></div>
-          <div><dt>Powiadomienia</dt><dd>otwarcia i alarmy, osobno</dd></div>
-          <div><dt>Wyrejestrowanie</dt><dd>reset centralki z kodem e-mail</dd></div>
+          <div><dt>Powiadomienia</dt><dd>wejścia i alarmy, osobno</dd></div>
         </dl>
       </article>
     </div>
+  </div>
+</section>
+
+<section id="tryby" style="padding-top:0">
+  <div class="wrap">
+    <div class="sec-head"><span class="eyebrow">Tryby pracy</span><h2>Z chmurą czy bez — Twój wybór</h2>
+    <p>To samo urządzenie, dwie drogi. Możesz uruchomić je w pełni lokalnie, bez konta i serwera — albo online, gdzie dochodzą logi, zdalny dostęp i zarządzanie zespołem. Za sprzęt płacisz raz; tryb offline jest darmowy na zawsze.</p></div>
+    <div class="grid g2">
+      <article class="card rv">
+        <span class="ch">BEZ CHMURY</span>
+        <h3>Tryb offline (lokalny)</h3>
+        <p>Zero chmury, zero konta, dane wyłącznie w urządzeniu — maksymalna prywatność i niezależność. W zamian: ograniczona liczba użytkowników i brak funkcji serwerowych.</p>
+        <dl class="spec">
+          <div><dt>Konto i serwer</dt><dd>brak</dd></div>
+          <div><dt>Użytkownicy</dt><dd>do 2</dd></div>
+          <div><dt>Weryfikacja</dt><dd>lokalna, natychmiast</dd></div>
+          <div><dt>Logi, zdalny dostęp, kody gościnne</dt><dd>—</dd></div>
+          <div><dt>Aktualizacje</dt><dd>serwisowo</dd></div>
+        </dl>
+      </article>
+      <article class="card rv">
+        <span class="ch">ONLINE</span>
+        <h3>Tryb online (z kontem)</h3>
+        <p>Centralka łączy się z serwerem: pełna historia wejść, otwieranie i zarządzanie zdalnie, zapraszanie administratorów, kody gościnne i aktualizacje przez aplikację. Liczba użytkowników zależy od pakietu.</p>
+        <dl class="spec">
+          <div><dt>Konto i serwer</dt><dd>tak</dd></div>
+          <div><dt>Użytkownicy</dt><dd>wg pakietu (do 50+)</dd></div>
+          <div><dt>Rejestr wejść (logi)</dt><dd>tak</dd></div>
+          <div><dt>Zdalny dostęp i multi-admin</dt><dd>tak</dd></div>
+          <div><dt>Kody gościnne i aktualizacje OTA</dt><dd>tak</dd></div>
+        </dl>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="pakiety" style="padding-top:0">
+  <div class="wrap">
+    <div class="sec-head"><span class="eyebrow">Pakiety</span><h2>Licencja skrojona pod obiekt</h2>
+    <p>Tryb online działa na koncie — pakiet decyduje o liczbie użytkowników, retencji logów oraz liczbie administratorów i centralek. Opłata jest symboliczna względem sprzętu; pokrywa utrzymanie danych na serwerze. Krytyczne łatki bezpieczeństwa są bezpłatne w każdym pakiecie.</p></div>
+    <div class="grid g4">
+      <article class="card rv">
+        <span class="ch">BEZ LICENCJI</span>
+        <h3>Darmowy</h3>
+        <dl class="spec">
+          <div><dt>Użytkownicy</dt><dd>2</dd></div>
+          <div><dt>Logi</dt><dd>15 dni</dd></div>
+          <div><dt>Administratorzy</dt><dd>1</dd></div>
+          <div><dt>Centralki</dt><dd>1</dd></div>
+          <div><dt>Kody gościnne</dt><dd>—</dd></div>
+        </dl>
+      </article>
+      <article class="card rv">
+        <span class="ch">SILVER</span>
+        <h3>Silver</h3>
+        <dl class="spec">
+          <div><dt>Użytkownicy</dt><dd>10</dd></div>
+          <div><dt>Logi</dt><dd>45 dni</dd></div>
+          <div><dt>Administratorzy</dt><dd>3</dd></div>
+          <div><dt>Centralki</dt><dd>2</dd></div>
+          <div><dt>Kody gościnne</dt><dd>tak</dd></div>
+        </dl>
+      </article>
+      <article class="card rv">
+        <span class="ch">GOLD</span>
+        <h3>Gold</h3>
+        <dl class="spec">
+          <div><dt>Użytkownicy</dt><dd>50</dd></div>
+          <div><dt>Logi</dt><dd>90 dni</dd></div>
+          <div><dt>Administratorzy</dt><dd>bez limitu</dd></div>
+          <div><dt>Centralki</dt><dd>bez limitu</dd></div>
+          <div><dt>Kody gościnne</dt><dd>tak</dd></div>
+        </dl>
+      </article>
+      <article class="card rv">
+        <span class="ch">INDYWIDUALNA</span>
+        <h3>Indywidualna</h3>
+        <dl class="spec">
+          <div><dt>Użytkownicy</dt><dd>wg umowy</dd></div>
+          <div><dt>Logi</dt><dd>wg umowy</dd></div>
+          <div><dt>Administratorzy</dt><dd>wg umowy</dd></div>
+          <div><dt>Centralki</dt><dd>wg umowy</dd></div>
+          <div><dt>SLA i wsparcie</dt><dd>tak</dd></div>
+        </dl>
+        <a class="more" href="kontakt.html">Zapytaj o wycenę <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </article>
+    </div>
+    <p style="text-align:center;margin-top:26px;color:var(--dim);font-size:14px">Ceny ustalane indywidualnie — <a href="kontakt.html" style="color:var(--accent-2);text-decoration:underline">zapytaj o wycenę</a>.</p>
   </div>
 </section>
 
@@ -508,7 +611,7 @@ footer .wrap{position:relative;z-index:2}
         <p>Strony internetowe, kontrola dostępu, smart home i systemy bezpieczeństwa. Jedna firma, jeden numer.</p>
         <div class="foot-contact">
           <a class="foot-tel" href="tel:+48696088602"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>696 088 602</a>
-          <a href="mailto:kontakt@ctrlable.pl"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>kontakt@ctrlable.pl</a>
+          <a href="mailto:node@ctrlable.pl"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>node@ctrlable.pl</a>
           <a href="kontakt.html"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 1 8 8c0 5.4-8 12-8 12S4 15.4 4 10a8 8 0 0 1 8-8z"/></svg>Opole i okolice</a>
         </div>
       </div>
@@ -527,8 +630,8 @@ footer .wrap{position:relative;z-index:2}
       <div class="foot-col"><h4>Firma</h4>
         <a href="index.html">Strona główna</a>
         <a href="kontakt.html">Kontakt</a>
-        <a href="#">Polityka prywatności</a>
-        <a href="#">Regulamin</a>
+        <a href="polityka-prywatnosci.html">Polityka prywatności</a>
+        <a href="regulamin.html">Regulamin</a>
       </div>
     </div>
     <div class="foot-status">
@@ -678,7 +781,7 @@ footer .wrap{position:relative;z-index:2}
         'Telefon: ' + (d.get('tel') || '') + '\n' +
         'Zakres: ' + (d.get('zakres') || '') + '\n\n' +
         (d.get('tresc') || '');
-      window.location.href = 'mailto:kontakt@ctrlable.pl?subject=' +
+      window.location.href = 'mailto:node@ctrlable.pl?subject=' +
         encodeURIComponent('Zapytanie ze strony — ' + (d.get('zakres') || 'Ctrlable')) +
         '&body=' + encodeURIComponent(body);
     });
