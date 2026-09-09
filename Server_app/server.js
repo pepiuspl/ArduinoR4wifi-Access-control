@@ -2736,7 +2736,11 @@ mailTransport.verify((error, success) => {
 // =========================================================================
 const TIER_PRESETS = {
   // max_devices: null = BEZ LIMITU (limit centralek zniesiony 2026-08-17).
-  free:       { max_cards: 2,   max_pins: 2,   max_admins: 1,  max_devices: null, log_retention_days: 15, guest_codes_enabled: false, pin_changes_per_month: 4 },
+  // max_admins LICZY WŁAŚCICIELA. 2 = właściciel + jeden współadmin: typowy nabywca
+  // zestawu to dom z dwiema osobami, które obie chcą mieć aplikację. Przy 1 darmowy
+  // poziom był dla nich rozczarowaniem od pierwszego dnia (decyzja 2026-09-09,
+  // LICENSING.md §3.1). Multi-admin jako upsell działa dopiero od 3. osoby.
+  free:       { max_cards: 2,   max_pins: 2,   max_admins: 2,  max_devices: null, log_retention_days: 15, guest_codes_enabled: false, pin_changes_per_month: 4 },
   silver:     { max_cards: 10,  max_pins: 10,  max_admins: 3,  max_devices: null, log_retention_days: 45, guest_codes_enabled: true,  pin_changes_per_month: null },
   gold:       { max_cards: 50,  max_pins: 50,  max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
   individual: { max_cards: 200, max_pins: 200, max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
@@ -2839,7 +2843,7 @@ async function runSchemaMigrations() {
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_tier VARCHAR(20) DEFAULT 'free'`,
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_cards INT DEFAULT 2`,          // per centralka
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_pins INT DEFAULT 2`,           // per centralka
-    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_admins INT DEFAULT 1`,         // łącznie z właścicielem
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_admins INT DEFAULT 2`,         // łącznie z właścicielem (2 = właściciel + 1 współadmin)
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_devices INT DEFAULT 1`,        // per konto
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS log_retention_days INT DEFAULT 15`,
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS guest_codes_enabled BOOLEAN DEFAULT false`,
@@ -2857,6 +2861,13 @@ async function runSchemaMigrations() {
     // brama wjazdowa potrzebuje dłużej niż drzwi wejściowe. Firmware przyjmuje
     // 1000–60000 ms i sam pilnuje zakresu; serwer wysyła to w odpowiedzi polla.
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS auto_lock_delay_ms INT DEFAULT 3000`,
+    // Podniesienie darmowego limitu administratorów z 1 na 2 (decyzja 2026-09-09,
+    // LICENSING.md §3.1). Kolumna powstała z DEFAULT 1, więc konta założone wcześniej
+    // miałyby stare ograniczenie. Idempotentne: po pierwszym przebiegu żaden wiersz
+    // darmowy nie ma już wartości 1. Dotyka WYŁĄCZNIE kont darmowych — pakietów
+    // płatnych i wartości ustawionych ręcznie (individual) nie rusza.
+    `UPDATE accounts SET max_admins = 2
+       WHERE max_admins = 1 AND (license_tier = 'free' OR license_tier IS NULL)`,
   ];
   // Wielu administratorów na jedno urządzenie: konto-właściciel (devices.account_id)
   // pozostaje jedynym uprawnionym do usuwania/zmiany WiFi/zapraszania innych,

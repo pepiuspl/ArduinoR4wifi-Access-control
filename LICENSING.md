@@ -1,6 +1,6 @@
 # CTRLABLE Node — Model limitów i licencji
 
-**Wersja robocza — 13 sierpnia 2026.** Liczby oznaczone *(prowizorycznie)* wymagają potwierdzenia:
+**Wersja robocza — 13 sierpnia 2026, zaktualizowana 9 września 2026 (§3.3, §3.4, darmowy poziom = 2+2 i 2 adminów).** Liczby oznaczone *(prowizorycznie)* wymagają potwierdzenia:
 ceny — decyzja biznesowa; sufit sprzętowy — walidacja na urządzeniu (bench‑test RAM/czasu skanu).
 
 ---
@@ -16,7 +16,7 @@ Limity biorą się z **dwóch różnych źródeł**, których nie wolno mieszać
 
 **Efektywny limit = min(limit licencji, sufit sprzętowy).** Ponieważ sufit sprzętowy (~500) jest wyżej niż najwyższy pakiet, w praktyce **wiąże licencja** — sprzedaż, nie sprzęt.
 
-**Offline = tryb odporności, nie osobny limit ani osobny produkt.** Wszystkie poświadczenia konta (do limitu pakietu) są synchronizowane lokalnie do centralki i działają natychmiast — także przy zaniku łącza. Darmowy poziom to pakiet **„Bez licencji" (2+2), również online** — nie ma „taniego offline", którym klient omija opłatę.
+**Offline = tryb odporności, nie osobny limit ani osobny produkt.** Wszystkie poświadczenia konta (do limitu pakietu) są synchronizowane lokalnie do centralki i działają natychmiast — także przy zaniku łącza. Darmowy poziom to pakiet **„Bez licencji" (2+2, 2 adminów), również online i bezterminowy** — nie ma „taniego offline", którym klient omija opłatę.
 
 ---
 
@@ -67,7 +67,7 @@ Pakiety dotyczą **trybu online** (konto + serwer). Tryb **offline‑standalone*
 
 | Pakiet | Karty | PIN‑y | Retencja logów | Kody gościnne | Zmiany PIN / mies. | Admini | Centralki |
 |---|---|---|---|---|---|---|---|
-| **Bez licencji** (darmowy) | 2 | 2 | 15 dni | ❌ | **limit** (np. 4) *(prow.)* | 1 (właściciel) | 1 |
+| **Bez licencji** (darmowy) | 2 | 2 | 15 dni | ❌ | **limit** (np. 4) *(prow.)* | **2** (właściciel + 1) | 1 |
 | **Silver** | 10 | 10 | 45 dni | ✅ | bez limitu | 3 *(prow.)* | 2 *(prow.)* |
 | **Gold** | 50 | 50 | 90 dni | ✅ | bez limitu | bez limitu | bez limitu |
 | **Indywidualna** | dowolnie (≤ sufit) | dowolnie (≤ sufit) | wg umowy | ✅ | bez limitu | wg umowy | wg umowy |
@@ -77,20 +77,45 @@ Pakiet to nie tylko liczba użytkowników — pakietuje też **retencję logów,
 ### 3.1 Reguły segmentujące (celowane w konkretne przypadki)
 - **Kody gościnne (wygasanie + limit użyć) = tylko licencja.** To domyka segment **najmu krótkoterminowego (Airbnb)**: na „Bez licencji" nie ma automatycznych kodów gościnnych, a ręczne zmiany PIN są limitowane (np. 4/mies.) — kto rotuje kody dla gości, musi wykupić licencję. Bez tej reguły host obchodziłby limit zmian PIN, ustawiając wygasające kody gościnne.
 - **Limit zmian PIN/miesiąc** (tylko „Bez licencji"): liczony jako operacje add/usuń/edytuj PIN w miesiącu kalendarzowym. Cel: ten sam segment najmu.
+- **Dwaj administratorzy na darmowym poziomie to świadoma decyzja** (9 września 2026), nie przeoczenie. Typowy nabywca zestawu to dom z dwiema osobami, które obie chcą mieć aplikację i otwierać zdalnie — przy `max_admins=1` darmowy poziom był dla nich rozczarowaniem od pierwszego dnia. Multi‑admin jako upsell zaczyna więc działać dopiero **od trzeciej osoby**: celem jest firma, nie para. Kosztu serwerowego to praktycznie nie rusza (jeden wiersz w `accounts` więcej).
 
 ### 3.2 Aktualizacje i wsparcie
 - **Krytyczne łatki bezpieczeństwa — zawsze dostępne, dla każdego pakietu.** Uzasadnienie: to zamek — pozostawienie znanych luk to ryzyko dla klienta i odpowiedzialność producenta.
 - **Dostarczanie:** online → OTA przez aplikację (automatycznie). **Offline‑standalone → ręcznie/serwisowo** (brak kanału app; ale i mniejsza powierzchnia ataku, bo bez internetu — §1a).
 - **Nowe funkcje i wsparcie techniczne — tylko licencja** (Silver/Gold/Indywidualna). „Bez licencji" dostaje działający produkt + bezpieczeństwo, ale nie rozwój.
 
-### 3.3 Cennik (zasada, nie liczby)
-Licencje mają być **tanie względem sprzętu** — symboliczna opłata za utrzymanie miejsca i danych na serwerze, spójna z brandem „bez abonamentu za sprzęt". Zastrzeżenie: opłata powinna **pokrywać realny koszt serwerowy per konto** (storage rośnie z retencją i liczbą użytkowników), żeby skala nie generowała straty. Konkretne kwoty — decyzja biznesowa.
+### 3.3 Cennik i model sprzedaży (ustalone 9 września 2026)
+
+Licencje mają być **tanie względem sprzętu** — symboliczna opłata za utrzymanie miejsca i danych na serwerze, spójna z brandem „bez abonamentu za sprzęt". Opłata musi **pokrywać realny koszt serwerowy per konto** (storage rośnie z retencją i liczbą użytkowników), żeby skala nie generowała straty.
+
+**Sprzęt sprzedawany jest bez klucza licencyjnego i bez zegara.** Rozważana była opcja „licencja na rok w zestawie" — **odrzucona**. Powodem nie jest cena, tylko odbiór przy zakupie: w momencie, w którym na pudełku pojawia się data ważności, klient czyta „abonament" i dolicza sobie koszt cykliczny. Tracimy główny argument sprzedażowy („płacisz raz za sprzęt"), nie zyskując w zamian przychodu — nabywca 2‑osobowy i tak nigdy nie kupiłby pakietu.
+
+- **Darmowy poziom „Bez licencji" jest bezterminowy.** Zestaw kupiony dziś działa w tym samym zakresie za pięć lat, bez żadnej opłaty. To jest zdanie, które rozbraja obawę „czy będę musiał dopłacać" — musi być wprost na stronie i w materiałach.
+- **Licencję klient kupuje wtedy, gdy sam po nią sięgnie** — w aplikacji, przy próbie dodania 3. karty albo kodu gościnnego. Komunikat brzmi „potrzebujesz więcej", a nie „skończyła się subskrypcja".
+- **Okres domyślny: rok.** Miesięczny **tylko dla Silvera** — dla sezonowego najmu (kody gościnne od maja do września). Poza tym segmentem miesięczne rozliczenia to więcej pracy operacyjnej niż przychodu przy jednoosobowej firmie.
+- **Widełki:** orientacyjnie **≤ 10% ceny zestawu rocznie** (przy zestawie ~1000 zł daje to rząd 60–120 zł/rok za Silvera). Powyżej tego progu opłata przestaje być odbierana jako „utrzymanie konta", a zaczyna jako renta. Dolna granica bez zmian: koszt serwerowy per konto. Konkretne kwoty — nadal decyzja biznesowa.
+- **Przychód spoza licencji** — tam realnie leżą pieniądze przy zestawie za ~1000 zł i żadna z tych pozycji nie jest czynszem, więc nie psuje brandu: montaż i wdrożenie, przedłużona gwarancja (§8), kolejne centralki (sprzedaż sprzętu, nie licencji), jednorazowy podpisany klucz offline (§7).
+
+### 3.4 Wygaśnięcie licencji — degradacja, nigdy blokada
+
+**Zasada nadrzędna: to jest zamek. Nikt nigdy nie zostaje pod drzwiami z powodu płatności.** Reputacyjny koszt jednego takiego zdarzenia przewyższa cały przychód z licencji.
+
+Po upływie `license_valid_until` konto schodzi do poziomu „Bez licencji", ale:
+
+- **istniejące karty i PIN‑y działają dalej** — także te ponad limit 2+2 (grandfathering). Zejście z 10 kart na 2 nie może oznaczać, że ośmiu osobom przestaje otwierać drzwi;
+- **istniejący współadministratorzy zachowują dostęp** (wiersze `device_shares` zostają) — blokowane jest zapraszanie kolejnych ponad limit;
+- blokowane jest wyłącznie **dodawanie** nowych poświadczeń ponad darmowy limit oraz wystawianie nowych kodów gościnnych (już wydane dobiegają swojego wygaśnięcia), a retencja logów wraca do 15 dni;
+- krytyczne łatki bezpieczeństwa lecą dalej, jak dla każdego pakietu (§3.2).
+
+Technicznie: limit egzekwowany jest **wyłącznie na operacjach zapisu** (`POST /api/user/...`, `/api/keypad/add`, `/api/devices/invite`) — nigdy na synchronizacji poświadczeń do centralki ani na weryfikacji przy otwarciu. Firmware o licencji nie wie i wiedzieć nie powinien; pilnuje tylko sufitu sprzętowego (§2).
+
+**Stan implementacji:** to już działa. `getEntitlements()` w `server.js` sprawdza `license_valid_until` przy każdym odczycie uprawnień i po wygaśnięciu zwraca preset `free` z flagą `expired`, a ponieważ limity sprawdzane są tylko przy dodawaniu, istniejące karty, PIN‑y i współadmini zostają nietknięte. Kody licencyjne (tier + liczba dni, jednorazowe) obsługuje tabela `license_codes` i `licensekey.js`, więc dołożenie kodu do zestawu jest technicznie trywialne — to, że tego nie robimy, jest decyzją produktową z §3.3, nie brakiem mechanizmu.
 
 ---
 
 ## 4. Jak to się składa (przykłady)
 
-- **Bez licencji, mały sklep, 2 osoby:** 2 karty + 2 PIN‑y, logi 15 dni, brak kodów gościnnych, ręczne zmiany PIN limitowane. Dostaje łatki bezpieczeństwa, ale nie nowe funkcje.
+- **Bez licencji, mały sklep, 2 osoby:** 2 karty + 2 PIN‑y, dwoje właścicieli z aplikacją (2 adminy), logi 15 dni, brak kodów gościnnych, ręczne zmiany PIN limitowane. Dostaje łatki bezpieczeństwa, ale nie nowe funkcje — i nie płaci nigdy nic ponad zestaw.
 - **Airbnb, „Bez licencji":** chce rotować kody dla gości → brak kodów gościnnych + limit zmian PIN/mies. wymusza wykup **Silver** (kody gościnne z wygasaniem). To celowana konwersja.
 - **Silver, 1 drzwi, 8 osób:** wszyscy zsynchronizowani do LittleFS, weryfikacja lokalna, logi 45 dni. Dodanie 11. karty → serwer odmawia (limit 10) i proponuje Gold.
 - **Gold, 3 drzwi, 40 osób:** licencja per konto = 50, mieści się. Każda centralka trzyma lokalnie użytkowników z dostępem do niej (≤ sufit sprzętowy 500).
@@ -111,12 +136,12 @@ Klient kupuje **plan na konto**, nie na sztukę sprzętu. Skutki:
 
 **Na koncie (serwer, tabela `accounts`)** — pola liczbowe, nie sztywny enum:
 - `max_cards`, `max_pins` — limit użytkowników (wg pakietu)
-- `max_admins`, `max_devices`
+- `max_admins`, `max_devices` — na darmowym poziomie `max_admins=2` (właściciel + 1 współadmin), `max_devices=1`
 - `log_retention_days`
 - `guest_codes_enabled` (bool) — kody gościnne tylko od Silver w górę
 - `pin_changes_per_month` — limit zmian PIN (tylko „Bez licencji"; np. 4)
 - `license_tier` — nazwa presetu (Bez licencji/Silver/Gold/Individual), tylko dla czytelności/UI
-- `license_valid_until` — opcjonalnie, ważność umowy
+- `license_valid_until` — opcjonalnie, ważność umowy; po upływie **degradacja z grandfatheringiem**, nie blokada — patrz §3.4
 
 **Tier = preset tych liczb.** „Indywidualna" = ustawiasz liczby ręcznie. Dzięki temu każda prywatna umowa jest możliwa bez zmian w firmwarze ani w kodzie.
 
@@ -130,10 +155,10 @@ Klient kupuje **plan na konto**, nie na sztukę sprzętu. Skutki:
 ---
 
 ## 7. Do ustalenia
-- **Ceny** pakietów — decyzja biznesowa (zasada: tanio względem sprzętu, ale ≥ koszt serwera per konto).
+- **Ceny** pakietów — konkretne kwoty nadal do ustalenia. Widełki i model sprzedaży już **zamknięte** — §3.3 (bez zegara w zestawie, rok jako okres domyślny, ≤ 10% ceny zestawu rocznie).
 - **Limit zmian PIN/mies.** dla „Bez licencji" — konkretna liczba (propozycja: 4).
 - **Sufit sprzętowy** (tu 500/500) — do potwierdzenia bench‑testem (RAM + czas skanu przy pełnym magazynie).
-- **Ważność licencji** (`license_valid_until`) — czy egzekwować wygasanie, i co po wygaśnięciu: zejście do „Bez licencji" (2+2)? tryb tylko‑do‑odczytu? (Krytyczne łatki bezpieczeństwa zostają zawsze — §3.2.)
+- ~~**Ważność licencji** — co po wygaśnięciu~~ — **rozstrzygnięte 9 września 2026 (§3.4):** zejście do „Bez licencji" z grandfatheringiem istniejących poświadczeń i współadminów. Nigdy tryb, w którym ktoś nie wchodzi do budynku. Zaimplementowane w `getEntitlements()` (`server.js`) — patrz §3.4.
 - **Regulamin gwarancyjny** — osobny dokument do stworzenia (patrz §8). Ustalone: **gwarancja 24 mies., możliwość przedłużenia za dopłatą (negocjowalne przy umowach indywidualnych)**. Brakuje jeszcze: kto montuje, proces reklamacji.
 - **Licencja offline (przyszłość)** — dla segmentu „dużo użytkowników, zero chmury, płacę": jednorazowy **podpisany** klucz wpisywany przy inicjalizacji, który podnosi limit offline‑standalone **bez serwera** (firmware waliduje podpis). Obsługuje >2 użytkowników bez chmury, spójne z brandem. Do zaprojektowania.
 
