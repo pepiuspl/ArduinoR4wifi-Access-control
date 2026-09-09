@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ctrlable Node — centrala kontroli dostępu: PIN, karta, aplikacja | Ctrlable</title>
+<!-- CTRLABLE INLINE BUILD v10 -->
+<meta name="description" content="Ctrlable Node to autorska centrala kontroli dostępu: PIN, karta i aplikacja. Karty i harmonogramy sprawdzane lokalnie w urządzeniu, aktualizacje OTA, praca w trybie online z kontem albo offline-standalone bez chmury.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#060D16;
+  --ink-2:#0A131F;
+  --panel:#101E2E;
+  --panel-2:#16273A;
+  --line:rgba(255,255,255,.075);
+  --line-2:rgba(255,255,255,.14);
+  --text:#E9F0F7;
+  --muted:#93A9C0;
+  --dim:#6C819A;
+  --accent:#1E6FE8;
+  --accent-2:#4D9BFF;
+  --accent-soft:rgba(30,111,232,.12);
+  --ok:#3FD48B;
+  --no:#E86A55;
+  --wrap:1180px;
+  --ease:cubic-bezier(.22,.68,.32,1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:90px}
+body{
+  background:var(--ink);color:var(--text);
+  font-family:"IBM Plex Sans",system-ui,sans-serif;
+  font-size:17px;line-height:1.68;-webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+.wrap{max-width:var(--wrap);margin:0 auto;padding:0 28px}
+h1,h2,h3,h4{font-family:"Archivo",system-ui,sans-serif;font-stretch:112%;line-height:1.06;letter-spacing:-.02em;font-weight:700}
+h1{font-size:clamp(2.5rem,6.2vw,4.6rem)}
+h2{font-size:clamp(1.8rem,3.6vw,2.8rem);font-weight:600}
+h3{font-size:1.2rem;font-weight:600;line-height:1.32;letter-spacing:-.005em}
+p{color:var(--muted)}
+a{color:inherit;text-decoration:none}
+img{max-width:100%;display:block}
+.mono{font-family:"IBM Plex Mono",monospace}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--accent-2);display:inline-flex;align-items:center;gap:9px}
+.eyebrow:before{content:"";width:22px;height:1px;background:var(--accent)}
+.lead{font-size:1.1rem;max-width:56ch}
+.rule{height:1px;background:var(--line);border:0}
+.center{text-align:center}
+.center .eyebrow{justify-content:center}
+
+/* progress */
+#bar{position:fixed;top:0;left:0;height:2px;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));z-index:99;transition:width .1s linear}
+
+/* nav */
+.nav{position:sticky;top:0;z-index:80;background:rgba(6,13,22,.82);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);transition:height .3s var(--ease)}
+.nav-in{display:flex;align-items:center;justify-content:space-between;gap:18px;height:74px;transition:height .3s var(--ease)}
+.nav.small .nav-in{height:62px}
+.brand{display:flex;align-items:center;gap:11px}
+.brand-txt{font-family:"Archivo",sans-serif;font-stretch:112%;font-weight:600;font-size:20px;letter-spacing:-.02em}
+.nav-links{display:flex;gap:6px;align-items:center}
+.nav-links a{font-size:14.5px;color:var(--muted);padding:8px 13px;border-radius:4px;position:relative;transition:color .2s}
+.nav-links a:hover{color:var(--text)}
+.nav-links a.on{color:var(--text)}
+.nav-links a.on:after{content:"";position:absolute;left:13px;right:13px;bottom:2px;height:1.5px;background:var(--accent)}
+.nav-cta{font-family:"IBM Plex Mono",monospace;font-size:14px;font-weight:500;color:#04101F;background:var(--accent-2);padding:10px 17px;border-radius:4px;white-space:nowrap;transition:.2s;box-shadow:0 0 0 0 var(--accent-soft)}
+.nav-cta:hover{background:#7AB4FF;box-shadow:0 0 26px rgba(77,155,255,.4)}
+.burger{display:none;background:none;border:1px solid var(--line-2);border-radius:4px;width:40px;height:38px;cursor:pointer;color:var(--text);align-items:center;justify-content:center}
+.drawer{display:none;flex-direction:column;gap:2px;padding:14px 0 22px;border-top:1px solid var(--line)}
+.drawer.open{display:flex}
+.drawer a{padding:11px 4px;color:var(--muted);font-size:16px;border-bottom:1px solid var(--line)}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;gap:9px;font-size:15.5px;font-weight:500;padding:14px 24px;border-radius:4px;transition:.22s var(--ease);position:relative;overflow:hidden}
+.btn svg{flex:none}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-2);transform:translateY(-2px);box-shadow:0 10px 34px rgba(30,111,232,.36)}
+.btn-ghost{border:1px solid var(--line-2);color:var(--text)}
+.btn-ghost:hover{border-color:var(--accent);background:var(--accent-soft);transform:translateY(-2px)}
+.cta-row{display:flex;flex-wrap:wrap;gap:12px;margin-top:34px}
+
+/* hero */
+.hero{position:relative;padding:96px 0 104px;overflow:hidden}
+.hero-bg{position:absolute;inset:0;z-index:0;opacity:.5;pointer-events:none}
+.hero-glow{position:absolute;width:640px;height:640px;border-radius:50%;background:radial-gradient(circle,rgba(30,111,232,.16),transparent 68%);top:-220px;right:-160px;pointer-events:none;z-index:0}
+.hero .wrap{position:relative;z-index:2}
+.hero-grid{display:grid;grid-template-columns:1.04fr .96fr;gap:58px;align-items:center}
+.hero h1{margin:20px 0 22px}
+.hero h1 .hl{color:var(--accent-2)}
+.hero-meta{display:flex;gap:14px;flex-wrap:wrap;margin-top:40px}
+.chip{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.09em;color:var(--muted);border:1px solid var(--line);background:rgba(255,255,255,.02);padding:7px 12px;border-radius:3px}
+
+/* terminal */
+.term{background:var(--panel);border:1px solid var(--line-2);border-radius:8px;overflow:hidden;box-shadow:0 30px 70px rgba(0,0,0,.5)}
+.term-bar{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+.led{width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 2.4s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(63,212,139,.5)}70%{box-shadow:0 0 0 8px rgba(63,212,139,0)}100%{box-shadow:0 0 0 0 rgba(63,212,139,0)}}
+.term-title{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.06em;color:var(--muted)}
+.term-title b{color:var(--text);font-weight:500}
+.term-tag{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--ok);border:1px solid rgba(63,212,139,.3);padding:3px 9px;border-radius:2px}
+.log{font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.95;padding:14px 16px;height:246px;overflow:hidden}
+.log-row{display:grid;grid-template-columns:64px 1fr 64px;gap:10px;color:var(--muted);animation:rowin .5s var(--ease)}
+@keyframes rowin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.log-row .t{color:var(--dim)}
+.log-row .ok{color:var(--ok);text-align:right}
+.log-row .no{color:var(--no);text-align:right}
+.term-foot{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--line)}
+.stat{padding:14px 16px;border-right:1px solid var(--line)}
+.stat:last-child{border-right:0}
+.stat b{display:block;font-family:"Archivo",sans-serif;font-stretch:112%;font-size:21px;font-weight:600}
+.stat span{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+
+/* sections */
+section{padding:96px 0;position:relative}
+.sec-head{max-width:62ch;margin-bottom:52px}
+.sec-head h2{margin:16px 0 16px}
+.sec-head.center{margin-left:auto;margin-right:auto}
+
+/* cards grid */
+.grid{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.g4{grid-template-columns:repeat(auto-fit,minmax(258px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(270px,1fr))}
+.card{background:var(--ink-2);padding:34px 30px 36px;position:relative;transition:background .28s var(--ease)}
+.card:hover{background:var(--panel)}
+.card:before{content:"";position:absolute;left:0;top:0;height:2px;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .45s var(--ease)}
+.card:hover:before{width:100%}
+.card .ch{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.2em;color:var(--accent);display:block;margin-bottom:22px}
+.card h3{margin-bottom:11px}
+.card p{font-size:14.8px;line-height:1.68}
+.card ul{list-style:none;margin-top:18px}
+.card li{font-size:13.6px;color:var(--dim);padding-left:16px;position:relative;line-height:1.9}
+.card li:before{content:"";position:absolute;left:0;top:11px;width:6px;height:1px;background:var(--accent)}
+.card .more{display:inline-flex;align-items:center;gap:7px;margin-top:20px;font-size:13.5px;color:var(--accent-2);transition:gap .2s}
+.card:hover .more{gap:12px}
+
+/* icon tile */
+.tile{width:46px;height:46px;border-radius:9px;background:var(--accent-soft);border:1px solid rgba(30,111,232,.28);display:flex;align-items:center;justify-content:center;margin-bottom:20px;color:var(--accent-2);transition:.3s var(--ease)}
+.card:hover .tile{transform:translateY(-3px);background:rgba(30,111,232,.2)}
+
+/* spec */
+.spec{margin-top:26px;border-top:1px solid var(--line)}
+.spec div{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--line);font-size:14px}
+.spec dt{color:var(--dim);font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.04em}
+.spec dd{text-align:right}
+
+/* steps */
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1px;background:var(--line);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.step{background:var(--ink);padding:34px 28px}
+.step .n{font-family:"Archivo",sans-serif;font-stretch:112%;font-size:38px;font-weight:700;color:rgba(255,255,255,.09);display:block;line-height:1;margin-bottom:14px;transition:color .3s}
+.step:hover .n{color:rgba(30,111,232,.5)}
+.step h3{margin-bottom:9px}
+.step p{font-size:14.8px}
+
+/* metrics */
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.metric{background:var(--ink-2);padding:30px 26px}
+.metric b{display:block;font-family:"Archivo",sans-serif;font-stretch:112%;font-size:clamp(2rem,4vw,2.7rem);font-weight:700;background:linear-gradient(180deg,var(--text),var(--accent-2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;line-height:1.1}
+.metric span{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);display:block;margin-top:8px}
+
+/* product hero */
+.phero{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:center;padding:70px 0 80px;position:relative}
+.pmark{display:flex;align-items:center;justify-content:center;padding:44px;background:radial-gradient(circle at 50% 45%,rgba(30,111,232,.15),transparent 66%);position:relative}
+.pmark svg{filter:drop-shadow(0 18px 40px rgba(0,0,0,.5));animation:float 7s ease-in-out infinite}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-13px)}}
+.ring{position:absolute;border:1px solid rgba(30,111,232,.18);border-radius:50%;animation:spin 26s linear infinite}
+.ring.r1{width:330px;height:330px}
+.ring.r2{width:430px;height:430px;border-style:dashed;animation-duration:44s;animation-direction:reverse}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* feature rows */
+.frow{display:grid;grid-template-columns:1fr 1fr;gap:52px;align-items:center;padding:56px 0;border-top:1px solid var(--line)}
+.frow.flip .fart{order:-1}
+.fart{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:28px;min-height:230px;display:flex;align-items:center;justify-content:center}
+
+/* phone mock */
+.phone{width:236px;border:1px solid var(--line-2);border-radius:26px;background:var(--ink-2);padding:12px 10px;box-shadow:0 26px 60px rgba(0,0,0,.5)}
+.phone-top{width:56px;height:4px;border-radius:3px;background:var(--line-2);margin:2px auto 12px}
+.prow{display:flex;align-items:center;gap:10px;padding:10px;border-radius:7px;background:var(--panel-2);margin-bottom:8px;opacity:0;animation:slidein .5s var(--ease) forwards}
+.prow:nth-child(2){animation-delay:.15s}.prow:nth-child(3){animation-delay:.3s}.prow:nth-child(4){animation-delay:.45s}.prow:nth-child(5){animation-delay:.6s}
+@keyframes slidein{to{opacity:1}}
+.prow .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
+.prow .dot.off{background:var(--dim)}
+.prow .nm{font-size:12.5px}
+.prow .st{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--dim);letter-spacing:.08em}
+
+/* faq */
+.faq{border-top:1px solid var(--line)}
+.q{border-bottom:1px solid var(--line)}
+.q summary{cursor:pointer;padding:22px 0;font-size:1.05rem;font-weight:500;list-style:none;display:flex;justify-content:space-between;gap:20px;align-items:center;transition:color .2s}
+.q summary::-webkit-details-marker{display:none}
+.q summary:hover{color:var(--accent-2)}
+.q summary:after{content:"+";font-family:"IBM Plex Mono",monospace;font-size:20px;color:var(--accent);transition:transform .3s var(--ease)}
+.q[open] summary:after{transform:rotate(45deg)}
+.q p{padding:0 0 22px;max-width:70ch;font-size:15px}
+
+/* cta band */
+.band{background:linear-gradient(120deg,var(--panel-2),var(--panel));border:1px solid var(--line-2);border-radius:10px;padding:56px 46px;position:relative;overflow:hidden}
+.band:before{content:"";position:absolute;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,rgba(30,111,232,.2),transparent 70%);top:-180px;right:-90px}
+.band > *{position:relative;z-index:2}
+.big-tel{font-family:"Archivo",sans-serif;font-stretch:112%;font-weight:700;font-size:clamp(2.1rem,5.4vw,3.3rem);letter-spacing:-.03em;display:inline-block;transition:color .2s}
+.big-tel:hover{color:var(--accent-2)}
+
+/* contact */
+.cgrid{display:grid;grid-template-columns:1.1fr .9fr;gap:48px}
+.field{margin-bottom:18px}
+.field label{display:block;font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);margin-bottom:8px}
+.field input,.field textarea,.field select{width:100%;background:var(--panel);border:1px solid var(--line-2);border-radius:5px;color:var(--text);font-family:inherit;font-size:15px;padding:13px 14px;transition:.2s}
+.field input:focus,.field textarea:focus,.field select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.field textarea{min-height:130px;resize:vertical}
+
+/* footer */
+footer{position:relative;background:var(--ink-2);border-top:1px solid var(--line);overflow:hidden}
+.foot-circuit{position:absolute;top:0;left:0;width:100%;height:70px;pointer-events:none;opacity:.8}
+.foot-mega{position:absolute;left:50%;bottom:-.14em;transform:translateX(-50%);font-family:"Archivo",sans-serif;font-stretch:112%;font-weight:700;font-size:clamp(6rem,17vw,15rem);letter-spacing:-.03em;line-height:1;white-space:nowrap;color:transparent;-webkit-text-stroke:1px rgba(77,155,255,.10);user-select:none;pointer-events:none;z-index:0}
+footer .wrap{position:relative;z-index:2}
+.foot-grid{display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr;gap:42px;padding:76px 0 54px}
+@media(max-width:960px){.foot-grid{grid-template-columns:1fr 1fr;gap:36px 28px}.foot-brand{grid-column:1/-1}}
+@media(max-width:480px){.foot-grid{grid-template-columns:1fr;gap:30px}}
+.foot-brand p{font-size:13.8px;max-width:255px;margin:16px 0 24px}
+.foot-contact{display:flex;flex-direction:column;gap:11px}
+.foot-contact a{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:14px;transition:color .2s}
+.foot-contact a:hover{color:var(--text)}
+.foot-tel{display:inline-flex;align-items:center;gap:12px;margin-top:2px;padding:13px 20px;border-radius:6px;background:var(--accent);color:#fff !important;font-family:"IBM Plex Mono",monospace;font-size:16.5px;font-weight:500;letter-spacing:.02em;transition:.25s var(--ease);box-shadow:0 0 0 0 rgba(30,111,232,.4)}
+.foot-tel:hover{background:var(--accent-2);transform:translateY(-2px);box-shadow:0 10px 32px rgba(30,111,232,.45);color:#fff !important}
+.foot-tel svg{animation:ringring 3.2s ease-in-out infinite}
+@keyframes ringring{0%,88%,100%{transform:rotate(0)}90%{transform:rotate(-13deg)}92%{transform:rotate(11deg)}94%{transform:rotate(-9deg)}96%{transform:rotate(6deg)}98%{transform:rotate(-3deg)}}
+.foot-col h4{font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:500;letter-spacing:.22em;text-transform:uppercase;margin-bottom:18px;color:var(--accent-2);display:flex;align-items:center;gap:8px}
+.foot-col h4:before{content:"";width:5px;height:5px;background:var(--accent);transform:rotate(45deg)}
+.foot-col a{display:block;font-size:14px;color:var(--muted);padding:5.5px 0;transition:.22s var(--ease);position:relative;padding-left:0}
+.foot-col a:before{content:"";position:absolute;left:0;top:50%;width:0;height:1px;background:var(--accent-2);transition:width .22s var(--ease)}
+.foot-col a:hover{color:var(--text);padding-left:16px}
+.foot-col a:hover:before{width:10px}
+.foot-status{display:flex;flex-wrap:wrap;gap:10px;padding:0 0 26px}
+.fs-chip{display:inline-flex;align-items:center;gap:8px;font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.12em;color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:7px 12px;background:rgba(255,255,255,.02)}
+.fs-chip .led{width:6px;height:6px}
+.foot-bar{border-top:1px solid var(--line);padding:20px 0;display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;font-size:12.5px;color:var(--dim);align-items:center}
+.foot-up{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border:1px solid var(--line-2);border-radius:5px;color:var(--muted);transition:.25s var(--ease)}
+.foot-up:hover{color:#fff;background:var(--accent);border-color:var(--accent);transform:translateY(-3px)}
+@media(max-width:960px){.foot-mega{font-size:23vw}}
+
+/* reveal + a11y */
+.rv{opacity:0;transform:translateY(24px);transition:opacity .7s var(--ease),transform .7s var(--ease)}
+.rv.in{opacity:1;transform:none}
+:focus-visible{outline:2px solid var(--accent-2);outline-offset:3px;border-radius:2px}
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:16px;top:16px;z-index:120;background:var(--accent);color:#fff;padding:11px 17px;border-radius:4px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+@media(max-width:960px){
+  .hero-grid,.phero,.frow,.cgrid{grid-template-columns:1fr}
+  .frow.flip .fart{order:0}
+  .nav-links{display:none}
+  .burger{display:flex}
+  .hero{padding:56px 0 68px}
+  section{padding:64px 0}
+  .band{padding:36px 26px}
+  .ring{display:none}
+}
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+  .rv{opacity:1;transform:none}
+  .prow{opacity:1}
+}
+
+/* === security live === */
+.sec2{display:grid;grid-template-columns:1fr 1fr;gap:26px;align-items:stretch}
+@media(max-width:960px){.sec2{grid-template-columns:1fr}}
+.campanel{background:var(--panel);border:1px solid var(--line-2);border-radius:8px;padding:22px;position:relative;overflow:hidden}
+.campanel .camhead{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.rec{display:inline-flex;align-items:center;gap:7px;font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.14em;color:var(--no)}
+.rec i{width:8px;height:8px;border-radius:50%;background:var(--no);animation:recblink 1.1s steps(1) infinite}
+@keyframes recblink{50%{opacity:.15}}
+.camstage{position:relative;height:230px}
+.camstage svg{width:100%;height:100%}
+.cone{fill:url(#coneg);opacity:.85}
+.scanline{stroke:#4D9BFF;stroke-width:1;opacity:.4;animation:scanmove 3.4s ease-in-out infinite}
+@keyframes scanmove{0%,100%{transform:translateY(0)}50%{transform:translateY(26px)}}
+.eq{display:flex;gap:5px;align-items:flex-end;height:44px;margin-top:14px}
+.eq i{flex:1;background:var(--accent);border-radius:2px 2px 0 0;height:20%;opacity:.8;animation:eqmove 1.5s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:.15s;animation-duration:1.2s}
+.eq i:nth-child(3){animation-delay:.3s;animation-duration:1.7s}
+.eq i:nth-child(4){animation-delay:.1s;animation-duration:1.1s}
+.eq i:nth-child(5){animation-delay:.45s;animation-duration:1.4s}
+.eq i:nth-child(6){animation-delay:.25s;animation-duration:1.8s}
+.eq i:nth-child(7){animation-delay:.05s;animation-duration:1.25s}
+.eq i:nth-child(8){animation-delay:.5s;animation-duration:1.55s}
+.eq i:nth-child(9){animation-delay:.35s;animation-duration:1.15s}
+.eq i:nth-child(10){animation-delay:.2s;animation-duration:1.65s}
+@keyframes eqmove{0%,100%{height:16%}50%{height:92%}}
+.eq-cap{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.14em;color:var(--dim);margin-top:8px}
+.gbars{margin-top:20px;display:flex;flex-direction:column;gap:13px}
+.gb-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;font-size:13px}
+.gb-row span:last-child{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--accent-2)}
+.gbar{grid-column:1/-1;height:7px;background:var(--panel-2);border-radius:4px;overflow:hidden}
+.gbar b{display:block;height:100%;width:0;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width 1.3s var(--ease)}
+.alarm-panel{background:var(--panel);border:1px solid var(--line-2);border-radius:8px;overflow:hidden;display:flex;flex-direction:column;transition:border-color .3s,box-shadow .3s}
+.alarm-panel.hot{border-color:rgba(232,106,85,.65);box-shadow:0 0 0 1px rgba(232,106,85,.35),0 0 44px rgba(232,106,85,.14);animation:alarmpulse 1s ease-in-out infinite}
+@keyframes alarmpulse{50%{box-shadow:0 0 0 1px rgba(232,106,85,.5),0 0 60px rgba(232,106,85,.24)}}
+.alog{font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.95;padding:14px 16px;flex:1;min-height:250px}
+.alog-row{display:grid;grid-template-columns:66px 1fr;gap:12px;color:var(--muted);animation:rowin .5s var(--ease)}
+.alog-row .t{color:var(--dim)}
+.alog-row.warn span:last-child{color:#EFB24C}
+.alog-row.alarm span:last-child{color:var(--no);font-weight:600}
+.alog-row.ok span:last-child{color:var(--ok)}
+.armed{display:flex;align-items:center;gap:9px;padding:12px 16px;border-top:1px solid var(--line);font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.14em}
+.armed .st-ok{color:var(--ok)}.armed .st-al{color:var(--no)}
+/* hero parallax layer */
+.hero-bg{will-change:transform}
+
+.cone{animation:conep 3.2s ease-in-out infinite}
+@keyframes conep{50%{opacity:.55}}
+.ir{animation:irblink 2.1s ease-in-out infinite}
+.ir.b{animation-delay:1.05s}
+@keyframes irblink{0%,100%{opacity:.15}50%{opacity:.95}}
+.floor{stroke-dasharray:5 9;animation:floordash 16s linear infinite}
+@keyframes floordash{to{stroke-dashoffset:-168}}
+#intruder{transition:opacity .4s}
+.campanel:hover,.alarm-panel:hover{transform:translateY(-3px)}
+.campanel,.alarm-panel{transition:transform .3s var(--ease),border-color .3s,box-shadow .3s}
+
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<a class="skip" href="#main">Przejdź do treści</a>
+<nav class="nav">
+  <div class="wrap">
+    <div class="nav-in">
+      <a class="brand" href="index.html">
+        <svg width="30" height="30" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+            <path d="M88.3 93.7 A44 44 0 1 1 88.3 26.3" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+            <path d="M78.6 82.2 A29 29 0 1 1 78.6 37.8" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+            <circle cx="60" cy="60" r="15.5" fill="#4D9BFF"/>
+            <circle cx="60" cy="56.2" r="4.5" fill="#0A131F"/>
+            <rect x="57.8" y="58.8" width="4.4" height="9.2" rx="2.2" fill="#0A131F"/>
+          </svg>
+        <span class="brand-txt">Ctrlable</span>
+      </a>
+      <div class="nav-links">
+        <a href="uslugi.html">Usługi</a>
+        <a class="on" href="node.html">Ctrlable Node</a>
+        <a href="access.html">Ctrlable Access</a>
+        <a href="kontakt.html">Kontakt</a>
+      </div>
+      <a class="nav-cta" href="tel:+48696088602">696 088 602</a>
+      <button class="burger" aria-label="Menu" aria-expanded="false">
+        <svg width="19" height="19" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+    <div class="drawer">
+      <a href="uslugi.html">Usługi</a>
+      <a href="node.html">Ctrlable Node</a>
+      <a href="access.html">Ctrlable Access</a>
+      <a href="kontakt.html">Kontakt</a>
+    </div>
+  </div>
+</nav>
+<main id="main"><span id="top"></span>
+<header class="wrap phero">
+  <div>
+    <span class="eyebrow">Produkt własny · sprzęt</span>
+    <h1 style="margin:20px 0 20px">Ctrlable <span class="hl">Node</span></h1>
+    <p class="lead">Centrala kontroli dostępu montowana przy przejściu. Otwiera zamek, czyta kartę i PIN, zapisuje każde zdarzenie. Karty i ich harmonogramy trzyma we własnej pamięci, więc otwierają drzwi także wtedy, gdy padnie łącze.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="kontakt.html">Zapytaj o wdrożenie</a>
+      <a class="btn btn-ghost" href="#spec">Specyfikacja</a>
+    </div>
+    <div class="hero-meta">
+      <span class="chip">SPRZĘT BEZ ABONAMENTU</span><span class="chip">ONLINE LUB OFFLINE</span><span class="chip">AKTUALIZACJE OTA</span>
+    </div>
+  </div>
+  <div class="pmark">
+    <div class="ring r1"></div><div class="ring r2"></div>
+    <img src="logo-node.png" alt="Ctrlable Node" width="225" style="filter:drop-shadow(0 22px 48px rgba(0,0,0,.55))">
+  </div>
+</header>
+
+<section style="padding-top:40px">
+  <div class="wrap">
+    <div class="metrics rv">
+      <div class="metric"><b data-count="1">0</b><span>przejście na moduł</span></div>
+      <div class="metric"><b data-count="3">0</b><span>metody wejścia</span></div>
+      <div class="metric"><b data-count="200">0</b><span>kart w pamięci centralki</span></div>
+      <div class="metric"><b data-count="12" data-suffix=" V">0</b><span>zasilania</span></div>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="sec-head"><span class="eyebrow">Dlaczego własny sprzęt</span><h2>Trzecia droga między katalogiem a bazarem</h2>
+    <p>Dotąd wybór wyglądał tak: renomowani producenci, u których jedno przejście potrafi kosztować tysiące, albo tanie zamki na baterie z azjatyckich platform — bez serwisu i o nieznanej żywotności. Node to gotowe urządzenie polskiej produkcji: z montażem, serwisem i stale rozwijanym oprogramowaniem.</p></div>
+    <div class="grid g3">
+      <article class="card rv"><span class="ch">01</span><h3>Polskie wykonanie</h3><p>Zaprojektowany i składany w Polsce — od płytki po firmware. Zasilanie sieciowe 12 V zamiast baterii, które padają w najgorszym momencie.</p></article>
+      <article class="card rv"><span class="ch">02</span><h3>Sprzęt bez abonamentu</h3><p>Za urządzenie i montaż płacisz raz — ułamek ceny rozwiązań integratorskich. W zestawie nie ma żadnego klucza z datą ważności: plan bezpłatny (2 karty, 2 PIN-y, 2 osoby z aplikacją) działa <strong>bezterminowo</strong>. Dopłacasz dopiero wtedy, gdy potrzebujesz więcej — kodów gościnnych, większej listy osób albo dłuższej historii wejść.</p></article>
+      <article class="card rv"><span class="ch">03</span><h3>Serwis i aktualizacje</h3><p>Oprogramowanie rozwijam stale, a poprawki bezpieczeństwa dostaje każdy — również plan bezpłatny. W trybie online wgrywają się zdalnie (OTA), w trybie offline wgrywam je serwisowo.</p></article>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="sec-head"><span class="eyebrow">Tryby pracy</span><h2>Zdecyduj, czy centralka ma mieć konto</h2>
+    <p>Tryb wybierasz przy uruchomieniu. Różnicą nie jest jakość zamka, tylko to, co dochodzi po stronie serwera: historia wejść, zdalne otwieranie i zarządzanie z dowolnego miejsca.</p></div>
+    <div class="grid g2">
+      <article class="card rv">
+        <span class="ch">OFFLINE</span>
+        <h3 style="margin-bottom:6px">Offline-standalone</h3>
+        <p>Bez konta i bez internetu — maksimum prywatności przy pojedynczym przejściu. Wszystko rozstrzyga się w urządzeniu.</p>
+        <dl class="spec">
+          <div><dt>Konto i serwer</dt><dd>brak</dd></div>
+          <div><dt>Karty i PIN-y</dt><dd>2 + 2</dd></div>
+          <div><dt>Osoby z aplikacją</dt><dd>aplikacja nie działa bez konta</dd></div>
+          <div><dt>Historia wejść</dt><dd>tylko w urządzeniu</dd></div>
+          <div><dt>Zdalne otwieranie</dt><dd>niedostępne</dd></div>
+          <div><dt>Kody gościnne</dt><dd>niedostępne</dd></div>
+          <div><dt>Aktualizacje</dt><dd>serwisowo, na miejscu</dd></div>
+        </dl>
+      </article>
+      <article class="card rv">
+        <span class="ch">ONLINE</span>
+        <h3 style="margin-bottom:6px">Online z kontem Ctrlable</h3>
+        <p>Centralka melduje się na serwerze i pojawia w aplikacji. Karty nadal sprawdzane są lokalnie, więc zanik łącza nie zatrzymuje wejść na kartę.</p>
+        <dl class="spec">
+          <div><dt>Konto i serwer</dt><dd>tak, połączenie szyfrowane</dd></div>
+          <div><dt>Karty i PIN-y</dt><dd>2 + 2 bezterminowo za darmo, więcej wg pakietu</dd></div>
+          <div><dt>Osoby z aplikacją</dt><dd>2 w planie bezpłatnym</dd></div>
+          <div><dt>Historia wejść</dt><dd>na serwerze, z wyszukiwarką</dd></div>
+          <div><dt>Zdalne otwieranie</dt><dd>z aplikacji, z dowolnego miejsca</dd></div>
+          <div><dt>Kody gościnne</dt><dd>od pakietu Silver</dd></div>
+          <div><dt>Aktualizacje</dt><dd>OTA, jednym dotknięciem</dd></div>
+        </dl>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="frow rv">
+      <div>
+        <span class="eyebrow">Identyfikacja</span>
+        <h2 style="margin:16px 0 14px;font-size:1.7rem">Trzy sposoby wejścia, jedna lista uprawnień</h2>
+        <p>PIN dla ekipy sprzątającej, karta dla pracowników, aplikacja dla właściciela. Każda metoda trafia do tego samego rejestru, więc historia wejść pozostaje spójna.</p>
+        <ul style="list-style:none;margin-top:20px">
+          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Kod PIN na klawiaturze przy drzwiach</li>
+          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Karta i brelok zbliżeniowy</li>
+          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Otwarcie z aplikacji Ctrlable Access</li>
+          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Przycisk wyjścia i otwarcie awaryjne</li>
+          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Harmonogramy: dni tygodnia i godziny dla kart i PIN-ów</li>
+          <li style="font-size:14.4px;color:var(--dim);padding:6px 0 6px 16px;position:relative"><span style="position:absolute;left:0;top:16px;width:6px;height:1px;background:var(--accent);display:block"></span>Kody gościnne z datą wygaśnięcia i limitem użyć</li>
+        </ul>
+      </div>
+      <div class="fart">
+        <div style="width:100%;max-width:290px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;color:var(--dim);margin-bottom:14px">TOR AUTORYZACJI</div>
+          <div style="display:flex;flex-direction:column;gap:9px">
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">01</span><span style="font-size:13.5px">Odczyt karty lub PIN-u</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">02</span><span style="font-size:13.5px">Karta — sprawdzenie w pamięci centralki</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">03</span><span style="font-size:13.5px">PIN — weryfikacja po stronie konta</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent-2)">04</span><span style="font-size:13.5px">Zwolnienie zamka, auto-rygiel po 3–30 s</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:11px 13px;background:var(--panel-2);border-radius:6px;border-left:2px solid var(--ok)"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--ok)">05</span><span style="font-size:13.5px">Zapis zdarzenia w rejestrze</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="frow flip rv">
+      <div>
+        <span class="eyebrow">Utrzymanie</span>
+        <h2 style="margin:16px 0 14px;font-size:1.7rem">Aktualizacje bez wizyty serwisu</h2>
+        <p>Nowe wersje firmware'u wgrywają się zdalnie (OTA) — bez wizyty i bez demontażu urządzenia. Wystarczy jedno dotknięcie w aplikacji.</p>
+        <p style="margin-top:14px">Ustawienia przeżywają zanik zasilania — uprawnienia i harmonogramy zapisane są w pamięci nieulotnej. Czas auto-ryglowania ustawiasz osobno dla każdej centralki: 3, 5, 10, 15 albo 30 sekund, bo brama potrzebuje dłuższej chwili niż drzwi wejściowe.</p>
+      </div>
+      <div class="fart">
+        <div class="term" style="width:100%;box-shadow:none;border-color:var(--line)">
+          <div class="term-bar"><span class="led" aria-hidden="true"></span><span class="term-title"><b>firmware</b> · aktualizacja</span><span class="term-tag">OK</span></div>
+          <div class="log" style="height:auto;padding:16px">
+            <div class="log-row" style="grid-template-columns:1fr auto"><span>pobieranie pakietu</span><span class="ok">zakończone</span></div>
+            <div class="log-row" style="grid-template-columns:1fr auto"><span>weryfikacja certyfikatu</span><span class="ok">zgodny</span></div>
+            <div class="log-row" style="grid-template-columns:1fr auto"><span>instalacja</span><span class="ok">02:14</span></div>
+            <div class="log-row" style="grid-template-columns:1fr auto"><span>ponowny start</span><span class="ok">gotowy</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="spec" style="padding-top:20px">
+  <div class="wrap">
+    <div class="sec-head"><span class="eyebrow">Dane techniczne</span><h2>Specyfikacja</h2></div>
+    <div class="grid g2">
+      <article class="card rv">
+        <h3 style="margin-bottom:6px">Sprzęt</h3>
+        <dl class="spec">
+          <div><dt>Przejścia na moduł</dt><dd>1</dd></div>
+          <div><dt>Zasilanie</dt><dd>12 V DC</dd></div>
+          <div><dt>Wyjścia</dt><dd>przekaźnikowe, bezpotencjałowe</dd></div>
+          <div><dt>Wejścia</dt><dd>przycisk wyjścia, tamper (opcjonalnie)</dd></div>
+          <div><dt>Peryferia</dt><dd>czytnik RFID, klawiatura 4×3, wyświetlacz OLED</dd></div>
+          <div><dt>Łączność</dt><dd>WiFi 2,4 GHz</dd></div>
+          <div><dt>Montaż</dt><dd>puszka podtynkowa lub szafka</dd></div>
+        </dl>
+      </article>
+      <article class="card rv">
+        <h3 style="margin-bottom:6px">System</h3>
+        <dl class="spec">
+          <div><dt>Identyfikacja</dt><dd>PIN, karta, aplikacja</dd></div>
+          <div><dt>Użytkownicy</dt><dd>karty RFID i PIN-y imienne, wg pakietu</dd></div>
+          <div><dt>Pojemność</dt><dd>do 200 kart w centralce</dd></div>
+          <div><dt>Harmonogramy</dt><dd>dni tygodnia i godziny</dd></div>
+          <div><dt>Powiadomienia</dt><dd>push na telefon</dd></div>
+          <div><dt>Tryb pracy</dt><dd>online (konto) lub offline-standalone</dd></div>
+          <div><dt>Połączenie</dt><dd>szyfrowane (TLS) do serwera Ctrlable</dd></div>
+          <div><dt>Aktualizacje</dt><dd>zdalne (OTA) w trybie online</dd></div>
+        </dl>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="band rv">
+      <span class="eyebrow">Wdrożenie</span>
+      <h2 style="margin:16px 0 18px;max-width:22ch">Sprawdzimy, czy Node pasuje do Twojego obiektu</h2>
+      <p style="max-width:48ch;margin-bottom:6px">Rozmowa i oględziny są bezpłatne. Jeśli w danym budynku lepiej sprawdzi się gotowe rozwiązanie, powiem to wprost.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="tel:+48696088602"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg> 696 088 602</a>
+        <a class="btn btn-ghost" href="access.html">Zobacz aplikację <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+<footer>
+  <svg class="foot-circuit" viewBox="0 0 1400 70" preserveAspectRatio="none" aria-hidden="true">
+    <path id="fc1" d="M0 35 H260 L300 12 H560 L600 58 H900 L940 35 H1400" stroke="rgba(30,111,232,.14)" stroke-width="1" fill="none"/>
+    <circle cx="300" cy="12" r="3" fill="rgba(30,111,232,.4)"/>
+    <circle cx="600" cy="58" r="3" fill="rgba(30,111,232,.4)"/>
+    <circle cx="940" cy="35" r="3" fill="rgba(30,111,232,.4)"/>
+    <use class="trace-pulse" href="#fc1" stroke="#4D9BFF" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+  </svg>
+  <div class="foot-mega" aria-hidden="true">CTRLABLE</div>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div class="foot-brand">
+        <a class="brand" href="index.html">
+          <svg width="34" height="34" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+            <path d="M88.3 93.7 A44 44 0 1 1 88.3 26.3" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+            <path d="M78.6 82.2 A29 29 0 1 1 78.6 37.8" stroke="#E9F0F7" stroke-width="9.5" fill="none" stroke-linecap="round"/>
+            <circle cx="60" cy="60" r="15.5" fill="#4D9BFF"/>
+            <circle cx="60" cy="56.2" r="4.5" fill="#0A131F"/>
+            <rect x="57.8" y="58.8" width="4.4" height="9.2" rx="2.2" fill="#0A131F"/>
+          </svg>
+          <span class="brand-txt">Ctrlable</span>
+        </a>
+        <p>Strony internetowe, kontrola dostępu, smart home i systemy bezpieczeństwa. Jedna firma, jeden numer.</p>
+        <div class="foot-contact">
+          <a class="foot-tel" href="tel:+48696088602"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg>696 088 602</a>
+          <a href="mailto:kontakt@ctrlable.pl"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>kontakt@ctrlable.pl</a>
+          <a href="kontakt.html"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 1 8 8c0 5.4-8 12-8 12S4 15.4 4 10a8 8 0 0 1 8-8z"/></svg>Opole i okolice</a>
+        </div>
+      </div>
+      <div class="foot-col"><h4>Usługi</h4>
+        <a href="uslugi.html#web">Strony internetowe</a>
+        <a href="uslugi.html#access">Kontrola dostępu</a>
+        <a href="uslugi.html#smart">Smart home</a>
+        <a href="uslugi.html#security">Monitoring i alarmy</a>
+      </div>
+      <div class="foot-col"><h4>Produkty</h4>
+        <a href="node.html">Ctrlable Node</a>
+        <a href="access.html">Ctrlable Access</a>
+        <a href="node.html#spec">Specyfikacja</a>
+        <a href="kontakt.html">Wycena</a>
+      </div>
+      <div class="foot-col"><h4>Firma</h4>
+        <a href="index.html">Strona główna</a>
+        <a href="kontakt.html">Kontakt</a>
+        <a href="#">Polityka prywatności</a>
+        <a href="#">Regulamin</a>
+      </div>
+    </div>
+    <div class="foot-status">
+      <span class="fs-chip"><span class="led" aria-hidden="true"></span>SYSTEMY ONLINE</span>
+      <span class="fs-chip">ODPOWIEDŹ &lt; 24H</span>
+      <span class="fs-chip">PN–SB 8:00–18:00</span>
+      <span class="fs-chip">WYCENA 0 ZŁ</span>
+    </div>
+    <div class="foot-bar">
+      <span>© <span id="yr">2026</span> Ctrlable. Wszelkie prawa zastrzeżone.</span>
+      <a class="foot-up" href="#top" aria-label="Wróć na górę strony"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></a>
+    </div>
+  </div>
+</footer>
+<script>
+(function () {
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* rok w stopce */
+  var yr = document.getElementById('yr');
+  if (yr) yr.textContent = new Date().getFullYear();
+
+  /* pasek postępu + zmniejszanie nawigacji */
+  var bar = document.getElementById('bar');
+  var nav = document.querySelector('.nav');
+  function onScroll() {
+    var h = document.documentElement.scrollHeight - window.innerHeight;
+    if (bar) bar.style.width = (h > 0 ? (window.scrollY / h) * 100 : 0) + '%';
+    if (nav) nav.classList.toggle('small', window.scrollY > 40);
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  /* menu mobilne */
+  var burger = document.querySelector('.burger');
+  var drawer = document.querySelector('.drawer');
+  if (burger && drawer) {
+    burger.addEventListener('click', function () {
+      var open = drawer.classList.toggle('open');
+      burger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  }
+
+  /* odsłanianie przy przewijaniu */
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -40px' });
+  document.querySelectorAll('.rv').forEach(function (el, i) {
+    el.style.transitionDelay = (i % 4) * 80 + 'ms';
+    io.observe(el);
+  });
+
+  /* liczniki */
+  function countUp(el) {
+    var target = parseFloat(el.dataset.count);
+    var suffix = el.dataset.suffix || '';
+    var dur = 1300, t0 = null;
+    function frame(ts) {
+      if (!t0) t0 = ts;
+      var p = Math.min((ts - t0) / dur, 1);
+      var eased = 1 - Math.pow(1 - p, 3);
+      var val = target * eased;
+      el.textContent = (target % 1 === 0 ? Math.round(val) : val.toFixed(1)) + suffix;
+      if (p < 1) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+  var cio = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) {
+        if (reduce) { e.target.textContent = e.target.dataset.count + (e.target.dataset.suffix || ''); }
+        else countUp(e.target);
+        cio.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.5 });
+  document.querySelectorAll('[data-count]').forEach(function (el) { cio.observe(el); });
+
+  /* rejestr zdarzeń w sekcji hero */
+  var logEl = document.getElementById('log');
+  if (logEl) {
+    var events = [
+      ['Odblokowano \u00b7 aplikacja', 'ok', 'OK'],
+      ['Karta RFID \u00b7 Tomek', 'ok', 'OK'],
+      ['PIN poprawny \u00b7 Serwis', 'ok', 'OK'],
+      ['Przycisk wyj\u015bcia', 'ok', 'OK'],
+      ['Drzwi zaryglowane', '', 'INFO'],
+      ['Nieudana pr\u00f3ba PIN', 'no', 'ODMOWA'],
+      ['Heartbeat urz\u0105dzenia', '', 'INFO'],
+      ['OTA \u00b7 firmware aktualny', '', 'INFO']
+    ];
+    var t = new Date(); t.setHours(8, 41, 0);
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function addRow() {
+      t = new Date(t.getTime() + (40 + Math.floor(Math.random() * 250)) * 1000);
+      var ev = events[Math.floor(Math.random() * events.length)];
+      var row = document.createElement('div');
+      row.className = 'log-row';
+      row.innerHTML =
+        '<span class="t">' + pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds()) + '</span>' +
+        '<span>' + ev[0] + '</span>' +
+        '<span class="' + (ev[1] || 't') + '">' + ev[2] + '</span>';
+      logEl.appendChild(row);
+      while (logEl.children.length > 9) logEl.removeChild(logEl.firstChild);
+    }
+    for (var i = 0; i < 9; i++) addRow();
+    if (!reduce) setInterval(addRow, 2500);
+  }
+
+  /* impulsy na ścieżkach tła */
+  var traces = document.querySelectorAll('.trace-pulse');
+  if (traces.length && !reduce) {
+    traces.forEach(function (p, i) {
+      var len = p.getTotalLength ? p.getTotalLength() : 600;
+      p.style.strokeDasharray = '46 ' + len;
+      p.style.strokeDashoffset = len;
+      p.animate(
+        [{ strokeDashoffset: len }, { strokeDashoffset: -46 }],
+        { duration: 4200 + i * 900, iterations: Infinity, delay: i * 700, easing: 'linear' }
+      );
+    });
+  }
+
+  /* delikatne pochylenie kart przy kursorze */
+  if (!reduce && window.matchMedia('(hover: hover)').matches) {
+    document.querySelectorAll('[data-tilt]').forEach(function (el) {
+      el.addEventListener('mousemove', function (ev) {
+        var r = el.getBoundingClientRect();
+        var x = (ev.clientX - r.left) / r.width - 0.5;
+        var y = (ev.clientY - r.top) / r.height - 0.5;
+        el.style.transform = 'perspective(900px) rotateX(' + (-y * 4) + 'deg) rotateY(' + (x * 4) + 'deg)';
+      });
+      el.addEventListener('mouseleave', function () { el.style.transform = ''; });
+    });
+  }
+
+  /* formularz kontaktowy — bez backendu, składa wiadomość e-mail */
+  var form = document.getElementById('kontakt-form');
+  if (form) {
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var d = new FormData(form);
+      var body =
+        'Imię i nazwisko: ' + (d.get('imie') || '') + '\n' +
+        'Telefon: ' + (d.get('tel') || '') + '\n' +
+        'Zakres: ' + (d.get('zakres') || '') + '\n\n' +
+        (d.get('tresc') || '');
+      window.location.href = 'mailto:kontakt@ctrlable.pl?subject=' +
+        encodeURIComponent('Zapytanie ze strony — ' + (d.get('zakres') || 'Ctrlable')) +
+        '&body=' + encodeURIComponent(body);
+    });
+  }
+})();
+
+(function () {
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* parallax tła hero */
+  var hbg = document.querySelector('.hero-bg');
+  if (hbg && !reduce) {
+    window.addEventListener('scroll', function () {
+      hbg.style.transform = 'translateY(' + (window.scrollY * 0.14) + 'px)';
+    }, { passive: true });
+  }
+
+  /* kamera: sledzenie myszy + patrol + namierzanie intruza */
+  var cam = document.getElementById('cam-rot');
+  if (cam) {
+    var svg = cam.closest('svg');
+    var intr = document.getElementById('intruder');
+    var scan = document.getElementById('scanline');
+    if (reduce) { cam.setAttribute('transform', 'rotate(14 64 54)'); }
+    else {
+      var mx = null, my = null, lastMouse = 0, cur = 14, target = 14;
+      document.addEventListener('mousemove', function (e) {
+        mx = e.clientX; my = e.clientY; lastMouse = performance.now();
+      });
+      var t0 = performance.now();
+      function camFrame(now) {
+        var t = (now - t0) / 1000;
+        var cyc = t % 16, ix = null;
+        if (intr) {
+          if (cyc >= 11 && cyc < 15) {
+            var p = (cyc - 11) / 4;
+            ix = 18 + p * 262;
+            intr.setAttribute('transform', 'translate(' + ix.toFixed(1) + ',' + (Math.sin(t * 11) * 1.7).toFixed(2) + ')');
+            intr.setAttribute('opacity', '0.9');
+            if (scan) scan.setAttribute('stroke', '#E86A55');
+          } else {
+            intr.setAttribute('opacity', '0');
+            if (scan) scan.setAttribute('stroke', '#4D9BFF');
+          }
+        }
+        var useMouse = mx !== null && (performance.now() - lastMouse) < 2500;
+        if (useMouse) {
+          var ctm = svg.getScreenCTM();
+          var px = ctm.a * 64 + ctm.c * 54 + ctm.e;
+          var py = ctm.b * 64 + ctm.d * 54 + ctm.f;
+          target = Math.atan2(my - py, mx - px) * 180 / Math.PI;
+        } else if (ix !== null) {
+          target = Math.atan2(178 - 54, ix - 64) * 180 / Math.PI;
+        } else {
+          target = 16 + Math.sin(t * 0.55) * 20;
+        }
+        target = Math.max(-10, Math.min(52, target));
+        cur += (target - cur) * 0.09;
+        cam.setAttribute('transform', 'rotate(' + cur.toFixed(2) + ' 64 54)');
+        requestAnimationFrame(camFrame);
+      }
+      requestAnimationFrame(camFrame);
+    }
+  }
+
+  /* rosnące słupki */
+  var gio = new IntersectionObserver(function (es) {
+    es.forEach(function (e) {
+      if (e.isIntersecting) {
+        e.target.querySelector('b').style.width = e.target.dataset.w + '%';
+        gio.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.6 });
+  document.querySelectorAll('.gbar').forEach(function (el) {
+    if (reduce) el.querySelector('b').style.width = el.dataset.w + '%';
+    else gio.observe(el);
+  });
+
+  /* symulacja wykrycia intruza */
+  var alog = document.getElementById('alarm-log');
+  var apanel = document.getElementById('alarm-panel');
+  var armed = document.getElementById('armed-state');
+  if (alog && apanel) {
+    var scen = [
+      [1200, '22:14:03', 'Czujnik ruchu · strefa magazyn', 'warn'],
+      [900,  '22:14:04', 'Kamera 02 · start nagrywania', ''],
+      [1400, '22:14:06', 'Analiza obrazu · wykryto sylwetkę', 'warn'],
+      [900,  '22:14:07', 'ALARM · powiadomienie push wysłane', 'alarm'],
+      [1100, '22:14:09', 'Oświetlenie strefy · 100%', ''],
+      [1500, '22:14:12', 'Syrena wewnętrzna · aktywna', 'alarm'],
+      [2600, '22:14:31', 'Weryfikacja w aplikacji · potwierdzono zdarzenie', 'warn'],
+      [1600, '22:14:44', 'Zgłoszenie przekazane · patrol w drodze', 'ok'],
+      [2000, '22:15:02', 'Strefa zabezpieczona · nagranie zapisane', 'ok']
+    ];
+    function setArmed(hot) {
+      apanel.classList.toggle('hot', hot);
+      if (armed) armed.innerHTML = hot
+        ? '<span class="st-al">● ALARM AKTYWNY</span>'
+        : '<span class="st-ok">● SYSTEM UZBROJONY</span>';
+    }
+    function run(i) {
+      if (i >= scen.length) {
+        setTimeout(function () {
+          setArmed(false);
+          setTimeout(function () { alog.innerHTML = ''; run(0); }, 2600);
+        }, 700);
+        return;
+      }
+      var s = scen[i];
+      setTimeout(function () {
+        var row = document.createElement('div');
+        row.className = 'alog-row' + (s[3] ? ' ' + s[3] : '');
+        row.innerHTML = '<span class="t">' + s[1] + '</span><span>' + s[2] + '</span>';
+        alog.appendChild(row);
+        while (alog.children.length > 9) alog.removeChild(alog.firstChild);
+        if (s[3] === 'alarm') setArmed(true);
+        run(i + 1);
+      }, reduce ? 0 : s[0]);
+    }
+    if (reduce) {
+      scen.forEach(function (s) {
+        var row = document.createElement('div');
+        row.className = 'alog-row' + (s[3] ? ' ' + s[3] : '');
+        row.innerHTML = '<span class="t">' + s[1] + '</span><span>' + s[2] + '</span>';
+        alog.appendChild(row);
+      });
+      setArmed(false);
+    } else { setArmed(false); run(0); }
+  }
+})();
+
+</script>
+</body>
+</html>
