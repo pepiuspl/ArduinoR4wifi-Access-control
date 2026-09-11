@@ -205,7 +205,7 @@ const localLogFile = path.join(logDirectory, 'smartlock_system.log'); // master 
 // Each module name maps to exactly one category folder.
 const LOG_CATEGORIES = {
   entries:     ['API Control Command', 'Hardware Handshake', 'Access Granted', 'Access Denied', 'Keypad', 'Keypad RateLimit', 'Keypad ERROR', 'Hardware Ingest'],
-  connections: ['Radar Traffic', 'Authentication Panel', 'Auth Rejection', 'Auth RateLimit', 'Core Daemon'],
+  connections: ['Radar Traffic', 'Authentication Panel', 'Auth Rejection', 'Auth RateLimit', 'Core Daemon', 'Heartbeat'],
   updates:     ['DEBUG OTA PUSH', 'DEBUG LOCK DOWNLOAD', 'DEBUG GITHUB', 'Hardware Remote Log'],
   security:    ['TAMPER', 'CORE PANIC RECOVERY BOUNDARY', 'Push Diagnostic', 'Push Notification Error', 'Push System Warning'],
   provisioning:['Provisioning', 'Settings Update', 'User Mutation', 'Reset System', 'Service', 'License', 'Hardware Registration'],
@@ -2834,15 +2834,10 @@ const server = http.createServer(async (req, res) => {
         if (!rawMac) return sendJSON(res, 400, { error: 'Missing or invalid mac' });
         const reversedRawMac = rawMac.split(':').reverse().join(':');
 
-        // DIAGNOSTYKA: bezwarunkowy ślad KAŻDEGO polla (throttle 60s per MAC). Rozstrzyga
-        // pytanie „czy centralka w ogóle odpytuje?" — /poll jest wyciszony w Radar Traffic.
-        {
-          const _k = `arrive:${rawMac}`;
-          if (!provisionSkipLog[_k] || Date.now() - provisionSkipLog[_k] > 60000) {
-            provisionSkipLog[_k] = Date.now();
-            writeToLocalLogFile('Provisioning', `[Node: ${rawMac}] POLL przyszedł: email='${String(query.email || '').slice(0, 80)}' version='${String(query.version || '').slice(0, 32)}' release_id=${query.release_id || '?'} key=${readDeviceKey(req) ? 'tak' : 'NIE'} ip=${cleanIp}`);
-          }
-        }
+        // Poll NIE jest logowany cyklicznie (był ślad co 60 s — 1440 linii/dzień na centralkę,
+        // z e-mailem właściciela w każdej). Logujemy wyłącznie ZMIANY STANU — patrz notePollSeen()
+        // niżej: pierwszy poll po starcie, powrót po ciszy, zmiana firmware, utrata łączności.
+        // „Czy centralka odpytuje?" odpowiada devices.last_heartbeat.
 
         // DEREGISTRACJA (okno 120 s): wiersza centralki już nie ma, więc klucz sprawdzamy
         // względem hasha zapamiętanego w chwili odłączenia (scheduleDeviceWipe). Dopóki
@@ -2961,6 +2956,7 @@ const server = http.createServer(async (req, res) => {
             WHERE mac_address = $2 RETURNING firmware_version, auto_lock_delay_ms`,
           [reportedIp, mac, clientReportedVersion]);
         if (devLookup.rows.length > 0) currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
+        notePollSeen(mac, clientReportedVersion || currentHardwareVersion, !!auth.legacy);
 
         // 🌟 PRAWDA SPRZĘTOWA: centralka w KAŻDYM pollu zgłasza realny stan przekaźnika
         // ("opened"). To JEDYNE miejsce, gdzie ustawiamy actualLockStates[mac].state.
@@ -3856,6 +3852,42 @@ server.listen(3000, () => {
     startupReq.on('error', () => {});
   }
 });
+
+// ─── Łączność centralek: log tylko przy ZMIANIE stanu ─────────────────────────
+// pollSeen[mac] = { at, version, offlineLogged }. Cykliczny ślad polla był szumem
+// (i niósł e-mail właściciela co minutę); tu zostają wyłącznie zdarzenia, które
+// coś znaczą: pierwszy poll po starcie serwera, powrót po przerwie > 60 s,
+// zmiana wersji firmware (potwierdzenie OTA) oraz — z watchdoga — utrata łączności.
+const pollSeen = {};
+const HEARTBEAT_GAP_MS = 60 * 1000;
+
+function notePollSeen(mac, version, legacy) {
+  const nowMs = Date.now();
+  const prev = pollSeen[mac];
+  const ver = version || '?';
+  if (!prev) {
+    writeToLocalLogFile('Heartbeat', `[Node: ${mac}] Centralka odpytuje (pierwszy poll od startu serwera) — firmware ${ver}, klucz urządzenia: ${legacy ? 'BRAK (stary firmware)' : 'tak'}.`);
+  } else {
+    if (prev.offlineLogged || nowMs - prev.at > HEARTBEAT_GAP_MS) {
+      writeToLocalLogFile('Heartbeat', `[Node: ${mac}] Centralka wróciła online po ${Math.round((nowMs - prev.at) / 1000)} s przerwy.`);
+    }
+    if (prev.version && ver !== '?' && prev.version !== ver) {
+      writeToLocalLogFile('Heartbeat', `[Node: ${mac}] Zmiana firmware: ${prev.version} → ${ver}.`);
+    }
+  }
+  pollSeen[mac] = { at: nowMs, version: ver, offlineLogged: false };
+}
+
+// Watchdog: centralka, która przestała odpytywać, dostaje JEDEN wpis (nie co 30 s).
+setInterval(() => {
+  const nowMs = Date.now();
+  for (const [mac, p] of Object.entries(pollSeen)) {
+    if (!p.offlineLogged && nowMs - p.at > HEARTBEAT_GAP_MS) {
+      p.offlineLogged = true;
+      writeToLocalLogFile('Heartbeat', `[Node: ${mac}] Centralka przestała odpytywać (ostatni poll ${Math.round((nowMs - p.at) / 1000)} s temu).`);
+    }
+  }
+}, 30 * 1000).unref();
 
 // ─── Tryb serwisowy — pomocnicze (README §7.15) ───────────────────────────────
 // Udział z akceptacji zaproszenia: dla konta serwisowego oznaczony i wygasający;

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main  # Uruchamia się automatycznie po każdym pushu na branch main
+  workflow_dispatch:  # ręczne uruchomienie z zakładki Actions (np. po dodaniu sekretu FIRMWARE_SIGNING_KEY)
 
 jobs:
   build-and-release:

@@ -733,6 +733,7 @@ Check in order: (a) nginx rate limit (§2.4), (b) ESP32 WiFi (`ping -c3 192.168.
 Means the ESP32 can't reach `PROXMOX_SERVER:PROXMOX_PORT`. Checklist:
 1. Is port 3000 actually forwarded on the router to `192.168.0.199:3000`? (§2.3) — this specific failure mode cost an entire debugging session because the forward wasn't in place while `PROXMOX_SERVER` correctly pointed at the domain.
 2. Is `pm2` running `ctrlable-server`? `pm2 list`
+   Is the device polling at all? The poll is **not** logged per request (the old 60 s trace was removed 2026-09-11 — noise + the owner's e-mail in every line). Check `devices.last_heartbeat`, or `grep Heartbeat /var/log/smartlock/smartlock_system.log | tail`, which logs only state changes: first poll after a server start, *wróciła online po N s*, *Zmiana firmware: a → b*, and *przestała odpytywać* (one line per outage, from a 30 s watchdog).
 3. Test from the server itself: `curl -s http://192.168.0.199:3000/api/hardware/poll?mac=test` — **400 is the healthy answer now** (invalid MAC); a device-level `401` in the log means a key problem (§7.2), not connectivity.
 4. **Do not** "fix" this by hardcoding a local LAN IP into `PROXMOX_SERVER` — that breaks every field-deployed device that isn't on this specific LAN. The domain name is correct; the router port-forward is what was missing.
 
