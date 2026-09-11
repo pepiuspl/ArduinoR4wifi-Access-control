@@ -2889,11 +2889,23 @@ const server = http.createServer(async (req, res) => {
           }
           // Klucz przypinamy przy rejestracji — od tej chwili ten MAC obsłuży wyłącznie
           // urządzenie, które go zna. ON CONFLICT: dwa równoległe polle nie zdublują wiersza.
-          const ins = await dbPool.query(
-            `INSERT INTO devices (mac_address, account_id, firmware_version, operational_mode, device_key_hash)
-             VALUES ($1, $2, $3, 'Czuwanie', $4)
-             ON CONFLICT (mac_address) DO NOTHING RETURNING mac_address`,
-            [rawMac, accountRes.rows[0].id, String(query.version || 'v2.9.6').slice(0, 32), key ? hashDeviceKey(key) : null]);
+          // last_known_ip jest tylko informacyjne (serwer nigdy się pod nie nie łączy), ale
+          // kolumna istnieje od zawsze i MUSI być podana — bez niej INSERT potrafi paść na
+          // NOT NULL, a poll kończył się cichym 500 i centralka nigdy się nie rejestrowała.
+          const regIpStr = String(query.ip || '').trim();
+          const regIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(regIpStr) ? regIpStr : cleanIp;
+          let ins;
+          try {
+            ins = await dbPool.query(
+              `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode, device_key_hash)
+               VALUES ($1, $2, $3, $4, 'Czuwanie', $5)
+               ON CONFLICT (mac_address) DO NOTHING RETURNING mac_address`,
+              [rawMac, accountRes.rows[0].id, regIp, String(query.version || 'v2.9.6').slice(0, 32), key ? hashDeviceKey(key) : null]);
+          } catch (e) {
+            // Prawdziwy powód do logu — wcześniej lądował tylko w CORE PANIC jako ogólny 500.
+            writeToLocalLogFile('Provisioning', `[Node: ${rawMac}] BŁĄD rejestracji w bazie: ${e.message}`);
+            return sendJSON(res, 500, { error: 'registration_failed' });
+          }
           if (ins.rows.length > 0) {
             writeToLocalLogFile('Provisioning', `[Node: ${rawMac}] Pomyślnie utworzono i przypisano centralkę do konta: ${email}${key ? '' : ' (BEZ klucza — stary firmware)'}`);
             mailTransport.sendMail({
@@ -2918,6 +2930,22 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, 401, { error: 'device_auth_failed' });
         }
         const mac = auth.mac;
+
+        // Centralka zgłasza e-mail INNEGO konta niż jej właściciel w bazie: to nie jest
+        // rejestracja (MAC już istnieje) — urządzenie zostaje przy dotychczasowym koncie.
+        // Najczęstsza przyczyna „dodałem centralkę, a nie ma jej na koncie" po ponownej
+        // konfiguracji: trzeba ją najpierw wyrejestrować ze starego konta (§6.11). Log co 60 s.
+        if (query.email && auth.device && auth.device.account_id) {
+          const _ok = `owner:${mac}`;
+          if (!provisionSkipLog[_ok] || Date.now() - provisionSkipLog[_ok] > 60000) {
+            provisionSkipLog[_ok] = Date.now();
+            const own = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [auth.device.account_id]).catch(() => ({ rows: [] }));
+            const reported = String(query.email).trim().toLowerCase();
+            if (own.rows.length && own.rows[0].email.toLowerCase() !== reported) {
+              writeToLocalLogFile('Provisioning', `[Node: ${mac}] Centralka zgłasza e-mail '${reported.slice(0, 80)}', ale jest zarejestrowana na konto ${auth.device.account_id} (${own.rows[0].email}). NIE przepinam — wyrejestruj ją ze starego konta (Ustawienia → Strefa zaawansowana), potem skonfiguruj ponownie.`);
+            }
+          }
+        }
 
         // Heartbeat + wersja. Adres IP zapisujemy wyłącznie informacyjnie i tylko prywatny
         // IPv4 — serwer NIGDY się pod niego nie łączy (dawniej: HTTP z hasłem na port 80,

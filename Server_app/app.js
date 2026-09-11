@@ -711,6 +711,14 @@ export default function App() {
       setAccountId(null);
       setIsLocalMode(false);
       setLocalAdminPass('');
+      // Stan W PAMIĘCI też musi zniknąć — wcześniej zostawał token, e-mail i authStep='connect',
+      // więc po wylogowaniu pokazywał się ekran dodawania centralki, a „Dodam później"
+      // wpuszczało z powrotem na dashboard na starym tokenie.
+      setAuthToken(null);
+      setEmail(''); setPassword('');
+      setDevices([]); setSelectedMac('');
+      setLockState((prev) => ({ ...prev, account: null, users: [], logs: [], devices: [], lock: false, total: 0 }));
+      setAuthStep('mode');
       setIsConfigured(false);
 
       console.log('🔒 Pełne bezpieczne wylogowanie wykonane pomyślnie.');

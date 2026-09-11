@@ -8,13 +8,16 @@
 #   app.js        -> /opt/smartlock-server/app/App.js     (Metro/Expo, pm2 ctrlable-app)
 # Metro ładuje App.js (wielka litera!) z podkatalogu app/.
 #
-# HASŁO PYTANE RAZ: skrypt zestawia JEDNO połączenie master (ControlMaster) i
-# wszystkie kolejne scp/ssh jadą przez ten sam tunel. Bez tego każda z 4 operacji
-# pytała osobno. Gniazdo kasuje się automatycznie na wyjściu (także przy błędzie).
+# HASŁO PYTANE RAZ — na każdym systemie: wszystkie pliki jadą JEDNYM połączeniem
+# (tar przez stdin ssh), a rozpakowanie i restart pm2 wykonuje ta sama sesja.
+# Wcześniejsze podejście (ControlMaster) nie działało w Git Bash na Windows.
+#
+# Zanim produkcyjny server.js zostanie podmieniony, serwer sprawdza jego składnię
+# (node --check) — błąd = przerwanie BEZ dotykania działającej wersji.
 #
 # Chcesz całkiem bez hasła? Jednorazowo:  ssh-copy-id root@192.168.0.199
 #
-# Użycie:  ./deploy.sh
+# Użycie:  ./deploy.sh        (na Windows: bash deploy.sh)
 # Nadpisywalne env-em: DEPLOY_SERVER=root@1.2.3.4 DEPLOY_DEST=/opt/... ./deploy.sh
 # =============================================================================
 set -euo pipefail
@@ -24,30 +27,45 @@ DEST="${DEPLOY_DEST:-/opt/smartlock-server}"
 
 cd "$(dirname "$0")"
 
-# --- Jedno wspólne połączenie SSH -------------------------------------------
-CTRL_SOCKET="${TMPDIR:-/tmp}/ctrlable-deploy-$$.sock"
-SSH_OPTS=(-o "ControlMaster=auto" -o "ControlPath=${CTRL_SOCKET}" -o "ControlPersist=120")
+for f in Server_app/server.js Server_app/licensekey.js Server_app/app.js; do
+  [ -f "$f" ] || { echo "❌ Brak pliku $f"; exit 1; }
+done
 
-cleanup() {
-  # Zamknij master, żeby nie zostawiać wiszącego gniazda ani sesji.
-  ssh -o "ControlPath=${CTRL_SOCKET}" -O exit "${SERVER}" 2>/dev/null || true
-}
-trap cleanup EXIT
+# Skrypt wykonywany NA SERWERZE w jednej sesji. Heredoc w apostrofach = nic nie jest
+# rozwijane lokalnie; DEST przekazujemy jako pierwszy argument (bash -s -- "$DEST").
+read -r -d '' REMOTE_SCRIPT <<'REMOTE' || true
+set -e
+DEST="$1"
+T=$(mktemp -d /tmp/ctrlable-deploy.XXXXXX)
+trap 'rm -rf "$T"' EXIT
+tar xzf - -C "$T"
 
-echo "→ Łączenie z ${SERVER} (hasło tylko RAZ)..."
-ssh "${SSH_OPTS[@]}" "${SERVER}" true
+NODE=$(command -v node || ls /usr/local/bin/node /usr/bin/node 2>/dev/null | head -1)
+echo "→ node --check server.js (przed podmianą)"
+"$NODE" --check "$T/server.js"
+# Nawracający błąd z README §3.4: licznik rate-limitu bez ++ = brak limitów.
+grep -q 'store\[ip\].count++' "$T/server.js" || { echo "❌ checkRateLimit bez count++ (README §3.4) — przerywam."; exit 1; }
 
-echo "→ server.js     → ${SERVER}:${DEST}/server.js"
-scp "${SSH_OPTS[@]}" Server_app/server.js "${SERVER}:${DEST}/server.js"
-
-echo "→ licensekey.js → ${SERVER}:${DEST}/licensekey.js  (generator kodów, uruchamiany na serwerze)"
-scp "${SSH_OPTS[@]}" Server_app/licensekey.js "${SERVER}:${DEST}/licensekey.js"
-
-echo "→ app.js        → ${SERVER}:${DEST}/app/App.js  (entry Metro)"
-scp "${SSH_OPTS[@]}" Server_app/app.js "${SERVER}:${DEST}/app/App.js"
+echo "→ podmiana plików"
+mv -f "$T/server.js"     "$DEST/server.js"
+mv -f "$T/licensekey.js" "$DEST/licensekey.js"
+mv -f "$T/app.js"        "$DEST/app/App.js"
 
 echo "→ restart pm2 (ctrlable-server, ctrlable-app)"
-ssh "${SSH_OPTS[@]}" "${SERVER}" "/usr/local/bin/pm2 restart ctrlable-server ctrlable-app && /usr/local/bin/pm2 save"
+/usr/local/bin/pm2 restart ctrlable-server ctrlable-app --update-env && /usr/local/bin/pm2 save
+sleep 3
+echo "→ ostatnie linie logu backendu:"
+/usr/local/bin/pm2 logs ctrlable-server --lines 8 --nostream 2>/dev/null | tail -8 || true
+echo "→ migracje:"
+grep Migration /var/log/smartlock/smartlock_system.log 2>/dev/null | tail -1 || true
+REMOTE
+
+echo "→ Wysyłanie server.js, licensekey.js, app.js do ${SERVER}:${DEST} (jedno połączenie, hasło raz)..."
+# tar idzie stdin-em, więc skrypt zdalny nie może iść tym samym kanałem: przekazujemy
+# go w base64 w linii poleceń (same [A-Za-z0-9+/=] — niezależnie od powłoki roota).
+REMOTE_B64=$(printf '%s' "$REMOTE_SCRIPT" | base64 | tr -d '\n')
+tar czf - -C Server_app server.js licensekey.js app.js \
+  | ssh "${SERVER}" "bash -c \"\$(echo ${REMOTE_B64} | base64 -d)\" -- '${DEST}'"
 
 echo "✅ Deploy zakończony."
-echo "   Sprawdź: ssh ${SERVER} 'grep -c \"Pakiet i licencja\" ${DEST}/app/App.js'  (ma być 1)"
+echo "   Jeśli backend nie wstał: ssh ${SERVER} 'pm2 logs ctrlable-server --lines 30 --nostream'  (brak JWT_SECRET w .env = celowe zatrzymanie, README §7.4)"
