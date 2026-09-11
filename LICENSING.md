@@ -38,6 +38,8 @@ Klient wybiera przy uruchomieniu jeden z dwóch trybów. **Różnicownikiem są 
 
 **Uwaga o łatkach:** offline‑standalone nie jest podłączony do internetu → **mniejsza powierzchnia ataku** (brak zdalnej eksploatacji), a krytyczne łatki dostarcza się **ręcznie/serwisowo**. Główne ryzyko dla offline to atak **fizyczny** (nie objęty gwarancją — patrz §8).
 
+**Uwaga o sieci centralki (audyt 11.09.2026):** „brak internetu” nie znaczy „brak powierzchni ataku”. Offline‑standalone zarządza się przez sieć Wi‑Fi centralki `CTRLABLE_SETUP`, która do 11.09.2026 była **otwarta**, a lokalne API chroniło hasło wyliczane z MAC‑a — każdy w zasięgu radiowym mógł otworzyć drzwi. Od poprawki sieć ma losowe hasło WPA2 (pokazywane tylko przy pierwszej konfiguracji), a lokalne API losowe hasło generowane przy każdej konfiguracji (README §7.1). Urządzenia offline sprzed poprawki trzeba zaktualizować **przez USB** i skonfigurować od nowa (README §7.8).
+
 **Uwaga o anty‑Airbnb:** mechanizm (brak kodów gościnnych + limit zmian PIN/mies.) jest **egzekwowany przez serwer**, więc działa tylko online. Offline‑standalone nie ma serwera ani pewnego zegara — zdeterminowany host *mógłby* rotować PIN ręcznie, tracąc jednak kody gościnne, logi i aktualizacje. Akceptowalny, mały wyciek.
 
 ---
@@ -77,6 +79,7 @@ Pakiet to nie tylko liczba użytkowników — pakietuje też **retencję logów,
 ### 3.1 Reguły segmentujące (celowane w konkretne przypadki)
 - **Kody gościnne (wygasanie + limit użyć) = tylko licencja.** To domyka segment **najmu krótkoterminowego (Airbnb)**: na „Bez licencji" nie ma automatycznych kodów gościnnych, a ręczne zmiany PIN są limitowane (np. 4/mies.) — kto rotuje kody dla gości, musi wykupić licencję. Bez tej reguły host obchodziłby limit zmian PIN, ustawiając wygasające kody gościnne.
 - **Limit zmian PIN/miesiąc** (tylko „Bez licencji"): liczony jako operacje add/usuń/edytuj PIN w miesiącu kalendarzowym. Cel: ten sam segment najmu.
+- **Serwis nie zajmuje miejsca w limicie administratorów** (11 września 2026). Konto serwisowe (`SERVICE_ACCOUNTS` w `.env`, domyślnie `ctrlablenode@gmail.com`) klient zaprasza jak współadmina, ale zaproszenie omija `max_admins`, udział nie jest liczony do limitu i **wygasa sam po 48 h**. Klient z pełnym pakietem nigdy nie musi usuwać swojego administratora, żeby wpuścić serwis — inaczej limit karałby za zgłoszenie gwarancyjne. Rozszerzone czynności serwisowe wymagają dodatkowo kodu z ekranu centralki (README §7.15), więc to nie jest furtka do darmowego trzeciego admina.
 - **Dwaj administratorzy na darmowym poziomie to świadoma decyzja** (9 września 2026), nie przeoczenie. Typowy nabywca zestawu to dom z dwiema osobami, które obie chcą mieć aplikację i otwierać zdalnie — przy `max_admins=1` darmowy poziom był dla nich rozczarowaniem od pierwszego dnia. Multi‑admin jako upsell zaczyna więc działać dopiero **od trzeciej osoby**: celem jest firma, nie para. Kosztu serwerowego to praktycznie nie rusza (jeden wiersz w `accounts` więcej).
 
 ### 3.2 Aktualizacje i wsparcie

@@ -22,13 +22,56 @@ let AsyncStorage;
 try {
   AsyncStorage = require('@react-native-async-storage/async-storage').default;
 } catch (e) {
+  const memCache = {};
   AsyncStorage = {
-    _cache: {},
-    getItem: async (key) => AsyncStorage._cache[key] || null,
-    setItem: async (key, val) => { AsyncStorage._cache[key] = String(val); },
-    removeItem: async (key) => { delete AsyncStorage._cache[key]; }
+    getItem: async (key) => (key in memCache ? memCache[key] : null),
+    setItem: async (key, val) => { memCache[key] = String(val); },
+    removeItem: async (key) => { delete memCache[key]; },
+    multiRemove: async (keys) => { keys.forEach((k) => { delete memCache[k]; }); }
   };
 }
+// 🔐 Wrażliwe wartości — token sesji i hasło lokalnego API centralki — trzymamy
+// w szyfrowanym magazynie systemu (iOS Keychain / Android Keystore) przez
+// expo-secure-store, a nie w AsyncStorage (zwykły plik, czytelny np. z kopii
+// zapasowej telefonu). Owijka podmienia tylko te dwa klucze, więc reszta kodu
+// woła AsyncStorage bez zmian; stare wartości migrują przy pierwszym odczycie.
+// Na web SecureStore nie działa — tam zostaje zwykły magazyn.
+const SECURE_KEYS = { '@lock_auth_token': 'lock_auth_token', '@lock_local_admin_pass': 'lock_local_admin_pass' };
+let SecureStore = null;
+try { SecureStore = require('expo-secure-store'); } catch (e) { SecureStore = null; }
+function installSecureStorage() {
+  const plain = AsyncStorage;
+  const secureKey = (key) => (SecureStore && Platform.OS !== 'web') ? SECURE_KEYS[key] : null;
+  AsyncStorage = {
+    getItem: async (key) => {
+      const sk = secureKey(key);
+      if (!sk) return plain.getItem(key);
+      const v = await SecureStore.getItemAsync(sk).catch(() => null);
+      if (v != null) return v;
+      const legacy = await plain.getItem(key);
+      if (legacy != null) {
+        await SecureStore.setItemAsync(sk, legacy).catch(() => {});
+        await plain.removeItem(key).catch(() => {});
+      }
+      return legacy;
+    },
+    setItem: async (key, val) => {
+      const sk = secureKey(key);
+      if (!sk) return plain.setItem(key, val);
+      await SecureStore.setItemAsync(sk, String(val));
+      await plain.removeItem(key).catch(() => {});
+    },
+    removeItem: async (key) => {
+      const sk = secureKey(key);
+      if (sk) await SecureStore.deleteItemAsync(sk).catch(() => {});
+      return plain.removeItem(key);
+    },
+    multiRemove: async (keys) => {
+      for (const k of keys) await AsyncStorage.removeItem(k);
+    },
+  };
+}
+installSecureStorage();
 
 // 🌟 TRYB LOKALNY: gdy centralka jest skonfigurowana jako w pełni offline,
 // ZAWSZE nadaje swój własny punkt dostępu pod tym stałym adresem - więc nie
@@ -369,6 +412,7 @@ export default function App() {
   const [settingsSsid, setSettingsSsid] = useState('');
   const [settingsWifiPass, setSettingsWifiPass] = useState('');
   const [settingsAppPass, setSettingsAppPass] = useState('');
+  const [settingsCurrentPass, setSettingsCurrentPass] = useState('');
 
   const resetUiToDefault = useCallback(() => {
     setCurrentScreen('dashboard');
@@ -435,6 +479,9 @@ export default function App() {
   };
 
   const handleLogoTap = () => {
+    // Ukryte menu przepinania serwera — WYŁĄCZNIE w buildzie deweloperskim. W wersji
+    // produkcyjnej pozwalało przekierować logowanie (hasło i token) na dowolny adres.
+    if (!__DEV__) return;
     const newCount = logoTapCount + 1;
     if (newCount >= 5) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
@@ -447,9 +494,10 @@ export default function App() {
   };
 
   const saveInstallerConfig = async () => {
-    if (!installerUrlInput) return;
+    if (!installerUrlInput || !__DEV__) return;
     let cleanUrl = installerUrlInput.trim().replace('https://', '').replace('http://', '');
-    cleanUrl = `http://${cleanUrl}`;
+    // Zawsze HTTPS — wcześniej wymuszane było http://, czyli hasło i token otwartym tekstem.
+    cleanUrl = `https://${cleanUrl}`;
     try {
       await AsyncStorage.setItem('@lock_backend_endpoint', cleanUrl);
       setBackendUrl(cleanUrl);
@@ -981,6 +1029,96 @@ export default function App() {
   const [teamByMac, setTeamByMac] = useState({});       // { MAC: [ {accountId, email, since} ] }
   const [inviteEmails, setInviteEmails] = useState({}); // { MAC: 'wpisywany e-mail' }
   const [teamLoading, setTeamLoading] = useState(false);
+
+  // --- Self-test centralki (klient) i tryb serwisowy (tylko konto serwisowe) — README §7.15 ---
+  const [selfTestByMac, setSelfTestByMac] = useState({});   // { MAC: { busy, report } }
+  const [serviceCodeInput, setServiceCodeInput] = useState('');
+  const [serviceBusy, setServiceBusy] = useState(false);
+  const [serviceReport, setServiceReport] = useState(null);
+  const authHeaders = () => ({ 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) });
+
+  // Self-test: zlecenie + odczyt raportu po chwili (centralka odbiera komendę w pollu ~1 s,
+  // liczy testy i odsyła raport osobnym połączeniem TLS — realnie 3–8 s).
+  const runSelfTest = async (mac) => {
+    setSelfTestByMac((prev) => ({ ...prev, [mac]: { ...(prev[mac] || {}), busy: true } }));
+    try {
+      const res = await fetch(`${backendUrl}/api/devices/selftest`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ mac }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Nie udało się uruchomić self-testu.');
+      const since = Date.now();
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const rr = await fetch(`${backendUrl}/api/devices/selftest?mac=${encodeURIComponent(mac)}`, { headers: authHeaders() });
+        const rd = await rr.json().catch(() => ({}));
+        if (rd.report && new Date(rd.report.at).getTime() >= since - 5000) {
+          setSelfTestByMac((prev) => ({ ...prev, [mac]: { busy: false, report: rd.report } }));
+          return;
+        }
+      }
+      throw new Error('Centralka nie odesłała raportu — sprawdź, czy jest online i ma aktualne oprogramowanie.');
+    } catch (e) {
+      setSelfTestByMac((prev) => ({ ...prev, [mac]: { ...(prev[mac] || {}), busy: false } }));
+      Alert.alert('Self-test', e.message);
+    }
+  };
+
+  const serviceCall = async (path, body) => {
+    const res = await fetch(`${backendUrl}${path}`, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Błąd serwera (HTTP ${res.status})`);
+    return data;
+  };
+  const loadServiceReport = async (mac) => {
+    const rr = await fetch(`${backendUrl}/api/service/report?mac=${encodeURIComponent(mac)}`, { headers: authHeaders() });
+    const rd = await rr.json().catch(() => ({}));
+    if (rr.ok) setServiceReport(rd.report || null);
+  };
+  const startServiceSession = async (mac) => {
+    setServiceBusy(true);
+    try { await serviceCall('/api/service/start', { mac }); setServiceCodeInput(''); fetchStatus(); }
+    catch (e) { Alert.alert('Serwis', e.message); }
+    finally { setServiceBusy(false); }
+  };
+  const confirmServiceSession = async (mac) => {
+    setServiceBusy(true);
+    try { await serviceCall('/api/service/confirm', { mac, code: serviceCodeInput.trim() }); setServiceCodeInput(''); fetchStatus(); loadServiceReport(mac); }
+    catch (e) { Alert.alert('Serwis', e.message); }
+    finally { setServiceBusy(false); }
+  };
+  const serviceAction = async (mac, action, label) => {
+    setServiceBusy(true);
+    try {
+      await serviceCall('/api/service/command', { mac, action });
+      if (action === 'diagnostics' || action === 'relay_test') {
+        for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 2500)); await loadServiceReport(mac); }
+      } else {
+        Alert.alert('Serwis', `${label}: zlecono. Centralka wykona to przy najbliższym połączeniu.`);
+      }
+    } catch (e) { Alert.alert('Serwis', e.message); }
+    finally { setServiceBusy(false); }
+  };
+  const endServiceSession = async (mac) => {
+    try { await serviceCall('/api/service/end', { mac }); setServiceReport(null); fetchStatus(); } catch (e) { Alert.alert('Serwis', e.message); }
+  };
+  const leaveDevice = (mac, name) => {
+    Alert.alert('Odłączyć się od centralki?', `Stracisz dostęp do „${name}". Ponowny dostęp wymaga nowego zaproszenia od właściciela.`, [
+      { text: 'Anuluj', style: 'cancel' },
+      { text: 'Odłącz', style: 'destructive', onPress: async () => {
+        try { await serviceCall('/api/devices/leave', { mac }); setServiceReport(null); if (selectedMac === mac) setSelectedMac(''); fetchStatus(); }
+        catch (e) { Alert.alert('Błąd', e.message); }
+      } },
+    ]);
+  };
+  // Wspólny widok listy kontroli raportu (klient i serwis).
+  const renderChecks = (checks) => (checks || []).map((c) => (
+    <View key={c.key} style={{ flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#222' }}>
+      <Text style={{ width: 22, fontSize: 14 }}>{c.ok === null ? '➖' : c.ok ? '✅' : '❌'}</Text>
+      <View style={{ flex: 1 }}>
+        <Text style={{ color: c.ok === false ? '#e57373' : '#fff', fontSize: 13, fontWeight: 'bold' }}>{c.label}</Text>
+        <Text style={{ color: '#888', fontSize: 11, lineHeight: 16 }}>{c.detail}</Text>
+      </View>
+    </View>
+  ));
   const [teamBusyMac, setTeamBusyMac] = useState('');   // MAC, dla którego trwa wysyłka zaproszenia
 
   // --- Zakładka "Pakiet": licencja + zużycie (czyta /api/license) ---
@@ -1156,10 +1294,15 @@ export default function App() {
   const handleExecuteUpdate = () => {
     setOtaState('downloading_server');
     fetch(`${backendUrl}/api/ota/push`, {
-      headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify(selectedMac ? { mac: selectedMac } : {})
     })
-      .then((res) => {
-        if (!res.ok) throw new Error('OTA push failed');
+      .then(async (res) => {
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'OTA push failed');
+        }
         setOtaState('flashing_device');
         const checkInterval = setInterval(() => {
           fetch(`${backendUrl}/api/data`, { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} })
@@ -1182,19 +1325,41 @@ export default function App() {
       });
   };
 
+  // --- Zmiana hasła konta: wymaga obecnego hasła; serwer wylogowuje pozostałe sesje
+  //     i odsyła nowy token dla tego telefonu. ---
+  const handleChangePassword = () => {
+    if (!settingsCurrentPass) return Alert.alert('Błąd', 'Podaj obecne hasło.');
+    if (!settingsAppPass || settingsAppPass.length < 8) return Alert.alert('Błąd', 'Nowe hasło musi mieć co najmniej 8 znaków.');
+    fetch(`${backendUrl}/api/settings/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
+      body: JSON.stringify({ currentPassword: settingsCurrentPass, newPassword: settingsAppPass })
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Nie udało się zmienić hasła.');
+        if (data.token) { await AsyncStorage.setItem('@lock_auth_token', data.token); setAuthToken(data.token); }
+        setSettingsCurrentPass(''); setSettingsAppPass('');
+        Alert.alert('Hasło zmienione', 'Pozostałe urządzenia zalogowane na to konto zostały wylogowane.');
+      })
+      .catch((e) => Alert.alert('Błąd', e.message));
+  };
+
   // --- Zapis ustawień systemowych (zmiana Wi-Fi centralki) ---
+  // Tylko właściciel; zmiana trafia do centralki kolejką komend przy najbliższym pollu.
   const handleSaveSystemSettings = () => {
     if (!settingsSsid) return Alert.alert('Błąd', 'Wprowadź nazwę sieci Wi-Fi.');
     fetch(`${backendUrl}/api/settings/wifi`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}) },
-      body: JSON.stringify({ wifiSSID: settingsSsid, wifiPass: settingsWifiPass })
+      body: JSON.stringify({ wifiSSID: settingsSsid, wifiPass: settingsWifiPass, mac: selectedMac })
     })
-      .then((res) => {
-        if (!res.ok) throw new Error('Save failed');
-        Alert.alert('Zapisano', 'Centralka zrestartuje się i połączy z nową siecią Wi-Fi.');
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Nie udało się zapisać ustawień.');
+        Alert.alert('Zapisano', 'Centralka odbierze nowe ustawienia przy najbliższym połączeniu, zrestartuje się i połączy z nową siecią Wi-Fi.');
       })
-      .catch(() => Alert.alert('Błąd', 'Nie udało się zapisać ustawień.'));
+      .catch((e) => Alert.alert('Błąd', e.message));
   };
 
   // --- Czas otwarcia rygla (tylko właściciel) ---
@@ -1346,8 +1511,8 @@ export default function App() {
 
   // --- Krok 3: zapis nowego hasła ---
   const handleConfirmPasswordReset = () => {
-    if (!newPassword || newPassword.length < 6) {
-      return Alert.alert('Błąd', 'Hasło musi mieć co najmniej 6 znaków.');
+    if (!newPassword || newPassword.length < 8) {
+      return Alert.alert('Błąd', 'Hasło musi mieć co najmniej 8 znaków.');
     }
     if (newPassword !== confirmNewPassword) {
       return Alert.alert('Błąd', 'Hasła nie są identyczne.');
@@ -1525,7 +1690,7 @@ export default function App() {
                   <View style={{ width: '100%', backgroundColor: '#141414', borderRadius: 14, borderWidth: 1, borderColor: '#262626', padding: 18, marginVertical: 10 }}>
                     <Text style={{ color: '#ffb300', fontWeight: 'bold', fontSize: 14, marginBottom: 12 }}>Podłącz telefon do centralki:</Text>
                     <Text style={{ color: '#ccc', fontSize: 13, lineHeight: 20, marginBottom: 6 }}>1.  Upewnij się, że centralka jest zasilona i na ekranie ma „CTRLABLE_SETUP".</Text>
-                    <Text style={{ color: '#ccc', fontSize: 13, lineHeight: 20, marginBottom: 6 }}>2.  Wejdź w Ustawienia Wi-Fi telefonu i połącz się z siecią <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>CTRLABLE_SETUP</Text>.</Text>
+                    <Text style={{ color: '#ccc', fontSize: 13, lineHeight: 20, marginBottom: 6 }}>2.  Wejdź w Ustawienia Wi-Fi telefonu i połącz się z siecią <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>CTRLABLE_SETUP</Text>. Hasło do niej wyświetla ekran centralki (linia „Haslo:"). Zapisz je — będzie potrzebne przy ponownej konfiguracji.</Text>
                     <Text style={{ color: '#ccc', fontSize: 13, lineHeight: 20 }}>3.  Wróć do aplikacji i naciśnij „Sprawdź połączenie".</Text>
                   </View>
 
@@ -1720,7 +1885,7 @@ export default function App() {
               <TextInput style={styles.inputField} placeholder="nazwa@domena.pl" keyboardType="email-address" autoCapitalize="none" placeholderTextColor="#444" editable={!isAuthenticating} value={email} onChangeText={setEmail} />
 
               <Text style={styles.inputLabelText}>Klucz Bezpieczeństwa (Hasło):</Text>
-              <TextInput style={styles.inputField} placeholder="Minimum 6 znaków" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={password} onChangeText={setPassword} />
+              <TextInput style={styles.inputField} placeholder="Minimum 8 znaków" placeholderTextColor="#444" secureTextEntry editable={!isAuthenticating} value={password} onChangeText={setPassword} />
 
               <View style={styles.checkboxContainer}>
                 <TouchableOpacity
@@ -1878,6 +2043,17 @@ export default function App() {
             <ScrollView contentContainerStyle={styles.scrollWrapper}>
               <Text style={styles.screenHeaderText}>📱 Dashboard</Text>
 
+              {/* Zmiany kart / Wi-Fi docierają do centralki kolejką przy jej najbliższym połączeniu.
+                  Dopóki nie potwierdzi — np. zablokowana karta NADAL otwiera drzwi. */}
+              {!isLocalMode && (lockState.pendingCommands || 0) > 0 && (
+                <View style={{ width: '100%', backgroundColor: '#2a220f', borderRadius: 10, borderWidth: 1, borderColor: '#6b5310', padding: 12, marginBottom: 12 }}>
+                  <Text style={{ color: '#ffb300', fontWeight: 'bold', fontSize: 13 }}>⏳ Zmiany czekają na centralkę ({lockState.pendingCommands})</Text>
+                  <Text style={{ color: '#ccc', fontSize: 12, marginTop: 4, lineHeight: 17 }}>
+                    Dopóki centralka ich nie potwierdzi, obowiązuje poprzedni stan (np. zablokowana karta nadal otwiera drzwi). Jeśli komunikat nie znika, centralka jest offline albo wymaga aktualizacji oprogramowania.
+                  </Text>
+                </View>
+              )}
+
               {/* ── PRZEŁĄCZNIK CENTRALEK ── tylko wybór urządzenia do zdalnego otwierania.
                   Widoczny dopiero przy 2+ centralkach — przy jednej nie ma czego przełączać.
                   Zarządzanie (nazwy, czas otwarcia, administratorzy) jest w module „Centralki". */}
@@ -1955,6 +2131,17 @@ export default function App() {
           >
           <ScrollView contentContainerStyle={styles.scrollWrapper} keyboardShouldPersistTaps="handled">
     <Text style={styles.screenHeaderText}>👥 Lista Użytkowników</Text>
+
+    {/* Zmiany kart / Wi-Fi docierają do centralki kolejką przy jej najbliższym połączeniu.
+        Dopóki nie potwierdzi — np. zablokowana karta NADAL otwiera drzwi. */}
+    {!isLocalMode && (lockState.pendingCommands || 0) > 0 && (
+      <View style={{ width: '100%', backgroundColor: '#2a220f', borderRadius: 10, borderWidth: 1, borderColor: '#6b5310', padding: 12, marginBottom: 12 }}>
+        <Text style={{ color: '#ffb300', fontWeight: 'bold', fontSize: 13 }}>⏳ Zmiany czekają na centralkę ({lockState.pendingCommands})</Text>
+        <Text style={{ color: '#ccc', fontSize: 12, marginTop: 4, lineHeight: 17 }}>
+          Dopóki centralka ich nie potwierdzi, obowiązuje poprzedni stan (np. zablokowana karta nadal otwiera drzwi). Jeśli komunikat nie znika, centralka jest offline albo wymaga aktualizacji oprogramowania.
+        </Text>
+      </View>
+    )}
 
     {/* 🌟 SEKCJA PAROWANIA PRZENIESIONA TUTAJ */}
     {/* Limit kart z pakietu jest widoczny ZAWCZASU: przy komplecie kart moduł jest
@@ -2527,7 +2714,16 @@ export default function App() {
               {!isLocalMode && (
                 <View style={styles.card}>
                   <Text style={styles.sectionHeader}>🔐 Zmiana Hasła do Konta Aplikacji</Text>
-                  <Text style={styles.inputLabelText}>Nowe Hasło Logowania:</Text>
+                  <Text style={styles.inputLabelText}>Obecne Hasło:</Text>
+                  <TextInput
+                    style={styles.inputField}
+                    secureTextEntry={secureSettingsApp}
+                    placeholder="Wpisz obecne hasło"
+                    placeholderTextColor="#555"
+                    value={settingsCurrentPass}
+                    onChangeText={setSettingsCurrentPass}
+                  />
+                  <Text style={styles.inputLabelText}>Nowe Hasło Logowania (min. 8 znaków):</Text>
                   <View style={{ width: '100%', position: 'relative' }}>
                     <TextInput
                       style={styles.inputField}
@@ -2541,6 +2737,9 @@ export default function App() {
                       <Text style={{ color: '#64b5f6', fontWeight: 'bold' }}>{secureSettingsApp ? "Pokaż" : "Ukryj"}</Text>
                     </TouchableOpacity>
                   </View>
+                  <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 12 }]} onPress={handleChangePassword}>
+                    <Text style={styles.btnText}>🔐 Zmień hasło</Text>
+                  </TouchableOpacity>
                 </View>
               )}
 
@@ -2708,6 +2907,41 @@ export default function App() {
                       </View>
                     </>
                   )}
+
+                  {/* SELF-TEST — właściciel i współadmin. Tylko odczyt: bez testu przekaźnika
+                      (ten otwiera drzwi; ma go wyłącznie serwis) i bez listy kart. */}
+                  {!isLocalMode && (
+                    <>
+                      <View style={{ height: 1, backgroundColor: '#222', marginVertical: 12 }} />
+                      <TouchableOpacity
+                        style={[styles.secondaryBtn, { paddingVertical: 9, backgroundColor: '#1f2f1f', opacity: selfTestByMac[d.mac]?.busy ? 0.5 : 1 }]}
+                        disabled={!!selfTestByMac[d.mac]?.busy}
+                        onPress={() => runSelfTest(d.mac)}
+                      >
+                        <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>{selfTestByMac[d.mac]?.busy ? '🩺 Trwa self-test… (do 20 s)' : '🩺 Self-test centralki'}</Text>
+                      </TouchableOpacity>
+                      {selfTestByMac[d.mac]?.report && (() => {
+                        const rep = selfTestByMac[d.mac].report;
+                        return (
+                          <View style={{ marginTop: 10, backgroundColor: rep.serviceRecommended ? '#2a1a1a' : '#14231a', borderRadius: 8, borderWidth: 1, borderColor: rep.serviceRecommended ? '#5c2b2b' : '#2e5c3a', padding: 12 }}>
+                            <Text style={{ color: rep.serviceRecommended ? '#ffb300' : '#81c784', fontWeight: 'bold', fontSize: 13, marginBottom: 6 }}>{rep.summary}</Text>
+                            {renderChecks(rep.checks)}
+                            <Text style={{ color: '#555', fontSize: 10, marginTop: 6 }}>Raport z {new Date(rep.at).toLocaleString('pl-PL')}{rep.firmware ? ` · firmware ${rep.firmware}` : ''}</Text>
+                            {rep.serviceRecommended && (
+                              <Text style={{ color: '#aaa', fontSize: 11, marginTop: 6, lineHeight: 16 }}>
+                                Aby umówić serwis, zaproś konto serwisowe w zakładce „Zespół" — nie zajmuje ono miejsca w limicie administratorów i traci dostęp samo po zakończeniu prac.
+                              </Text>
+                            )}
+                          </View>
+                        );
+                      })()}
+                      {!d.isOwner && (
+                        <TouchableOpacity style={{ marginTop: 10, alignSelf: 'flex-start' }} onPress={() => leaveDevice(d.mac, d.name)}>
+                          <Text style={{ color: '#e57373', fontSize: 12, fontWeight: 'bold' }}>🚪 Odłącz się od tej centralki</Text>
+                        </TouchableOpacity>
+                      )}
+                    </>
+                  )}
                 </View>
               );
             })}
@@ -2755,8 +2989,12 @@ export default function App() {
                         admins.map((a) => (
                           <View key={a.accountId} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#222' }}>
                             <View style={{ flex: 1, paddingRight: 10 }}>
-                              <Text style={{ color: '#fff', fontSize: 14 }}>{a.email}</Text>
-                              <Text style={{ color: '#666', fontSize: 11 }}>Administrator · dostęp do tej centralki</Text>
+                              <Text style={{ color: '#fff', fontSize: 14 }}>{a.service ? '🛠️ ' : ''}{a.email}</Text>
+                              <Text style={{ color: a.service ? '#ffb300' : '#666', fontSize: 11 }}>
+                                {a.service
+                                  ? `Serwis · poza limitem · dostęp wygasa ${a.expiresAt ? new Date(a.expiresAt).toLocaleString('pl-PL') : 'wkrótce'}`
+                                  : 'Administrator · dostęp do tej centralki'}
+                              </Text>
                             </View>
                             <TouchableOpacity onPress={() => revokeFromTeam(d.mac, a.accountId, a.email)}>
                               <Text style={{ color: '#e57373', fontWeight: 'bold', fontSize: 13 }}>Odbierz</Text>
@@ -2770,8 +3008,23 @@ export default function App() {
                           Wyszarzamy zawczasu zamiast odsyłać 403 po wysłaniu zaproszenia. */}
                       {(() => {
                         const maxAdmins = lockState.entitlements?.maxAdmins;
-                        const usedAdmins = 1 + (teamByMac[d.mac]?.length || 0); // właściciel + współadmini
+                        // Udziały serwisowe nie liczą się do limitu (serwer też ich nie liczy).
+                        const usedAdmins = 1 + (teamByMac[d.mac] || []).filter((a) => !a.service).length; // właściciel + współadmini
                         const adminsFull = maxAdmins != null && usedAdmins >= maxAdmins;
+                        const serviceEmail = lockState.account?.serviceEmail;
+                        const serviceAlready = (teamByMac[d.mac] || []).some((a) => a.service);
+                        const inviteServiceBtn = serviceEmail && !serviceAlready && !lockState.account?.isServiceAccount ? (
+                          <TouchableOpacity
+                            style={[styles.secondaryBtn, { backgroundColor: '#3a2f10', width: '100%', marginTop: 10, opacity: teamBusyMac === d.mac ? 0.5 : 1 }]}
+                            disabled={teamBusyMac === d.mac}
+                            onPress={() => Alert.alert('Zaprosić serwis?', `Serwis (${serviceEmail}) dostanie dostęp do centralki „${d.name}" na ${lockState.account?.serviceShareHours || 48} h. Nie zajmuje miejsca w limicie administratorów; rozszerzone czynności wymagają dodatkowo kodu z ekranu centralki, więc serwisant musi być na miejscu. Dostęp możesz odebrać w każdej chwili.`, [
+                              { text: 'Anuluj', style: 'cancel' },
+                              { text: 'Zaproś serwis', onPress: () => { setInviteEmails((prev) => ({ ...prev, [d.mac]: serviceEmail })); setTimeout(() => submitInvite(d.mac), 50); } },
+                            ])}
+                          >
+                            <Text style={styles.btnText}>🛠️ Zaproś serwis (poza limitem)</Text>
+                          </TouchableOpacity>
+                        ) : null;
                         if (adminsFull) {
                           return (
                             <View style={{ backgroundColor: '#2a1a1a', borderRadius: 8, borderWidth: 1, borderColor: '#5c2b2b', padding: 12, marginTop: 14 }}>
@@ -2786,6 +3039,7 @@ export default function App() {
                               <TouchableOpacity style={{ marginTop: 10 }} onPress={() => { navigateTo('pakiet'); loadLicense(); }}>
                                 <Text style={{ color: '#64b5f6', fontWeight: 'bold', fontSize: 12 }}>💳 Zobacz pakiety ›</Text>
                               </TouchableOpacity>
+                              {inviteServiceBtn}
                             </View>
                           );
                         }
@@ -2811,6 +3065,7 @@ export default function App() {
                             >
                               <Text style={styles.btnText}>{teamBusyMac === d.mac ? 'Wysyłanie…' : '✉️ Wyślij zaproszenie'}</Text>
                             </TouchableOpacity>
+                            {inviteServiceBtn}
                           </>
                         );
                       })()}
@@ -2822,6 +3077,122 @@ export default function App() {
               <TouchableOpacity style={[styles.secondaryBtn, { width: '100%', marginTop: 4 }]} onPress={loadTeam}>
                 <Text style={styles.btnText}>🔄 Odśwież listę</Text>
               </TouchableOpacity>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        )}
+
+        {/* ── EKRAN: SERWIS — wyłącznie konto z SERVICE_ACCOUNTS (serwer i tak odrzuci innych).
+            Rozszerzone akcje dopiero po przepisaniu kodu z OLED centralki (README §7.15). ── */}
+        {currentScreen === 'service' && lockState.account?.isServiceAccount && (
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }} keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 100}>
+            <ScrollView contentContainerStyle={styles.scrollWrapper} keyboardShouldPersistTaps="handled">
+              <Text style={styles.screenHeaderText}>🛠️ Serwis</Text>
+              {(() => {
+                const shared = (devices || []).filter((d) => !d.isOwner);
+                const dev = shared.find((d) => d.mac === selectedMac) || shared[0];
+                if (!dev) {
+                  return (
+                    <View style={styles.card}>
+                      <Text style={styles.sectionHeader}>Brak udostępnionych centralek</Text>
+                      <Text style={{ color: '#888', fontSize: 13, lineHeight: 19 }}>
+                        Klient musi zaprosić to konto w zakładce „Zespół" (przycisk „Zaproś serwis"). Dostęp wygasa sam po {lockState.account?.serviceShareHours || 48} h; możesz też odłączyć się wcześniej.
+                      </Text>
+                    </View>
+                  );
+                }
+                const sess = dev.mac === selectedMac ? lockState.serviceSession : null;
+                return (
+                  <>
+                    {shared.length > 1 && (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                        {shared.map((d) => (
+                          <TouchableOpacity key={d.mac} onPress={() => { setSelectedMac(d.mac); setServiceReport(null); loadServiceReport(d.mac); }}
+                            style={{ paddingVertical: 7, paddingHorizontal: 12, borderRadius: 8, backgroundColor: d.mac === dev.mac ? '#5c33cf' : '#1a1a2e', borderWidth: 1, borderColor: d.mac === dev.mac ? '#7c5cff' : '#2a2a3e' }}>
+                            <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>{d.name}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                    <View style={styles.card}>
+                      <Text style={styles.sectionHeader}>{dev.name}</Text>
+                      <Text style={{ color: '#666', fontSize: 11, marginTop: -6, marginBottom: 10 }}>{dev.mac}{dev.firmwareVersion ? ` · ${dev.firmwareVersion}` : ''} · {dev.online ? 'online' : 'offline'}</Text>
+                      {dev.mac !== selectedMac ? (
+                        <TouchableOpacity style={[styles.secondaryBtn, { width: '100%' }]} onPress={() => { setSelectedMac(dev.mac); loadServiceReport(dev.mac); }}>
+                          <Text style={styles.btnText}>Wybierz tę centralkę</Text>
+                        </TouchableOpacity>
+                      ) : !sess ? (
+                        <>
+                          <Text style={{ color: '#aaa', fontSize: 12, lineHeight: 17, marginBottom: 10 }}>
+                            Rozpoczęcie sesji wyświetli na ekranie centralki 6-cyfrowy kod. Przepisz go tutaj — to potwierdza, że jesteś na miejscu. Właściciel dostanie powiadomienie.
+                          </Text>
+                          <TouchableOpacity style={[styles.secondaryBtn, { width: '100%', backgroundColor: '#0284c7', opacity: serviceBusy ? 0.5 : 1 }]} disabled={serviceBusy} onPress={() => startServiceSession(dev.mac)}>
+                            <Text style={styles.btnText}>▶️ Rozpocznij sesję serwisową</Text>
+                          </TouchableOpacity>
+                        </>
+                      ) : sess.state === 'awaiting_code' ? (
+                        <>
+                          <Text style={{ color: '#ffb300', fontSize: 12, lineHeight: 17, marginBottom: 8 }}>Kod jest na ekranie centralki (ważny 15 min).</Text>
+                          <TextInput style={styles.inputField} placeholder="6-cyfrowy kod z ekranu" placeholderTextColor="#555" keyboardType="number-pad" maxLength={6} value={serviceCodeInput} onChangeText={setServiceCodeInput} />
+                          <TouchableOpacity style={[styles.secondaryBtn, { width: '100%', backgroundColor: '#2e7d32', opacity: serviceBusy || serviceCodeInput.length < 6 ? 0.5 : 1 }]} disabled={serviceBusy || serviceCodeInput.length < 6} onPress={() => confirmServiceSession(dev.mac)}>
+                            <Text style={styles.btnText}>✅ Potwierdź obecność</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={{ marginTop: 10, alignSelf: 'center' }} onPress={() => startServiceSession(dev.mac)}><Text style={{ color: '#64b5f6', fontSize: 12 }}>Wyślij nowy kod</Text></TouchableOpacity>
+                        </>
+                      ) : (
+                        <>
+                          <Text style={{ color: '#81c784', fontSize: 12, marginBottom: 10 }}>Sesja potwierdzona · aktywna do {new Date(sess.until).toLocaleTimeString('pl-PL')}</Text>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                            <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, minWidth: '45%', paddingVertical: 9, opacity: serviceBusy ? 0.5 : 1 }]} disabled={serviceBusy} onPress={() => serviceAction(dev.mac, 'diagnostics', 'Diagnostyka')}>
+                              <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>📋 Pobierz diagnostykę</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, minWidth: '45%', paddingVertical: 9, backgroundColor: '#5c2b2b', opacity: serviceBusy ? 0.5 : 1 }]} disabled={serviceBusy}
+                              onPress={() => Alert.alert('Test przekaźnika', 'Centralka na 0,4 s wysteruje przekaźnik — DRZWI ZOSTANĄ NA CHWILĘ OTWARTE. Uruchom tylko, gdy to bezpieczne.', [{ text: 'Anuluj', style: 'cancel' }, { text: 'Wykonaj', style: 'destructive', onPress: () => serviceAction(dev.mac, 'relay_test', 'Test przekaźnika') }])}>
+                              <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>⚡ Test przekaźnika</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, minWidth: '45%', paddingVertical: 9, opacity: serviceBusy ? 0.5 : 1 }]} disabled={serviceBusy} onPress={() => Alert.alert('Restart centralki', 'Centralka zrestartuje się po potwierdzeniu komendy.', [{ text: 'Anuluj', style: 'cancel' }, { text: 'Restartuj', onPress: () => serviceAction(dev.mac, 'restart', 'Restart') }])}>
+                              <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>🔄 Restart</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.secondaryBtn, { flex: 1, minWidth: '45%', paddingVertical: 9, opacity: serviceBusy ? 0.5 : 1 }]} disabled={serviceBusy}
+                              onPress={() => Alert.alert('Reset klucza urządzenia', 'Użyj tylko po wymianie płytki albo gdy centralka dostaje 401 na każdym pollu. Centralka przypnie swój klucz przy najbliższym połączeniu.', [{ text: 'Anuluj', style: 'cancel' }, { text: 'Resetuj', style: 'destructive', onPress: async () => { try { await serviceCall('/api/devices/reset_key', { mac: dev.mac }); Alert.alert('Serwis', 'Klucz zresetowany.'); } catch (e) { Alert.alert('Serwis', e.message); } } }])}>
+                              <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>🔑 Reset klucza urządzenia</Text>
+                            </TouchableOpacity>
+                          </View>
+                          <TouchableOpacity style={{ marginTop: 12, alignSelf: 'center' }} onPress={() => endServiceSession(dev.mac)}><Text style={{ color: '#aaa', fontSize: 12 }}>Zakończ sesję</Text></TouchableOpacity>
+                        </>
+                      )}
+                      <TouchableOpacity style={{ marginTop: 14, alignSelf: 'flex-start' }} onPress={() => leaveDevice(dev.mac, dev.name)}>
+                        <Text style={{ color: '#e57373', fontSize: 12, fontWeight: 'bold' }}>🚪 Zakończ dostęp serwisowy do tej centralki</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {serviceReport && sess && sess.state === 'confirmed' && (
+                      <View style={styles.card}>
+                        <Text style={styles.sectionHeader}>Diagnostyka</Text>
+                        <Text style={{ color: '#666', fontSize: 11, marginTop: -6, marginBottom: 8 }}>{new Date(serviceReport.at).toLocaleString('pl-PL')} · firmware {serviceReport.raw?.fw || '?'} · oczekujące komendy: {serviceReport.pendingCommands ?? 0}</Text>
+                        {renderChecks(serviceReport.checks)}
+                        <Text style={{ color: '#aaa', fontSize: 11, marginTop: 10, lineHeight: 16 }}>
+                          Czas pracy {Math.round((serviceReport.raw?.uptime_s || 0) / 60)} min · restart z powodu #{serviceReport.raw?.reset_reason ?? '?'} · RAM {serviceReport.raw?.heap_free ?? '?'} B (min {serviceReport.raw?.heap_min ?? '?'}) · LittleFS {serviceReport.raw?.fs_used ?? '?'}/{serviceReport.raw?.fs_total ?? '?'} B · kart w centralce: {serviceReport.raw?.cards_total ?? '?'}
+                        </Text>
+                        {serviceReport.comparison && (
+                          <View style={{ marginTop: 12 }}>
+                            <Text style={{ color: '#aaa', fontSize: 12, fontWeight: 'bold', marginBottom: 6 }}>Karty: centralka ({serviceReport.comparison.deviceCount}) ↔ baza ({serviceReport.comparison.dbCount})</Text>
+                            {serviceReport.comparison.onlyOnDevice.length === 0 && serviceReport.comparison.onlyInDb.length === 0 && serviceReport.comparison.activeMismatch.length === 0
+                              ? <Text style={{ color: '#81c784', fontSize: 12 }}>✅ Zgodne</Text>
+                              : (
+                                <>
+                                  {serviceReport.comparison.onlyOnDevice.map((c, i) => <Text key={'d' + i} style={{ color: '#ffb300', fontSize: 12 }}>⚠️ Tylko w centralce: {c.name} (…{c.uidTail}){c.active ? '' : ' — zablokowana'}</Text>)}
+                                  {serviceReport.comparison.onlyInDb.map((c, i) => <Text key={'b' + i} style={{ color: '#ffb300', fontSize: 12 }}>⚠️ Tylko w bazie: {c.name} (…{c.uidTail})</Text>)}
+                                  {serviceReport.comparison.activeMismatch.map((c, i) => <Text key={'m' + i} style={{ color: '#e57373', fontSize: 12 }}>❌ {c.name}: baza {c.dbActive ? 'aktywna' : 'zablokowana'}, centralka {c.deviceActive ? 'aktywna' : 'zablokowana'}</Text>)}
+                                  <Text style={{ color: '#888', fontSize: 11, marginTop: 6, lineHeight: 16 }}>Rozjazd naprawisz z listy użytkowników klienta: zablokuj/odblokuj lub usuń i naucz kartę ponownie — zmiany idą do centralki kolejką komend.</Text>
+                                </>
+                              )}
+                          </View>
+                        )}
+                      </View>
+                    )}
+                  </>
+                );
+              })()}
             </ScrollView>
           </KeyboardAvoidingView>
         )}
@@ -2947,9 +3318,12 @@ export default function App() {
               onPress={() => navigateTo('devices')}
             ><Text style={styles.menuItemLabelText}>🏠 Centralki</Text></TouchableOpacity>
           )}
-          {!isLocalMode && (
+          {!isLocalMode && (<>
             <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'team' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('team'); loadTeam(); }}><Text style={styles.menuItemLabelText}>🤝 Zespół (Administratorzy)</Text></TouchableOpacity>
-          )}
+            {lockState.account?.isServiceAccount && (
+              <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'service' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('service'); if (selectedMac) loadServiceReport(selectedMac); }}><Text style={styles.menuItemLabelText}>🛠️ Serwis</Text></TouchableOpacity>
+            )}
+          </>)}
           {!isLocalMode && (
             <TouchableOpacity style={[styles.menuItemRow, currentScreen === 'pakiet' ? styles.menuItemRowActive : null]} onPress={() => { navigateTo('pakiet'); loadLicense(); }}><Text style={styles.menuItemLabelText}>💳 Pakiet i licencja</Text></TouchableOpacity>
           )}

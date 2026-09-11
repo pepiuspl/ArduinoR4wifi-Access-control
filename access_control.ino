@@ -8,10 +8,14 @@
 #include <LittleFS.h>
 #include <WiFiUdp.h>
 #include <NTPClient.h> 
-#include <EEPROM.h>  
-#include <ArduinoOTA.h>
+#include <EEPROM.h>
 #include <Update.h>
-#include <time.h> 
+#include <Preferences.h>       // NVS — klucz urządzenia i hasło sieci konfiguracyjnej
+#include <esp_random.h>
+#include "mbedtls/sha256.h"    // weryfikacja podpisu aktualizacji OTA
+#include "mbedtls/pk.h"
+#include "mbedtls/base64.h"
+#include <time.h>
 
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
 #define PROXMOX_SERVER "node.ctrlable.pl"
@@ -65,6 +69,124 @@ static void configureSecure(WiFiClientSecure &c) {
   c.setTimeout(6000);         // ms na operacje we/wy
 }
 
+// === Klucz publiczny do weryfikacji aktualizacji (ECDSA P-256, README §7.5) ===
+// Obraz firmware z serwera jest instalowany TYLKO, gdy podpis (nagłówek
+// X-Firmware-Signature) zgadza się z tym kluczem. Klucz prywatny NIGDY nie trafia do
+// repozytorium — leży w sekrecie FIRMWARE_SIGNING_KEY w GitHub Actions, który podpisuje
+// każdy build. Przejęcie serwera ani konta GitHub bez tego klucza nie pozwala wgrać
+// na zamki własnego oprogramowania.
+static const char* FIRMWARE_PUBKEY_PEM = R"EOF(
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE40/xrgzoPS6nUe7HnO9bBzzrm0EY
+51xGV2nC8+ZJ8fJz5uXJ/3WiE5UZ3nZfHW8F/IHFgNLUXMXebB2Ql+u6Ww==
+-----END PUBLIC KEY-----
+)EOF";
+
+// === Sekrety urządzenia (NVS, przetrwają reset fabryczny) — README §7.2 ===
+// deviceKeyHex — 32 losowe bajty (hex). Dołączany do KAŻDEGO żądania do serwera
+//   (nagłówek X-Device-Key, po TLS). Zastępuje dawne „hasło" wyliczane z MAC-a jawnym
+//   algorytmem — MAC widać w eterze, a algorytm był w publicznym repo.
+// apPassword — hasło WPA2 sieci CTRLABLE_SETUP (12 znaków). Pokazywane na ekranie
+//   WYŁĄCZNIE w trybie pierwszej konfiguracji; dawniej sieć była całkiem otwarta.
+String deviceKeyHex = "";
+String apPassword = "";
+// localAdminPass — hasło lokalnego API w trybie offline (EEPROM @400, 16 znaków).
+//   Losowane przy każdej konfiguracji offline, kasowane resetem fabrycznym.
+char localAdminPass[24] = "";
+#define LOCAL_PASS_ADDR 400
+
+static const char PW_ALPHABET[] = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";   // bez 0/O/1/I/L
+
+String randomToken(int len) {
+  String s = "";
+  for (int i = 0; i < len; i++) s += PW_ALPHABET[esp_random() % (sizeof(PW_ALPHABET) - 1)];
+  return s;
+}
+
+// Wywoływać PO włączeniu radia (WiFi.mode) — wtedy esp_random() to sprzętowy RNG.
+void loadOrCreateDeviceSecrets() {
+  Preferences prefs;
+  prefs.begin("ctrlsec", false);
+  deviceKeyHex = prefs.getString("dkey", "");
+  if (deviceKeyHex.length() != 64) {
+    uint8_t raw[32];
+    esp_fill_random(raw, sizeof(raw));
+    char hex[65];
+    for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", raw[i]);
+    hex[64] = 0;
+    deviceKeyHex = String(hex);
+    prefs.putString("dkey", deviceKeyHex);
+    Serial.println("[SEC] Wygenerowano nowy klucz urzadzenia.");
+  }
+  apPassword = prefs.getString("appw", "");
+  if (apPassword.length() < 8) {
+    apPassword = randomToken(12);
+    prefs.putString("appw", apPassword);
+  }
+  prefs.end();
+  // Tylko port szeregowy (fizyczny dostęp do płytki) — dla instalatora.
+  Serial.println("[SEC] Siec konfiguracyjna: CTRLABLE_SETUP, haslo: " + apPassword);
+}
+
+void loadLocalAdminPass() {
+  EEPROM.get(LOCAL_PASS_ADDR, localAdminPass);
+  localAdminPass[sizeof(localAdminPass) - 1] = 0;
+  // Po resecie fabrycznym EEPROM to same 0xFF — wszystko spoza alfabetu = brak hasła.
+  for (int i = 0; localAdminPass[i]; i++) {
+    if (!isalnum((unsigned char)localAdminPass[i])) { localAdminPass[0] = 0; break; }
+  }
+  if (strlen(localAdminPass) < 12) localAdminPass[0] = 0;
+}
+
+void saveLocalAdminPass(const String& p) {
+  memset(localAdminPass, 0, sizeof(localAdminPass));
+  p.toCharArray(localAdminPass, sizeof(localAdminPass));
+  EEPROM.put(LOCAL_PASS_ADDR, localAdminPass);
+  EEPROM.commit();
+}
+
+// Porównanie w stałym czasie — nie zdradza długości zgodnego prefiksu.
+bool secureEquals(const String& a, const char* b) {
+  size_t la = a.length(), lb = strlen(b);
+  if (la == 0 || lb == 0) return false;
+  uint8_t diff = (la == lb) ? 0 : 1;
+  for (size_t i = 0; i < la; i++) diff |= (uint8_t)a[i] ^ (uint8_t)b[i % lb];
+  return diff == 0;
+}
+
+void startSetupAP() {
+  WiFi.softAP("CTRLABLE_SETUP", apPassword.c_str());
+}
+
+// Nagłówek uwierzytelniający centralkę — do KAŻDEGO żądania do serwera.
+void printDeviceAuthHeader(WiFiClientSecure& c) {
+  c.print("X-Device-Key: "); c.println(deviceKeyHex);
+}
+
+String htmlEscape(const String& s) {
+  String o = "";
+  for (unsigned int i = 0; i < s.length(); i++) {
+    char ch = s[i];
+    if (ch == '&') o += "&amp;"; else if (ch == '<') o += "&lt;"; else if (ch == '>') o += "&gt;";
+    else if (ch == '\'') o += "&#39;"; else if (ch == '"') o += "&quot;"; else o += ch;
+  }
+  return o;
+}
+
+// Weryfikacja podpisu obrazu: hash liczony w trakcie pobierania, podpis z nagłówka.
+bool verifyFirmwareSignature(const uint8_t hash[32], const String& sigB64) {
+  if (sigB64.length() < 16 || sigB64.length() > 200) return false;
+  uint8_t sig[160];
+  size_t sigLen = 0;
+  if (mbedtls_base64_decode(sig, sizeof(sig), &sigLen, (const unsigned char*)sigB64.c_str(), sigB64.length()) != 0) return false;
+  mbedtls_pk_context pk;
+  mbedtls_pk_init(&pk);
+  int rc = mbedtls_pk_parse_public_key(&pk, (const unsigned char*)FIRMWARE_PUBKEY_PEM, strlen(FIRMWARE_PUBKEY_PEM) + 1);
+  if (rc == 0) rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, 32, sig, sigLen);
+  mbedtls_pk_free(&pk);
+  return rc == 0;
+}
+
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
@@ -85,7 +207,6 @@ struct LogEntry {
 // Forward Declarations
 String getFormattedSystemTime(); 
 String getMacAddressString();
-String getFactoryAdminPassword();
 void addLog(String msg); 
 void openDoor(String source); 
 void forceHardwareRFIDReset(); 
@@ -100,9 +221,12 @@ void initStorage();          // LittleFS (etap 1)
 void storageSelfTest();
 void updateDisplay(String status, String info = ""); 
 void renderSystemUI(); 
-void handleProvisioningServer();
-void handleWebServer(); 
-void handleOnlineInstallerServer(); 
+void handleLocalHttp();
+void serveProvisioning(WiFiClient& client, const String& reqHeader);
+void serveLocalApi(WiFiClient& client, const String& reqHeader);
+void applyPendingCommands();
+void buildDiagnosticReport(int mode);
+void sendDiagnosticReport();
 void executeCloudSynchronization();
 void performLocalFirmwareUpdate(); 
 void transmitCardPayloadToCloud(String uidStr, String nameStr, int slot, bool runRegister);
@@ -250,6 +374,22 @@ volatile bool req_ota = false;
 volatile bool req_deregister = false;
 volatile bool req_usernameUpdated = false;
 char req_username[40] = "";
+// Komendy z serwera (zmiany kart, Wi-Fi) — README §7.3. networkTask odkłada porcję
+// tutaj, a WYKONUJE ją loop (rdzeń 1), bo dotyka tablic kart używanych przy skanie.
+// cmdAckId = najwyższy wykonany id; wysyłany w każdym pollu jako ack.
+volatile bool req_cmdsPending = false;
+char req_cmds[1024] = "";
+volatile unsigned long cmdAckId = 0;
+volatile unsigned long restartAfterAckId = 0;   // po komendzie Wi-Fi/restart: restart dopiero, gdy serwer dostał ack
+// Tryb serwisowy (README §7.15): kod obecności z serwera pokazywany na OLED przez 15 min.
+char serviceCode[8] = "";
+unsigned long serviceCodeUntil = 0;
+// Raport diagnostyczny/self-test: loop (rdzeń 1) buduje JSON i ustawia flagę,
+// networkTask (rdzeń 0) tylko go wysyła — bez wyścigu o tablice kart.
+volatile bool req_diagReport = false;
+String diagPayload = "";
+volatile unsigned long lastAckSent = 0;          // ack z ostatniego UDANEGO polla (HTTP 200)
+unsigned long lastAuthRejectLog = 0;
 // --- Kolejka wysyłki skanu karty do chmury (rdzeń 1 -> rdzeń 0) --------------
 // KRYTYCZNE DLA SZYBKOŚCI: transmitCardPayloadToCloud() robi pełny handshake TLS
 // (realnie 1,5–4 s). Wołane wprost z loop() zamrażało rdzeń 1 na każdym skanie —
@@ -337,17 +477,9 @@ String getMacAddressString() {
   return String(macBuf);
 }
 
-// ALGORYTMICZNE UNIKALNE HASŁO FABRYCZNE
-String getFactoryAdminPassword() {
-  String mac = getMacAddressString();
-  unsigned long hashNum = 0;
-  String salt = "CTRLABLE_KEY_2026"; 
-  String combined = mac + salt;
-  for (unsigned int i = 0; i < combined.length(); i++) {
-    hashNum += combined[i] * (i + 1);
-  }
-  return "CN" + String(hashNum).substring(0, 5);
-}
+// (Dawne getFactoryAdminPassword() usunięte: „CN” + suma kodów znaków MAC-a z jawną
+// solą — ~10 tys. możliwych wartości, a MAC widać w eterze. Zastąpione losowym
+// kluczem urządzenia i losowym hasłem lokalnym — patrz loadOrCreateDeviceSecrets().)
 
 void loadConfiguration() { 
   if (EEPROM.read(250) == 0x55) { 
@@ -682,9 +814,21 @@ void renderSystemUI() {
     display.setCursor(0, 18); 
     display.println(globalDisplayInfo);
   }   
-  else if (learningMode) { 
-    display.setCursor(20, 20); 
-    display.setTextSize(2); 
+  else if (serviceCodeUntil > millis() && serviceCode[0]) {
+    // Kod obecności dla serwisanta — przepisuje go do aplikacji, dowodząc, że stoi
+    // przy centralce. Znika po 15 min albo po restarcie.
+    display.setCursor(10, 16);
+    display.print("TRYB SERWISOWY");
+    display.setCursor(4, 27);
+    display.print("Kod do aplikacji:");
+    display.setTextSize(2);
+    display.setCursor(28, 38);
+    display.print(serviceCode);
+    display.setTextSize(1);
+  }
+  else if (learningMode) {
+    display.setCursor(20, 20);
+    display.setTextSize(2);
     display.print("LEARNING"); 
     display.setTextSize(1); 
     display.setCursor(20, 42);
@@ -766,12 +910,13 @@ void updateDisplay(String status, String info) {
   renderSystemUI();
 } 
 
-void displayProvisioningInstructions(String errorContext) { 
-  if (errorContext != "") { 
-    globalDisplayInfo = errorContext + "\nConnect to:\nSSID: CTRLABLE_SETUP\nIP: 192.168.4.1";
-  } else { 
-    globalDisplayInfo = "INITIAL CONFIG!\nConnect to:\nSSID: CTRLABLE_SETUP\nIP: 192.168.4.1"; 
-  } 
+void displayProvisioningInstructions(String errorContext) {
+  // Hasło sieci konfiguracyjnej pokazujemy WYŁĄCZNIE w trybie pierwszej konfiguracji
+  // (nowe urządzenie albo reset fabryczny przyciskiem wewnątrz obudowy). W trybie
+  // offline i w awaryjnym AP ekran przy drzwiach go nie zdradza.
+  String head = (errorContext != "") ? errorContext : "INITIAL CONFIG!";
+  if (provisioningMode) globalDisplayInfo = head + "\nSSID: CTRLABLE_SETUP\nHaslo: " + apPassword + "\nIP: 192.168.4.1";
+  else globalDisplayInfo = head + "\nSiec: CTRLABLE_SETUP\n(haslo z instalacji)";
   renderSystemUI();
 } 
 
@@ -948,467 +1093,260 @@ void openDoor(String source) {
   addLog("Otwarto: " + source);
 } 
 
-void handleProvisioningServer() { 
-  WiFiClient client = server.accept(); 
-  if (!client) return; 
+// =========================================================================
+// LOKALNY SERWER HTTP — README §7.1
+// Działa WYŁĄCZNIE na punkcie dostępowym CTRLABLE_SETUP (pierwsza konfiguracja,
+// tryb offline, awaryjne AP po utracie Wi-Fi), a ten jest zawsze za hasłem WPA2.
+// W trybie online centralka w ogóle NIE nasłuchuje w sieci domowej — wcześniej
+// każdy w Wi-Fi klienta mógł przez /save_setup odebrać hasło administratora,
+// otworzyć drzwi przez /api/unlock albo wgrać własny firmware przez /api/update.
+// Jeden dyspozytor zamiast trzech funkcji rywalizujących o to samo gniazdo.
+// =========================================================================
+
+// Wartość parametru z pierwszej linii żądania ("GET /x?a=1&b=2 HTTP/1.1").
+String queryParam(const String& req, const String& key) {
+  String p1 = "?" + key + "=", p2 = "&" + key + "=";
+  int start = req.indexOf(p1);
+  if (start != -1) start += p1.length();
+  else {
+    start = req.indexOf(p2);
+    if (start == -1) return "";
+    start += p2.length();
+  }
+  int end = req.length();
+  int amp = req.indexOf('&', start);
+  int sp = req.indexOf(' ', start);
+  if (amp != -1 && amp < end) end = amp;
+  if (sp != -1 && sp < end) end = sp;
+  return urlDecode(req.substring(start, end));
+}
+
+void handleLocalHttp() {
+  WiFiClient client = server.accept();
+  if (!client) return;
   String reqHeader = "";
-  unsigned long webTimeout = millis() + 2000;  
-  while (client.connected() && millis() < webTimeout) {  
-    if (client.available()) { 
+  unsigned long webTimeout = millis() + 1000;
+  while (client.connected() && millis() < webTimeout) {
+    if (client.available()) {
       char c = client.read();
-      reqHeader += c; 
-      if (c == '\n') break;  
-    } 
-  } 
-  while (client.available()) { client.read(); } 
-  addLog("REQ=" + reqHeader); 
-
-  if (reqHeader.indexOf("POST /save_setup") != -1 || reqHeader.indexOf("GET /save_setup") != -1) { 
-    int sIdx = reqHeader.indexOf("s=") + 2;
-    int pIdx = reqHeader.indexOf("&p=") + 3; 
-    int mIdx = reqHeader.indexOf("&m=") + 3;
-    int offIdx = reqHeader.indexOf("&offline=");
-
-    String rawSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
-    String rawPass = reqHeader.substring(pIdx, reqHeader.indexOf("&m=")); 
-    String rawEmail = reqHeader.substring(mIdx, reqHeader.indexOf("&reg_pass=")); 
-    
-    // Pobieramy opcjonalne hasło rejestracji konta z aplikacji
-    String rawRegPass = "";
-    if (reqHeader.indexOf("&reg_pass=") != -1) {
-      int regStart = reqHeader.indexOf("&reg_pass=") + 10;
-      rawRegPass = reqHeader.substring(regStart, reqHeader.indexOf("&offline="));
+      reqHeader += c;
+      if (c == '\n' || reqHeader.length() > 1024) break;
     }
-    
-    String rawOffline = reqHeader.substring(offIdx + 9, offIdx + 10);
+  }
+  while (client.available()) { client.read(); }
+  if (reqHeader.startsWith("GET /api/") || reqHeader.startsWith("POST /api/")) serveLocalApi(client, reqHeader);
+  else serveProvisioning(client, reqHeader);
+}
 
-    String decodedSSID = urlDecode(rawSSID); 
-    String decodedPass = urlDecode(rawPass);
-    String decodedEmail = urlDecode(rawEmail); 
-    String decodedRegPass = urlDecode(rawRegPass);
+void serveProvisioning(WiFiClient& client, const String& reqHeader) {
+  // UWAGA: pełnej linii żądania NIE logujemy — zawiera hasło Wi-Fi (p=), a dziennik
+  // lokalny jest widoczny w aplikacji (dawniej: addLog("REQ=" + reqHeader)).
+  if (reqHeader.indexOf("GET /save_setup") != -1 || reqHeader.indexOf("POST /save_setup") != -1) {
+    String newSSID  = queryParam(reqHeader, "s");
+    String newPass  = queryParam(reqHeader, "p");
+    String newEmail = queryParam(reqHeader, "m");
+    String offline  = queryParam(reqHeader, "offline");
 
-    // Jeśli wybrano tryb offline, symulujemy pomyślny zapis bez sprawdzania połączenia sieciowego
-    if (rawOffline == "1" || decodedSSID == "OFFLINE") {
-      EEPROM.write(250, 0x55);  // Oznaczamy w pamięci jako skonfigurowany
-      saveConfiguration("OFFLINE_MODE", "NONE", decodedEmail);
-      // 🌟 Zwracamy MAC + lokalne hasło administratora jako JSON (zamiast samej
-      // strony HTML), żeby aplikacja mogła zapisać je u siebie i odtąd rozmawiać
-      // z centralką WYŁĄCZNIE lokalnie (http://192.168.4.1), bez konta w chmurze.
-      String localPass = getFactoryAdminPassword();
-      String macStr = getMacAddressString();
-      // WAŻNE: poprawny JSON. Wcześniej wypisywany był śmieć `,"tamper":...` PRZED ciałem,
-      // przez co res.json() w aplikacji się wywalał i tryb offline nigdy się nie zapisywał.
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
-      client.println("{\"status\":\"offline_ready\",\"admin_pass\":\"" + localPass + "\",\"mac\":\"" + macStr + "\",\"tamper\":" + String(tamperActive ? "true" : "false") + "}");
+    if (offline == "1" || newSSID == "OFFLINE") {
+      // Tryb lokalny: NOWE losowe hasło lokalnego API przy każdej konfiguracji (dawniej
+      // hasło wyliczane z MAC-a). Aplikacja zapisuje je u siebie w bezpiecznym magazynie.
+      String newLocal = randomToken(16);
+      saveLocalAdminPass(newLocal);
+      saveConfiguration("OFFLINE_MODE", "NONE", newEmail);
+      client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n");
+      client.println("{\"status\":\"offline_ready\",\"admin_pass\":\"" + newLocal + "\",\"mac\":\"" + getMacAddressString() + "\",\"tamper\":" + String(tamperActive ? "true" : "false") + "}");
       delay(100); client.stop();
       ESP.restart();
       return;
     }
 
-    // Jeśli instalujemy przez aplikację (Mamy login i hasło), wysyłamy żądanie rejestracji konta na serwer chmurowy
-    if (decodedRegPass.length() > 0) {
-      WiFi.begin(decodedSSID.c_str(), decodedPass.c_str());
-      // Czekamy chwilę na połączenie z ruterem w celu przesłania paczki rejestracyjnej konta
-      int attempts = 0;
-      while (WiFi.status() != WL_CONNECTED && attempts < 10) { delay(500); attempts++; }
-      
-      if (WiFi.status() == WL_CONNECTED) {
-         WiFiClientSecure registerClient; configureSecure(registerClient);
-         if (registerClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
-           String postBody = "{\"email\":\"" + decodedEmail + "\",\"password\":\"" + decodedRegPass + "\"}";
-           registerClient.println("POST /api/auth/register HTTP/1.1");
-           registerClient.println("Host: " + String(PROXMOX_SERVER));
-           registerClient.println("Content-Type: application/json");
-           registerClient.print("Content-Length: "); registerClient.println(postBody.length());
-           registerClient.println("Connection: close\r\n");
-           registerClient.print(postBody);
-           delay(200); registerClient.stop();
-         }
-      }
+    if (newSSID.length() == 0 || newSSID.length() > 31 || newPass.length() > 31 || newEmail.length() > 63) {
+      client.println("HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNiepoprawne dane (SSID/haslo max 31 znakow).");
+      delay(10); client.stop();
+      return;
     }
-
-    saveConfiguration(decodedSSID, decodedPass, decodedEmail);
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>"); 
-    delay(50); client.stop(); 
-    ESP.restart();  
+    // Tryb online: lokalne API wyłączone (brak hasła lokalnego) — zarządzanie wyłącznie
+    // przez serwer. Dawny blok rejestrujący konto z centralki (reg_pass) usunięty:
+    // aplikacja zakłada konto sama, a hasło konta nie powinno przechodzić przez urządzenie.
+    saveLocalAdminPass("");
+    saveConfiguration(newSSID, newPass, newEmail);
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding:50px;'><h2>💾 Ustawienia Zapisane Pomyslnie!</h2></body></html>");
+    delay(50); client.stop();
+    ESP.restart();
     return;
-  } 
+  }
 
-  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"); 
-  client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>"); 
-  client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>"); 
+  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
+  client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+  client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
   client.println("<h2 style='text-align:center;'>⚙ CTRLABLE Node Setup</h2><div class='box'><form method='GET' action='/save_setup'>");
-  client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
-  client.println("<input type='password' id='wifi_pass' name='p' placeholder='Password' required>");  // never pre-fill saved password
+  client.println("<input type='text' name='s' value='" + htmlEscape(String(ssid)) + "' placeholder='SSID Wi-Fi' maxlength='31' required>");
+  client.println("<input type='password' id='wifi_pass' name='p' placeholder='Password' maxlength='31' required>");  // nigdy nie wypełniamy zapisanego hasła
   client.println("<label style='color:#aaa; font-size:14px; display:block; margin:-5px 0 15px 5px; cursor:pointer;'><input type='checkbox' onclick='togglePass()'> Pokaż hasło</label>");
   client.println("<script>function togglePass() { var x = document.getElementById('wifi_pass'); x.type = (x.type === 'password') ? 'text' : 'password'; }</script>");
-  client.println("<input type='email' name='m' value='" + String(owner_email) + "' placeholder='Twój adres e-mail w aplikacji' required>");
-  client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Save Infrastructure Settings'></form></div></body></html>"); 
+  client.println("<input type='email' name='m' value='" + htmlEscape(String(owner_email)) + "' placeholder='Twój adres e-mail w aplikacji' maxlength='63' required>");
+  client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;cursor:pointer;' value='Save Infrastructure Settings'></form></div></body></html>");
   delay(50); client.stop();
-} 
+}
 
-void handleWebServer() { 
-  WiFiClient client = server.accept(); 
-  if (!client) return; 
-  
-  blockTelemetry = true; 
-  String reqHeader = "";
-  unsigned long webTimeout = millis() + 200;  
-  while (client.connected() && millis() < webTimeout) { 
-    if (client.available()) { 
-      char c = client.read();
-      reqHeader += c; 
-      if (c == '\n') break; 
-    } 
-  }
-  while (client.available()) { client.read(); } 
+// Lokalne API trybu offline. Uwierzytelnienie: pass=<hasło lokalne> (losowe,
+// z konfiguracji offline). Bez hasła lokalnego (tryb online / pierwsza konfiguracja)
+// żadna operacja nie przejdzie. Usunięte względem dawnej wersji: /api/update (wgrywanie
+// firmware przez sieć lokalną — bez podpisu), /api/save_settings, UID kart i hasło
+// administratora w /api/data.
+void serveLocalApi(WiFiClient& client, const String& reqHeader) {
+  blockTelemetry = true;
 
-  if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) { 
+  if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
     client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
-    delay(1); client.stop(); blockTelemetry = false; return; 
-  } 
+    delay(1); client.stop(); blockTelemetry = false; return;
+  }
 
-  String attemptedPass = ""; 
-  int passPos = reqHeader.indexOf("pass=");
-  if (passPos != -1) { 
-    int spacePos = reqHeader.indexOf(" ", passPos); 
-    int ampPos = reqHeader.indexOf("&", passPos);
-    int endPos = spacePos; 
-    if (ampPos != -1 && ampPos < spacePos) { 
-      endPos = ampPos;
-    } 
-    attemptedPass = reqHeader.substring(passPos + 5, endPos); 
-  } 
-
-  String decodedAttempt = urlDecode(attemptedPass);
-  bool authPermanent = (passPos != -1 && decodedAttempt == getFactoryAdminPassword());
-  bool isAuthenticated = authPermanent;
-  bool isApiRequest = (reqHeader.indexOf("/api/") != -1); 
-  if (passPos != -1 && isApiRequest) { 
-    if (!isAuthenticated && decodedAttempt.length() > 0) { 
+  String attempted = queryParam(reqHeader, "pass");
+  bool isAuthenticated = (localAdminPass[0] != 0) && secureEquals(attempted, localAdminPass);
+  if (attempted.length() > 0) {
+    if (!isAuthenticated) {
       failedLoginAttempts++;
-      if (failedLoginAttempts >= 5) { 
+      if (failedLoginAttempts >= 5) {
         lockoutEndTime = millis() + 300000;
-        addLog("ALARM: Atak BruteForce!"); 
-      } 
-    } else if (isAuthenticated) { 
+        addLog("ALARM: Atak BruteForce!");
+      }
+    } else {
       failedLoginAttempts = 0;
-    } 
-  } 
+    }
+  }
 
-  if (reqHeader.indexOf("/api/update") != -1) { 
-    addLog("OTA REQUEST DETECTED");
-    if (!isAuthenticated) { 
-      client.println("HTTP/1.1 401 Unauthorized"); 
-      client.println("Connection: close\r\n"); 
-      client.stop(); 
-      blockTelemetry = false; 
-      return;
-    } 
-    updateDisplay("OTA UPDATE", "Receiving firmware..."); 
-    playSound(SND_OTA_START); 
-    String fullHeader = reqHeader;
-    unsigned long headerDeadline = millis() + 5000; 
-    while (millis() < headerDeadline) { 
-        while (client.available()) { 
-            char c = client.read();
-            fullHeader += c; 
-            if (fullHeader.endsWith("\r\n\r\n")) { 
-                goto HEADER_COMPLETE;
-            } 
-        } 
-    } 
-    HEADER_COMPLETE: 
-    int contentLength = 0;
-    int clPos = fullHeader.indexOf("Content-Length:"); 
-    if (clPos != -1) { 
-        int clEnd = fullHeader.indexOf("\r\n", clPos);
-        String lengthStr = fullHeader.substring(clPos + 15, clEnd); 
-        lengthStr.trim(); 
-        contentLength = lengthStr.toInt();
-    } 
-    if (contentLength <= 0) { 
-        client.println("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n");
-        client.stop(); 
-        addLog("OTA FAILED: Invalid Content-Length"); 
-        blockTelemetry = false; 
-        return; 
-    } 
-    addLog("OTA START. SIZE: " + String(contentLength));
-    
-    Update.abort(); 
-    if (!Update.begin(contentLength, U_FLASH)) { 
-        client.println("HTTP/1.1 500 Internal Error\r\nConnection: close\r\n"); 
-        client.stop();
-        addLog("OTA FAILED: Update.begin()"); 
-        blockTelemetry = false; 
-        return; 
-    } 
-    uint32_t receivedBytes = 0;
-    unsigned long receiveDeadline = millis() + 120000; 
-    while (receivedBytes < contentLength && millis() < receiveDeadline) { 
-        while (client.available()) { 
-            uint8_t b = client.read();
-            Update.write(&b, 1); 
-            receivedBytes++; 
-            receiveDeadline = millis() + 120000; 
-            if (receivedBytes >= contentLength) break;
-        } 
-        delay(1); 
-    } 
-    if (receivedBytes != contentLength || !Update.end(true)) { 
-        client.println("HTTP/1.1 408 Timeout\r\nConnection: close\r\n"); 
-        client.stop();
-        addLog("OTA FAILED: Mismatch or End Fail"); 
-        blockTelemetry = false; 
-        return; 
-    } 
-    client.println("HTTP/1.1 200 OK"); 
-    client.println("Content-Type: application/json");
-    client.println("Connection: close\r\n"); 
-    client.println("{\"success\":true}"); 
-    delay(100); 
-    client.stop(); 
-    
-    addLog("OTA COMPLETE. REBOOTING..."); 
-    playSound(SND_OTA_SUCCESS);
-    unsigned long fanfareDeadline = millis() + 1000;
-    while (millis() < fanfareDeadline) { updateBuzzer(); delay(5); } 
-    ESP.restart();
-    blockTelemetry = false; 
-    return; 
-  } 
-
-  if (reqHeader.indexOf("GET /api/data") != -1) { 
+  if (reqHeader.indexOf("GET /api/data") != -1) {
     client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json"); 
-    client.println("Connection: close\r\n"); 
-    if (!isAuthenticated) { 
+    client.println("Content-Type: application/json");
+    client.println("Connection: close\r\n");
+    if (!isAuthenticated) {
       client.println("{\"auth\":false}");
-    } else { 
-      client.print("{\"auth\":true,\"mode\":\""); 
-      client.print(learningMode ? "Uczenie" : "Czuwanie"); 
-      client.print("\",\"pending\":\""); client.print(pendingUsername); 
+    } else {
+      client.print("{\"auth\":true,\"mode\":\"");
+      client.print(learningMode ? "Uczenie" : "Czuwanie");
+      client.print("\",\"pending\":\""); client.print(pendingUsername);
       client.print("\",\"lock\":");
-      client.print(doorOpen ? "true" : "false"); 
-      client.print(",\"total\":"); client.print(totalCards); 
-      client.print(",\"version\":\""); client.print(app_version); client.print("\""); 
+      client.print(doorOpen ? "true" : "false");
+      client.print(",\"total\":"); client.print(totalCards);
+      client.print(",\"version\":\""); client.print(app_version); client.print("\"");
       client.print(",\"users\":[");
-      for (int i = 0; i < totalCards; i++) { 
+      for (int i = 0; i < totalCards; i++) {
         client.print("{\"idx\":"); client.print(i);
-        client.print(",\"name\":\""); client.print(users[i].name); 
+        client.print(",\"name\":\""); client.print(users[i].name);
         client.print("\",\"active\":"); client.print(isCardActive[i] ? "true" : "false");
-        client.print(",\"uid\":\""); 
-        for(byte j=0; j<4; j++) { 
-          if(users[i].uid[j]<0x10) client.print("0"); 
-          client.print(users[i].uid[j], HEX); 
-          if(j<3) client.print(" "); 
-        } 
-        client.print("\"}");
-        if (i < totalCards - 1) client.print(","); 
-      } 
+        client.print("}");   // UID celowo pominięty — jego znajomość wystarcza do skopiowania karty
+        if (i < totalCards - 1) client.print(",");
+      }
       client.print("],\"logs\":[");
-      for (int i = logCount - 1; i >= 0; i--) { 
+      for (int i = logCount - 1; i >= 0; i--) {
         client.print("\"[" + lastActions[i].time + "] " + lastActions[i].msg + "\"");
-        if (i > 0) client.print(","); 
-      } 
-      // JSON był tu ROZWALONY: cudzysłów zamykający ssid trafiał dopiero po "tamper",
-      // więc wychodziło  "ssid":"wifi_archer,"tamper":false","admin_pass":...
-      // (tryb lokalny nie mógł tego sparsować). Kolejność musi być zamknięta po kolei.
+        if (i > 0) client.print(",");
+      }
       client.print("],\"ssid\":\""); client.print(ssid);
       client.print("\",\"tamper\":"); client.print(tamperActive ? "true" : "false");
-      client.print(",\"admin_pass\":\""); client.print(getFactoryAdminPassword()); 
-      client.print("\"}");
-    } 
-    delay(1); client.stop(); blockTelemetry = false; return;
-  } 
-
-  if (isAuthenticated) { 
-    if (reqHeader.indexOf("/api/unlock") != -1) { 
-      if (!doorOpen) openDoor("Panel API");
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
-      delay(1); client.stop(); blockTelemetry = false; return;
-    }  
-    else if (reqHeader.indexOf("/api/toggle_learn") != -1) { 
-      learningMode = !learningMode;
-      autoExitLearn = false;  
-      if (learningMode) { 
-        if (reqHeader.indexOf("username=") != -1) { 
-          int startIdx = reqHeader.indexOf("username=") + 9;
-          int endIdx = reqHeader.indexOf(" ", startIdx); 
-          if (reqHeader.indexOf("&", startIdx) != -1 && reqHeader.indexOf("&", startIdx) < endIdx) { 
-            endIdx = reqHeader.indexOf("&", startIdx);
-          } 
-          pendingUsername = reqHeader.substring(startIdx, endIdx); 
-          pendingUsername.replace("+", " ");
-          if(pendingUsername.length() == 0) pendingUsername = "Nowy Uzytkownik"; 
-        } 
-        forceHardwareRFIDReset(); 
-        globalAnimFrame = 0;
-        addLog("Tryb Ucz. [" + pendingUsername + "]"); 
-        playSound(SND_LEARN_ENTER);
-      } else { 
-        addLog("Stop Ucz: Panel API"); 
-        playSound(SND_LEARN_EXIT);
-      } 
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
-      delay(1); client.stop(); blockTelemetry = false; return;
-    }  
-    else if (reqHeader.indexOf("/api/delete_user") != -1) { 
-      int idxPos = reqHeader.indexOf("idx=");
-      if (idxPos != -1) { 
-        int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
-        if (targetIdx >= 0 && targetIdx < totalCards) { 
-          String deletedName = String(users[targetIdx].name);
-          deleteUser(targetIdx); 
-          addLog("Usunieto: " + deletedName); 
-          playSound(SND_DELETE); 
-        } 
-      } 
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
-      delay(1); client.stop(); blockTelemetry = false; return; 
-    } 
-    else if (reqHeader.indexOf("/api/rename_user") != -1) { 
-      int idxPos = reqHeader.indexOf("idx=");
-      int namePos = reqHeader.indexOf("name="); 
-      if (idxPos != -1 && namePos != -1) { 
-        int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf("&", idxPos)).toInt();
-        String newName = reqHeader.substring(namePos + 5, reqHeader.indexOf(" ", namePos)); 
-        newName.replace("+", " ");
-        if (targetIdx >= 0 && targetIdx < totalCards && newName.length() > 0) { 
-          memset(users[targetIdx].name, 0, 16);
-          newName.toCharArray(users[targetIdx].name, 16); 
-          persistCards();  // zapis do LittleFS (lub EEPROM w trybie fallback)
-          addLog("Zmiana nazwy slot [" + String(targetIdx) + "]"); 
-          playSound(SND_CLICK_CONFIRM);
-        } 
-      } 
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
-      delay(1); client.stop();
-      blockTelemetry = false; return; 
-    }  
-    // Harmonogram karty z serwera: /api/set_schedule?idx=&en=&days=&start=&end=&pass=
-    // Serwer wysyła to po każdej zmianie w aplikacji (jak rename/toggle/delete).
-    else if (reqHeader.indexOf("/api/set_schedule") != -1) {
-      auto argInt = [&](const String& key, int fallback) -> int {
-        int p = reqHeader.indexOf(key);
-        if (p == -1) return fallback;
-        p += key.length();
-        int e = reqHeader.indexOf("&", p);
-        int sp = reqHeader.indexOf(" ", p);
-        if (e == -1 || (sp != -1 && sp < e)) e = sp;
-        if (e == -1) return fallback;
-        return reqHeader.substring(p, e).toInt();
-      };
-      int targetIdx = argInt("idx=", -1);
-      if (targetIdx >= 0 && targetIdx < totalCards) {
-        cardSchEnabled[targetIdx] = argInt("en=", 0) ? 1 : 0;
-        int d = argInt("days=", 127);
-        cardSchDays[targetIdx]  = (uint8_t)(d < 0 ? 127 : (d > 127 ? 127 : d));
-        int s = argInt("start=", 0);
-        int en = argInt("end=", 1440);
-        cardSchStart[targetIdx] = (uint16_t)(s < 0 ? 0 : (s > 1440 ? 1440 : s));
-        cardSchEnd[targetIdx]   = (uint16_t)(en < 0 ? 0 : (en > 1440 ? 1440 : en));
-        persistCards();
-        addLog("Harmonogram slot [" + String(targetIdx) + "] " + (cardSchEnabled[targetIdx] ? "ON" : "OFF"));
-      }
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
-      delay(1); client.stop();
-      blockTelemetry = false; return;
+      client.print("}");
     }
-    else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
-      int idxPos = reqHeader.indexOf("idx=");
-      if (idxPos != -1) { 
-        int targetIdx = reqHeader.substring(idxPos + 4, reqHeader.indexOf(" ", idxPos)).toInt();
-        if (targetIdx >= 0 && targetIdx < totalCards) { 
-          isCardActive[targetIdx] = !isCardActive[targetIdx];
-          persistCards();  // zapis do LittleFS (lub EEPROM w trybie fallback)
-          addLog(isCardActive[targetIdx] ? "Aktywowano: " + String(users[targetIdx].name) : "Zablokowano: " + String(users[targetIdx].name));
-          playSound(SND_CLICK_CONFIRM); 
-        } 
-      } 
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
-      delay(1); client.stop(); blockTelemetry = false; return; 
-    } 
-    else if (reqHeader.indexOf("/api/clear_logs") != -1) { 
-      int tPos = reqHeader.indexOf("time=");
-      if (tPos != -1) { 
-        int spaceIdx = reqHeader.indexOf(" ", tPos);
-        String cutoffVal = reqHeader.substring(tPos + 5, spaceIdx); 
-        cutoffVal.replace("%3A", ":");  
-        if (cutoffVal == "all") { 
-          logCount = 0;
-          addLog("Wyczyszczono caly dziennik"); 
-        } else if (cutoffVal.indexOf(":") != -1) { 
-          int targetH = cutoffVal.substring(0, cutoffVal.indexOf(":")).toInt();
-          int targetM = cutoffVal.substring(cutoffVal.indexOf(":") + 1).toInt(); 
-          int targetMinutesWeight = (targetH * 60) + targetM; 
-          int i = 0;
-          while (i < logCount) { 
-            int logH = lastActions[i].time.substring(0, 2).toInt();
-            int logM = lastActions[i].time.substring(3, 5).toInt(); 
-            int logMinutesWeight = (logH * 60) + logM;
-            if (logMinutesWeight < targetMinutesWeight) { 
-              for (int j = i; j < logCount - 1; j++) { 
-                lastActions[j] = lastActions[j + 1];
-              } 
-              logCount--; 
-            } else { i++;
-            } 
-          } 
-          addLog("Usunieto logi starsze niz " + cutoffVal);
-        } 
-        playSound(SND_CLICK_CONFIRM);
-      } 
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
-      delay(1); client.stop(); blockTelemetry = false; return;
-    } 
-    else if (reqHeader.indexOf("/api/save_settings") != -1) { 
-      int sIdx = reqHeader.indexOf("s=") + 2;
-      int pIdx = reqHeader.indexOf("&p=") + 3; 
-      String nSSID = reqHeader.substring(sIdx, reqHeader.indexOf("&p="));
-      String nPass = reqHeader.substring(pIdx, reqHeader.indexOf("&pass=")); 
-      String decSSID = urlDecode(nSSID); 
-      String decPass = urlDecode(nPass); 
-      saveConfiguration(decSSID, decPass, String(owner_email));
-      client.println("HTTP/1.1 200 OK");
-      client.println("Content-Type: text/plain");
-      client.println("Connection: close");
-      client.println();
-      client.println("OK");
-      client.flush();
-      delay(500);
-      ESP.restart(); 
-      addLog("Zapisano ustawienia Wi-Fi");
-      client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK"); 
-      delay(1); client.stop(); blockTelemetry = false; return; 
-    } 
-  } 
-  blockTelemetry = false;
-} 
+    delay(1); client.stop(); blockTelemetry = false; return;
+  }
 
-void handleOnlineInstallerServer() { 
-  WiFiClient client = server.accept(); 
-  if (!client) return; 
-  String reqHeader = "";
-  unsigned long webTimeout = millis() + 250; 
-  while (client.connected() && millis() < webTimeout) { if (client.available()) { char c = client.read();
-  reqHeader += c;
-  if (c == '\n') break; } } 
-  while (client.available()) { client.read(); } 
-  String expectedAuthSignature = "pass=" + getFactoryAdminPassword(); 
-  if (reqHeader.indexOf("GET /installer") != -1 && reqHeader.indexOf(expectedAuthSignature) != -1) { 
-    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
-    client.println("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>"); 
-    client.println("<style>body{background:#121212;color:#fff;font-family:sans-serif;padding:20px;} .box{background:#1e1e1e;padding:20px;border-radius:10px;max-width:400px;margin:20px auto;} input{display:block;width:92%;padding:12px;margin:12px auto;background:#2d2d2d;color:#fff;border:1px solid #444;border-radius:6px;}</style></head><body>");
-    client.println("<h2 style='text-align:center;'>⚙ Online Installer Portal</h2><div class='box'><form method='GET' action='/save_setup'>");
-    client.println("<input type='text' name='s' value='" + String(ssid) + "' placeholder='SSID Wi-Fi' required>");
-    client.println("<input type='password' name='p' value='" + String(pass) + "' placeholder='Password' required>");
-    client.println("<input type='submit' style='background:#5c33cf;font-weight:bold;color:#fff;cursor:pointer;' value='Update & Reboot Hardware'></form></div></body></html>"); 
-    delay(50); client.stop();
-    return; 
-  } 
-} 
+  if (!isAuthenticated) {
+    client.println("HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nUnauthorized");
+    delay(1); client.stop(); blockTelemetry = false; return;
+  }
+
+  if (reqHeader.indexOf("/api/unlock") != -1) {
+    if (!doorOpen) openDoor("Panel API");
+  }
+  else if (reqHeader.indexOf("/api/toggle_learn") != -1) {
+    learningMode = !learningMode;
+    autoExitLearn = false;
+    if (learningMode) {
+      String u = queryParam(reqHeader, "username");
+      u.replace("\"", ""); u.replace("\\", "");
+      pendingUsername = u.length() > 0 ? u : "Nowy Uzytkownik";
+      forceHardwareRFIDReset();
+      globalAnimFrame = 0;
+      addLog("Tryb Ucz. [" + pendingUsername + "]");
+      playSound(SND_LEARN_ENTER);
+    } else {
+      addLog("Stop Ucz: Panel API");
+      playSound(SND_LEARN_EXIT);
+    }
+  }
+  else if (reqHeader.indexOf("/api/delete_user") != -1) {
+    int targetIdx = queryParam(reqHeader, "idx").toInt();
+    if (queryParam(reqHeader, "idx").length() > 0 && targetIdx >= 0 && targetIdx < totalCards) {
+      String deletedName = String(users[targetIdx].name);
+      deleteUser(targetIdx);
+      addLog("Usunieto: " + deletedName);
+      playSound(SND_DELETE);
+    }
+  }
+  else if (reqHeader.indexOf("/api/rename_user") != -1) {
+    int targetIdx = queryParam(reqHeader, "idx").toInt();
+    String newName = queryParam(reqHeader, "name");
+    newName.replace("\"", ""); newName.replace("\\", "");
+    if (queryParam(reqHeader, "idx").length() > 0 && targetIdx >= 0 && targetIdx < totalCards && newName.length() > 0) {
+      memset(users[targetIdx].name, 0, 16);
+      newName.toCharArray(users[targetIdx].name, 16);
+      persistCards();
+      addLog("Zmiana nazwy slot [" + String(targetIdx) + "]");
+      playSound(SND_CLICK_CONFIRM);
+    }
+  }
+  else if (reqHeader.indexOf("/api/set_schedule") != -1) {
+    int targetIdx = queryParam(reqHeader, "idx").length() ? queryParam(reqHeader, "idx").toInt() : -1;
+    if (targetIdx >= 0 && targetIdx < totalCards) {
+      int d = queryParam(reqHeader, "days").length() ? queryParam(reqHeader, "days").toInt() : 127;
+      int s = queryParam(reqHeader, "start").toInt();
+      int en = queryParam(reqHeader, "end").length() ? queryParam(reqHeader, "end").toInt() : 1440;
+      cardSchEnabled[targetIdx] = queryParam(reqHeader, "en").toInt() ? 1 : 0;
+      cardSchDays[targetIdx]  = (uint8_t)(d < 0 ? 127 : (d > 127 ? 127 : d));
+      cardSchStart[targetIdx] = (uint16_t)(s < 0 ? 0 : (s > 1440 ? 1440 : s));
+      cardSchEnd[targetIdx]   = (uint16_t)(en < 0 ? 0 : (en > 1440 ? 1440 : en));
+      persistCards();
+      addLog("Harmonogram slot [" + String(targetIdx) + "] " + (cardSchEnabled[targetIdx] ? "ON" : "OFF"));
+    }
+  }
+  else if (reqHeader.indexOf("/api/toggle_user_active") != -1) {
+    int targetIdx = queryParam(reqHeader, "idx").toInt();
+    if (queryParam(reqHeader, "idx").length() > 0 && targetIdx >= 0 && targetIdx < totalCards) {
+      isCardActive[targetIdx] = !isCardActive[targetIdx];
+      persistCards();
+      addLog(isCardActive[targetIdx] ? "Aktywowano: " + String(users[targetIdx].name) : "Zablokowano: " + String(users[targetIdx].name));
+      playSound(SND_CLICK_CONFIRM);
+    }
+  }
+  else if (reqHeader.indexOf("/api/clear_logs") != -1) {
+    String cutoffVal = queryParam(reqHeader, "time");
+    if (cutoffVal == "all") {
+      logCount = 0;
+      addLog("Wyczyszczono caly dziennik");
+    } else if (cutoffVal.indexOf(":") != -1) {
+      int targetMinutesWeight = cutoffVal.substring(0, cutoffVal.indexOf(":")).toInt() * 60 + cutoffVal.substring(cutoffVal.indexOf(":") + 1).toInt();
+      int i = 0;
+      while (i < logCount) {
+        int logMinutesWeight = lastActions[i].time.substring(0, 2).toInt() * 60 + lastActions[i].time.substring(3, 5).toInt();
+        if (logMinutesWeight < targetMinutesWeight) {
+          for (int j = i; j < logCount - 1; j++) lastActions[j] = lastActions[j + 1];
+          logCount--;
+        } else {
+          i++;
+        }
+      }
+      addLog("Usunieto logi starsze niz " + cutoffVal);
+    }
+    playSound(SND_CLICK_CONFIRM);
+  }
+  else {
+    client.println("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot found");
+    delay(1); client.stop(); blockTelemetry = false; return;
+  }
+
+  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nOK");
+  delay(1); client.stop(); blockTelemetry = false;
+}
 
 void executeCloudSynchronization() { 
   WiFiClientSecure httpCheck; configureSecure(httpCheck);
@@ -1432,8 +1370,12 @@ void executeCloudSynchronization() {
   // &ip= — WŁASNY adres w sieci lokalnej. Serwer widzi tylko adres proxy (NPM), więc
   // bez tego zapisywał w bazie IP proxy i próbował na nie wysyłać zmiany nazwy,
   // harmonogramu i ustawień WiFi (syncMutationToHardware, port 80) — trafiając w pustkę.
-  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId) + "&ip=" + WiFi.localIP().toString();  httpCheck.println("GET " + pollPath + " HTTP/1.1");
-  httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);  
+  // ack= — najwyższy id komendy wykonanej przez loop (kolejka komend, README §7.3).
+  unsigned long ackNow = cmdAckId;
+  String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId) + "&ip=" + WiFi.localIP().toString() + "&ack=" + String(ackNow);
+  httpCheck.println("GET " + pollPath + " HTTP/1.1");
+  httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);
+  printDeviceAuthHeader(httpCheck);
   httpCheck.println("Connection: close\r\n");  
   // ODCZYT: kończymy, gdy ciało JSON jest KOMPLETNE — nie czekamy, aż serwer zamknie
   // połączenie. Przy TLS connected() bywa prawdziwe jeszcze długo po odebraniu treści,
@@ -1460,7 +1402,19 @@ void executeCloudSynchronization() {
     }
   }
   httpCheck.stop();
-  
+
+  if (payloadResponse.startsWith("HTTP/1.1 401")) {
+    // Serwer nie uznał klucza urządzenia (np. inna płytka pod tym MAC-iem albo klucz
+    // zresetowany w NVS). Właściciel może zresetować przypięty klucz w aplikacji.
+    if (millis() - lastAuthRejectLog > 600000 || lastAuthRejectLog == 0) {
+      lastAuthRejectLog = millis();
+      Serial.println("[SEC] Serwer odrzucil klucz urzadzenia (401).");
+      addLog("Serwer odrzucil klucz urzadzenia");
+    }
+    return;
+  }
+  if (payloadResponse.startsWith("HTTP/1.1 200")) lastAckSent = ackNow;
+
   bool serverUnlockSignal = (payloadResponse.indexOf("\"unlock\":true") != -1);
   bool serverLearnSignal  = (payloadResponse.indexOf("\"learn\":true") != -1);
   bool serverOtaSignal    = (payloadResponse.indexOf("\"ota\":true") != -1);
@@ -1492,6 +1446,19 @@ void executeCloudSynchronization() {
     if (autoLockEnd > autoLockIdx) {
       unsigned long newDelay = payloadResponse.substring(autoLockIdx, autoLockEnd).toInt();
       if (newDelay >= 1000 && newDelay <= 60000) autoLockDelayMs = newDelay;
+    }
+  }
+
+  // Kolejka komend (zmiany kart, Wi-Fi). Porcję wykonuje loop — tu tylko odkładamy,
+  // i tylko gdy poprzednia została już wykonana (inaczej zgubilibyśmy ją przy nadpisaniu).
+  int cmdsIdx = payloadResponse.indexOf("\"cmds\":\"");
+  if (cmdsIdx != -1 && !req_cmdsPending) {
+    cmdsIdx += 8;
+    int cmdsEnd = payloadResponse.indexOf("\"", cmdsIdx);
+    if (cmdsEnd > cmdsIdx && (cmdsEnd - cmdsIdx) < (int)sizeof(req_cmds)) {
+      payloadResponse.substring(cmdsIdx, cmdsEnd).toCharArray(req_cmds, sizeof(req_cmds));
+      __sync_synchronize();          // bufor zapisany, zanim loop zobaczy flagę
+      req_cmdsPending = true;
     }
   }
 
@@ -1538,17 +1505,33 @@ void performLocalFirmwareUpdate() {
     String macStr = getMacAddressString();
     otaClient.print("GET /api/lock/download-firmware?mac=" + urlEncode(macStr) + " HTTP/1.1\r\n");
     otaClient.print("Host: " + String(PROXMOX_SERVER) + "\r\n");
+    printDeviceAuthHeader(otaClient);
     otaClient.print("Connection: close\r\n\r\n");
 
     unsigned long contentLength = 0;
+    int httpStatus = 0;
+    String firmwareSig = "";   // podpis ECDSA obrazu (base64) — bez niego nic nie instalujemy
     while (otaClient.connected()) {
       String line = otaClient.readStringUntil('\n');
-      if (line.indexOf("Content-Length:") >= 0) {
+      if (httpStatus == 0 && line.startsWith("HTTP/1.")) httpStatus = line.substring(9, 12).toInt();
+      String lower = line; lower.toLowerCase();
+      if (lower.startsWith("content-length:")) {
         contentLength = line.substring(line.indexOf(":") + 1).toInt();
+      }
+      if (lower.startsWith("x-firmware-signature:")) {
+        firmwareSig = line.substring(line.indexOf(":") + 1);
+        firmwareSig.trim();
       }
       if (line == "\r" || line == "\r\n" || line.length() == 0) {
         break;
       }
+    }
+    if (httpStatus != 200 || firmwareSig.length() == 0) {
+      updateDisplay("BŁĄD OTA", "Brak podpisu/zgody");
+      addLog("[OTA PULL ERR] Serwer odmowil (HTTP " + String(httpStatus) + ") albo brak podpisu obrazu. Przerywam.");
+      otaClient.stop();
+      delay(3000);
+      return;
     }
     
     addLog("[OTA PULL] Naglowki przeczytane. Content-Length: " + String(contentLength));  // addLog (bez TLS) — w trakcie OTA nie otwieramy 2. polaczenia TLS (OOM)
@@ -1562,6 +1545,10 @@ void performLocalFirmwareUpdate() {
     
     if (Update.begin(contentLength, U_FLASH)) {
       addLog("[OTA PULL] Start szybkiej transmisji blokowej...");
+      // SHA-256 liczony w locie z tych samych bajtów, które idą do flasha.
+      mbedtls_sha256_context shaCtx;
+      mbedtls_sha256_init(&shaCtx);
+      mbedtls_sha256_starts(&shaCtx, 0);
       uint32_t receivedBytes = 0;
       unsigned long receiveDeadline = millis() + 10000; 
       
@@ -1584,6 +1571,7 @@ void performLocalFirmwareUpdate() {
           int readBytes = otaClient.read(buffer, toRead);
           if (readBytes > 0) {
             if (Update.write(buffer, readBytes) == readBytes) {
+              mbedtls_sha256_update(&shaCtx, buffer, readBytes);
               receivedBytes += readBytes;
               receiveDeadline = millis() + 10000; 
             } else {
@@ -1601,7 +1589,19 @@ void performLocalFirmwareUpdate() {
       } 
       
       otaClient.stop();
+      uint8_t fwHash[32];
+      mbedtls_sha256_finish(&shaCtx, fwHash);
+      mbedtls_sha256_free(&shaCtx);
       sendRemoteLog("[OTA PULL] Zakonczono pobieranie. Odebrano: " + String(receivedBytes) + "/" + String(contentLength));
+      // PODPIS: obraz niepodpisany kluczem producenta NIE zostanie aktywowany, nawet jeśli
+      // przyszedł z „naszego" serwera — chroni przed przejęciem serwera lub konta GitHub.
+      if (receivedBytes == contentLength && !verifyFirmwareSignature(fwHash, firmwareSig)) {
+        Update.abort();
+        updateDisplay("BŁĄD OTA", "Zly podpis obrazu");
+        sendRemoteLog("[OTA PULL ERR] Podpis firmware NIEPRAWIDLOWY - aktualizacja odrzucona.");
+        delay(3000);
+        return;
+      }
       if (receivedBytes == contentLength && Update.end(true)) { 
         if (Update.isFinished()) {
           updateDisplay("SUKCES OTA", "Wgrywanie i Reset...");
@@ -1641,7 +1641,8 @@ void transmitCardPayloadToCloud(String uidStr, String nameStr, int slot, bool ru
     "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\",\"name\":\"" + nameStr + "\",\"slot\":" + String(slot) + "}" :
     "{\"mac\":\"" + macStr + "\",\"uid\":\"" + uidStr + "\"}";
   httpPost.println("POST " + endpoint + " HTTP/1.1"); 
-  httpPost.print("Host: "); httpPost.println(PROXMOX_SERVER); 
+  httpPost.print("Host: "); httpPost.println(PROXMOX_SERVER);
+  printDeviceAuthHeader(httpPost);
   httpPost.println("Content-Type: application/json"); 
   httpPost.print("Content-Length: "); httpPost.println(postData.length()); 
   httpPost.println("Connection: close\r\n"); 
@@ -1669,6 +1670,7 @@ void sendTamperAlert(bool active) {
   String body = "{\"mac\":\"" + mac + "\",\"active\":" + (active ? "true" : "false") + "}";
   tc.println("POST /api/tamper HTTP/1.1");
   tc.print("Host: "); tc.println(PROXMOX_SERVER);
+  printDeviceAuthHeader(tc);
   tc.println("Content-Type: application/json");
   tc.print("Content-Length: "); tc.println(body.length());
   tc.println("Connection: close\r\n"); tc.print(body);
@@ -1736,6 +1738,7 @@ void verifyKeypadPIN(const String& pin) {
   String body = "{\"mac\":\"" + mac + "\",\"pin\":\"" + pin + "\"}";
   kc.println("POST /api/auth/keypad HTTP/1.1");
   kc.print("Host: "); kc.println(PROXMOX_SERVER);
+  printDeviceAuthHeader(kc);
   kc.println("Content-Type: application/json");
   kc.print("Content-Length: "); kc.println(body.length());
   kc.println("Connection: close\r\n"); kc.print(body);
@@ -1763,7 +1766,7 @@ void verifyKeypadPIN(const String& pin) {
 }
 
 void handleKeypress(char key) {
-  logKeypadEvent("DBG key=[" + String(key) + "]");  // TEMP: identify scratching source
+  // (Usunięto log diagnostyczny każdego klawisza — zapisywał do dziennika cyfry PIN-u.)
   kpLastKey = millis();
   if (key == '#') {
     playSound(SND_KEY_SUBMIT);
@@ -1806,6 +1809,11 @@ void setup() {
   Serial.begin(9600); 
   delay(1500);
   EEPROM.begin(512);
+  // Radio włączone PRZED losowaniem sekretów: dopiero wtedy esp_random() korzysta ze
+  // sprzętowego źródła entropii (bez RF to generator pseudolosowy).
+  WiFi.mode(WIFI_STA);
+  loadOrCreateDeviceSecrets();
+  loadLocalAdminPass();
   EEPROM.get(480, installedReleaseId);  // restore flashed release ID
   // Sanityzacja: świeży/wyczyszczony EEPROM to same 0xFF → 4294967295, czyli numer
   // większy od każdego realnego release'u z GitHuba. Traktujemy to jako "nieznany" (0),
@@ -1889,13 +1897,13 @@ void setup() {
   // 6. Bezpieczne wejście w tryb konfiguracji (ekran i RFID już działają)
   if (provisioningMode) { 
     displayProvisioningInstructions(""); 
-    WiFi.softAP("CTRLABLE_SETUP");
-    server.begin(); 
-    playSound(SND_PROVISION_START); 
-    unsigned long lastSetupTick = 0; 
+    startSetupAP();   // WPA2, hasło na ekranie (tylko w tym trybie)
+    server.begin();
+    playSound(SND_PROVISION_START);
+    unsigned long lastSetupTick = 0;
     bool alternateState = false;
-    while (true) { 
-      handleProvisioningServer();
+    while (true) {
+      handleLocalHttp();
       updateBuzzer();
       if (millis() - lastSetupTick > 400) { 
         lastSetupTick = millis(); 
@@ -1918,7 +1926,7 @@ void setup() {
     isOfflineStandby = true;
     forceHardwareRFIDReset();
     displayProvisioningInstructions("TRYB OFFLINE AKTYWNY");
-    WiFi.softAP("CTRLABLE_SETUP");
+    startSetupAP();
     server.begin();
     playSound(SND_PROVISION_START);
     lastWifiRetryTime = millis();
@@ -1941,8 +1949,9 @@ void setup() {
       struct timeval tv = { .tv_sec = (time_t)epochTime, .tv_usec = 0 };
       settimeofday(&tv, NULL); 
       forceHardwareRFIDReset(); 
-      lastSuccessfulPollTime = millis(); 
-      server.begin();
+      lastSuccessfulPollTime = millis();
+      // Tryb online: centralka NIE wystawia żadnego portu w sieci domowej (README §7.1).
+      // Zarządzanie wyłącznie przez serwer (TLS + klucz urządzenia).
       updateDisplay("Gotowy", WiFi.localIP().toString()); 
       addLog("System online"); 
       playSound(SND_WIFI_CONNECTED);
@@ -1950,9 +1959,9 @@ void setup() {
       isOfflineStandby = true; 
       forceHardwareRFIDReset();
       displayProvisioningInstructions("ERR: CONN TIMEOUT"); 
-      WiFi.disconnect(); 
-      delay(500); 
-      WiFi.softAP("CTRLABLE_SETUP"); 
+      WiFi.disconnect();
+      delay(500);
+      startSetupAP();   // awaryjny AP — za hasłem WPA2 (dawniej otwarty dla każdego w zasięgu)
       server.begin();
       playSound(SND_WIFI_FAILED);
       lastWifiRetryTime = millis(); 
@@ -2012,6 +2021,13 @@ void networkTask(void *param) {
         executeCloudSynchronization();
         lastPollTime = millis();
         forceSyncNow = false;
+        // Nowa sieć Wi-Fi zapisana z komendy serwera — restart dopiero, gdy serwer
+        // potwierdził odbiór ack (inaczej komenda wracałaby po każdym starcie).
+        if (restartAfterAckId > 0 && lastAckSent >= restartAfterAckId) {
+          Serial.println("[CMD] Nowa siec Wi-Fi potwierdzona - restart.");
+          vTaskDelay(pdMS_TO_TICKS(300));
+          ESP.restart();
+        }
       }
 
       // Zgłoszenie skanu karty (zakolejkowane przez loop) — TLS robimy TU, nie w pętli.
@@ -2019,6 +2035,13 @@ void networkTask(void *param) {
         transmitCardPayloadToCloud(String(up_uid), String(up_name), up_slot, up_register);
         req_cardUpload = false;
         forceSyncNow = true;   // po rejestracji karty odśwież stan od razu
+      }
+
+      // Raport diagnostyczny / self-test zbudowany przez loop — wysyłamy tu (TLS).
+      if (req_diagReport) {
+        __sync_synchronize();
+        sendDiagnosticReport();
+        req_diagReport = false;
       }
 
       // Log przycisku (zakolejkowany przez loop) — nieblokujący dla rdzenia 1.
@@ -2029,6 +2052,7 @@ void networkTask(void *param) {
         if (btnLog.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
           btnLog.println("GET /api/hardware/log_button?mac=" + urlEncode(getMacAddressString()) + " HTTP/1.1");
           btnLog.print("Host: "); btnLog.println(PROXMOX_SERVER);
+          printDeviceAuthHeader(btnLog);
           btnLog.println("Connection: close\r\n");
           delay(50);
           btnLog.stop();
@@ -2041,7 +2065,8 @@ void networkTask(void *param) {
 
 void loop() {
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
-  handleProvisioningServer();  // lokalny serwer WWW (zmiana WiFi/ustawień) — też gdy online
+  // Lokalny serwer HTTP obsługujemy wyłącznie w trybie AP (patrz koniec loop()).
+  // Dawniej działał „też gdy online" i przyjmował /save_setup bez żadnego hasła.
 
   // Komendy z taska sieciowego (rdzeń 0) — akcje SPRZĘTOWE wykonujemy TU (rdzeń 1).
   if (req_usernameUpdated) { req_usernameUpdated = false; pendingUsername = String(req_username); }
@@ -2056,6 +2081,7 @@ void loop() {
     if (tamperActive) { addLog("!! BLOKADA: zdalne otwarcie (alarm sabotazu)!"); sendTamperAlert(true); }
     else if (!doorOpen) openDoor("Otwarte");
   }
+  applyPendingCommands();   // zmiany kart / Wi-Fi odebrane z serwera
   checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
   checkKeypad();  // obsługa matrycy klawiatury PIN
 
@@ -2071,7 +2097,6 @@ void loop() {
   } 
 
   if (isOfflineStandby) {
-    handleProvisioningServer();
     // Retry WiFi zawsze, gdy jest zapisana realna konfiguracja (nie tylko gdy centralka
     // BYŁA wcześniej online). Naprawia utknięcie w AP po zaniku prądu, gdy router wstaje
     // wolniej niż centralka: przy starcie WiFi nie zdąży (12 s), a bez tego warunku
@@ -2091,8 +2116,9 @@ void loop() {
         timeClient.update(); 
         unsigned long epochTime = timeClient.getEpochTime(); 
         struct timeval tv = { .tv_sec = (time_t)epochTime, .tv_usec = 0 };
-        settimeofday(&tv, NULL); 
-        server.begin(); 
+        settimeofday(&tv, NULL);
+        server.end();     // z powrotem online — koniec nasłuchu (README §7.1)
+        WiFi.softAPdisconnect(true);
         updateDisplay("Gotowy", WiFi.localIP().toString()); 
         addLog("Polaczenie Wi-Fi przywrocone"); 
         lastSuccessfulPollTime = millis();
@@ -2100,8 +2126,8 @@ void loop() {
       } else { 
         WiFi.disconnect(); 
         delay(1000);
-        WiFi.softAP("CTRLABLE_SETUP"); 
-        delay(500); 
+        startSetupAP();
+        delay(500);
         server.begin(); 
         displayProvisioningInstructions("ERR: REKONEKCJA FAIL");
       } 
@@ -2290,7 +2316,7 @@ void loop() {
     forceSyncNow = true; // zgłoś zamknięcie od razu, nie czekaj do następnego cyklu
   }
   else {
-    handleWebServer();
+    if (isOfflineStandby) handleLocalHttp();   // konfiguracja + lokalne API tylko na AP z hasłem
     // POLL USUNIĘTY Z PĘTLI — robi go networkTask na rdzeniu 0. Pętla (rdzeń 1)
     // NIGDY nie blokuje się na handshake TLS → skan RFID natychmiastowy, niezależny
     // od serwera. To była brakująca zmiana, przez którą wcześniej było 3 s.
@@ -2305,10 +2331,228 @@ void sendRemoteLog(String message) {
     // testowego, więc logi WSZYSTKICH urządzeń trafiały pod ten sam adres.
     logClient.print("GET /api/hardware/log?mac=" + urlEncode(getMacAddressString()) + "&msg=" + urlEncode(message) + " HTTP/1.1\r\n");
     logClient.print("Host: " + String(PROXMOX_SERVER) + "\r\n");
+    printDeviceAuthHeader(logClient);
     logClient.print("Connection: close\r\n\r\n");
     logClient.stop();
   }
 
+}
+
+// =========================================================================
+// KOLEJKA KOMEND Z SERWERA — wykonanie (rdzeń 1). README §7.3.
+// Karta adresowana po UID (4 bajty hex), więc powtórne doręczenie jest nieszkodliwe,
+// a usunięcie jednej karty nie przesuwa celu kolejnych komend (jak przy numerach slotów).
+// =========================================================================
+static int hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+static bool hexToBytes(const String& h, uint8_t* out, int maxLen, int& outLen) {
+  outLen = 0;
+  if (h.length() % 2 != 0 || (int)(h.length() / 2) > maxLen) return false;
+  for (unsigned int i = 0; i < h.length(); i += 2) {
+    int hi = hexNibble(h[i]), lo = hexNibble(h[i + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[outLen++] = (uint8_t)((hi << 4) | lo);
+  }
+  return true;
+}
+
+static int findCardByUidHex(const String& uidHex) {
+  uint8_t b[4]; int n = 0;
+  if (uidHex.length() != 8 || !hexToBytes(uidHex, b, 4, n) || n != 4) return -1;
+  for (int i = 0; i < totalCards; i++) if (memcmp(users[i].uid, b, 4) == 0) return i;
+  return -1;
+}
+
+void applyPendingCommands() {
+  if (!req_cmdsPending) return;
+  __sync_synchronize();
+  String batch = String(req_cmds);
+  unsigned long maxId = cmdAckId;
+  bool changed = false;
+  int pos = 0;
+  while (pos < (int)batch.length()) {
+    int semi = batch.indexOf(';', pos);
+    if (semi == -1) semi = batch.length();
+    String item = batch.substring(pos, semi);
+    pos = semi + 1;
+    int colon = item.indexOf(':');
+    if (colon <= 0) continue;
+    unsigned long id = strtoul(item.substring(0, colon).c_str(), NULL, 10);
+    if (id == 0 || id <= cmdAckId) continue;           // już wykonana (powtórne doręczenie)
+    String cmd = item.substring(colon + 1);
+    String f[6]; int nf = 0; int st = 0;
+    while (nf < 6) {
+      int bar = cmd.indexOf('|', st);
+      if (bar == -1) { f[nf++] = cmd.substring(st); break; }
+      f[nf++] = cmd.substring(st, bar);
+      st = bar + 1;
+    }
+    char type = f[0].length() ? f[0][0] : 0;
+
+    if (type == 'V' && nf >= 2) {
+      // Kod obecności serwisu — tylko na ekranie, nigdy do logu ani do serwera.
+      f[1].toCharArray(serviceCode, sizeof(serviceCode));
+      serviceCodeUntil = millis() + 15UL * 60UL * 1000UL;
+      globalAnimFrame = 0;
+      playSound(SND_CLICK_CONFIRM);
+      addLog("Sesja serwisowa: kod na ekranie");
+    } else if (type == 'G' && nf >= 2) {
+      buildDiagnosticReport(f[1].toInt());
+    } else if (type == 'R') {
+      addLog("Restart na zlecenie serwisu");
+      restartAfterAckId = id;   // jak przy Wi-Fi: najpierw ack do serwera, potem restart
+    } else if (type == 'W' && nf >= 3) {
+      uint8_t sb[33], pb[33]; int sl = 0, pl = 0;
+      if (hexToBytes(f[1], sb, 31, sl) && hexToBytes(f[2], pb, 31, pl) && sl > 0) {
+        sb[sl] = 0; pb[pl] = 0;
+        saveConfiguration(String((char*)sb), String((char*)pb), String(owner_email));
+        addLog("Nowa siec Wi-Fi z aplikacji - restart po potwierdzeniu");
+        restartAfterAckId = id;
+      }
+    } else if (nf >= 2) {
+      int idx = findCardByUidHex(f[1]);
+      if (idx >= 0) {
+        if (type == 'A' && nf >= 3) {
+          isCardActive[idx] = (f[2] == "1");
+          changed = true;
+          addLog(isCardActive[idx] ? "Aktywowano: " + String(users[idx].name) : "Zablokowano: " + String(users[idx].name));
+        } else if (type == 'D') {
+          String gone = String(users[idx].name);
+          deleteUser(idx);                                  // zapisuje magazyn sam
+          addLog("Usunieto: " + gone);
+        } else if (type == 'N' && nf >= 3) {
+          uint8_t nb[16]; int nl = 0;
+          if (hexToBytes(f[2], nb, 15, nl) && nl > 0) {
+            memset(users[idx].name, 0, sizeof(users[idx].name));
+            memcpy(users[idx].name, nb, nl);
+            changed = true;
+          }
+        } else if (type == 'S' && nf >= 6) {
+          int d = f[3].toInt(), s = f[4].toInt(), e = f[5].toInt();
+          cardSchEnabled[idx] = f[2].toInt() ? 1 : 0;
+          cardSchDays[idx]  = (uint8_t)(d < 0 ? 127 : (d > 127 ? 127 : d));
+          cardSchStart[idx] = (uint16_t)(s < 0 ? 0 : (s > 1440 ? 1440 : s));
+          cardSchEnd[idx]   = (uint16_t)(e < 0 ? 0 : (e > 1440 ? 1440 : e));
+          changed = true;
+        }
+      }
+    }
+    maxId = id;
+  }
+  if (changed) persistCards();
+  cmdAckId = maxId;
+  __sync_synchronize();
+  req_cmdsPending = false;
+  forceSyncNow = true;   // potwierdź wykonanie od razu
+}
+
+// =========================================================================
+// RAPORT DIAGNOSTYCZNY / SELF-TEST — README §7.15
+// mode 0: self-test klienta (bez listy kart, bez przekaźnika)
+// mode 1: diagnostyka serwisowa (z listą kart)
+// mode 2: jak 1 + krótkie wysterowanie przekaźnika (OTWIERA DRZWI na 400 ms — tylko
+//         z potwierdzonej sesji serwisowej, serwer nie zakolejkuje tego nikomu innemu)
+// Budowane na rdzeniu 1 (tu są tablice kart i SPI czytnika); wysyła networkTask.
+// =========================================================================
+static String jsonEscape(const char* s) {
+  String o = "";
+  for (int i = 0; s[i]; i++) {
+    char c = s[i];
+    if (c == '"' || c == '\\') { o += '\\'; o += c; }
+    else if ((uint8_t)c < 0x20) { o += ' '; }
+    else o += c;
+  }
+  return o;
+}
+
+void buildDiagnosticReport(int mode) {
+  if (mode < 0 || mode > 2) mode = 0;
+
+  // Czytnik RFID: rejestr wersji 0x91/0x92 = MFRC522 odpowiada; 0x00/0xFF = brak układu/SPI.
+  byte rfidVer = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+
+  // Klawiatura: w spoczynku (kolumny HIGH) każdy wiersz musi czytać HIGH. LOW = zwarcie
+  // do masy albo brak zewnętrznego rezystora na IO34/IO35.
+  bool kpRows[4] = { true, true, true, true };
+  if (KEYPAD_INSTALLED) {
+    for (int c = 0; c < 3; c++) digitalWrite(KP_COLS[c], HIGH);
+    delayMicroseconds(100);
+    for (int r = 0; r < 4; r++) kpRows[r] = (digitalRead(KP_ROWS[r]) == HIGH);
+  }
+
+  int relayResult = -1;
+  if (mode == 2) {
+    if (!doorOpen) {
+      relayActivate(); delay(400); relayDeactivate();
+      relayResult = 1;
+      addLog("Serwis: test przekaznika wykonany");
+    } else {
+      relayResult = 0;
+    }
+  }
+
+  time_t nowT; time(&nowT);
+  String j = "{";
+  j += "\"mac\":\"" + getMacAddressString() + "\",";
+  j += "\"kind\":" + String(mode) + ",";
+  j += "\"fw\":\"" + String(app_version) + "\",";
+  char hv[4]; sprintf(hv, "%02X", rfidVer);
+  j += "\"rfid_ver\":\"" + String(hv) + "\",";
+  j += "\"oled\":" + String(oledConnected ? "true" : "false") + ",";
+  j += "\"fs_mounted\":" + String(fsMounted ? "true" : "false") + ",";
+  j += "\"fs_selftest\":" + String(fsSelfTestPass ? "true" : "false") + ",";
+  j += "\"fs_total\":" + String(fsTotalBytes) + ",\"fs_used\":" + String(fsMounted ? LittleFS.usedBytes() : 0) + ",";
+  j += "\"kp_installed\":" + String(KEYPAD_INSTALLED ? "true" : "false") + ",";
+  j += "\"kp_rows\":[" + String(kpRows[0] ? "true" : "false") + "," + String(kpRows[1] ? "true" : "false") + "," +
+       String(kpRows[2] ? "true" : "false") + "," + String(kpRows[3] ? "true" : "false") + "],";
+  j += "\"tamper_installed\":" + String(TAMPER_INSTALLED ? "true" : "false") + ",";
+  j += "\"tamper_active\":" + String(tamperActive ? "true" : "false") + ",";
+  j += "\"rssi\":" + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + ",";
+  j += "\"ntp\":" + String(nowT >= 100000000 ? "true" : "false") + ",";
+  j += "\"heap_free\":" + String(ESP.getFreeHeap()) + ",\"heap_min\":" + String(ESP.getMinFreeHeap()) + ",";
+  j += "\"uptime_s\":" + String(millis() / 1000UL) + ",";
+  j += "\"reset_reason\":" + String((int)esp_reset_reason()) + ",";
+  j += "\"cards_total\":" + String(totalCards);
+  if (relayResult >= 0) j += ",\"relay_test\":" + String(relayResult);
+  if (mode >= 1) {
+    // Lista kart tylko dla serwisu (z potwierdzoną obecnością). UID = pełne 4 bajty,
+    // bo serwer porównuje je ze swoją bazą — stąd bierze się wykrywanie rozjazdu (§5.8).
+    j += ",\"cards\":[";
+    for (int i = 0; i < totalCards; i++) {
+      char u[9]; sprintf(u, "%02X%02X%02X%02X", users[i].uid[0], users[i].uid[1], users[i].uid[2], users[i].uid[3]);
+      if (i) j += ",";
+      j += "{\"u\":\"" + String(u) + "\",\"n\":\"" + jsonEscape(users[i].name) + "\",\"a\":" +
+           String(isCardActive[i] ? "true" : "false") + ",\"s\":" + String(cardSchEnabled[i] ? "true" : "false") + "}";
+    }
+    j += "]";
+  }
+  j += "}";
+  diagPayload = j;
+  __sync_synchronize();
+  req_diagReport = true;
+  addLog(mode == 0 ? "Self-test: raport wyslany" : "Serwis: diagnostyka wyslana");
+}
+
+// Wysyłka raportu — TYLKO z networkTask (rdzeń 0), blokujący TLS.
+void sendDiagnosticReport() {
+  WiFiClientSecure dc; configureSecure(dc);
+  dc.setConnectionTimeout(4000);
+  if (!dc.connect(PROXMOX_SERVER, PROXMOX_PORT)) return;
+  dc.println("POST /api/hardware/diag HTTP/1.1");
+  dc.print("Host: "); dc.println(PROXMOX_SERVER);
+  printDeviceAuthHeader(dc);
+  dc.println("Content-Type: application/json");
+  dc.print("Content-Length: "); dc.println(diagPayload.length());
+  dc.println("Connection: close\r\n");
+  dc.print(diagPayload);
+  unsigned long deadline = millis() + 1500;
+  while (!dc.available() && dc.connected() && millis() < deadline) vTaskDelay(pdMS_TO_TICKS(10));
+  dc.stop();
 }
 
 void logKeypadEvent(String message) {

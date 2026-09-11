@@ -1,5 +1,7 @@
 # CTRLABLE Node — Full System Documentation
 
+> ⚠️ **Superseded.** This is the July 2026 snapshot. The current documentation is **`README.md`** — in particular **§7 Security** (2026-09-11): device keys, the command queue, signed OTA and the removal of the MAC-derived device password. Endpoint, firmware and security details below are outdated.
+
 **Last updated:** July 6, 2026
 **System version:** v3.0.1
 

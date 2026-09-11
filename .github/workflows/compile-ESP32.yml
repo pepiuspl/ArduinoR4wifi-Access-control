@@ -79,12 +79,34 @@ jobs:
         echo "💡 Wybrany właściwy, lekki plik binarny aplikacji: $BIN_FILE"
         cp "$BIN_FILE" "./lock_${{ github.sha }}.bin"
 
-    # 7. Automatyczne stworzenie wydania i podpięcie odchudzonego pliku aktualizacji
+    # 6b. PODPIS OBRAZU (ECDSA P-256) — README §7.5. Centralka instaluje aktualizację
+    #     tylko z poprawnym podpisem, a serwer nie rozsyła wydań bez pliku .sig.
+    #     Brak sekretu = BRAK wydania (nigdy nie publikujemy niepodpisanego firmware).
+    - name: Sign Firmware Image
+      env:
+        FIRMWARE_SIGNING_KEY: ${{ secrets.FIRMWARE_SIGNING_KEY }}
+      run: |
+        if [ -z "$FIRMWARE_SIGNING_KEY" ]; then
+          echo "❌ Brak sekretu FIRMWARE_SIGNING_KEY (Settings → Secrets → Actions). Wydanie wstrzymane."
+          exit 1
+        fi
+        umask 077
+        printf '%s\n' "$FIRMWARE_SIGNING_KEY" > "$RUNNER_TEMP/fw_key.pem"
+        openssl dgst -sha256 -sign "$RUNNER_TEMP/fw_key.pem" -out "lock_${{ github.sha }}.bin.sig" "lock_${{ github.sha }}.bin"
+        rm -f "$RUNNER_TEMP/fw_key.pem"
+        # Kontrola spójności: podpis musi przejść kluczem publicznym WSZYTYM w firmware —
+        # inaczej zbudowalibyśmy wydanie, którego żadna centralka nie przyjmie.
+        tr -d '\r' < access_control.ino | awk '/FIRMWARE_PUBKEY_PEM = R"EOF\(/{f=1;next} /^\)EOF";/{f=0} f' > "$RUNNER_TEMP/fw_pub.pem"
+        openssl dgst -sha256 -verify "$RUNNER_TEMP/fw_pub.pem" -signature "lock_${{ github.sha }}.bin.sig" "lock_${{ github.sha }}.bin"
+
+    # 7. Automatyczne stworzenie wydania i podpięcie odchudzonego pliku aktualizacji + podpisu
     - name: Create Release and Upload Firmware
       uses: softprops/action-gh-release@v2
       with:
         tag_name: build-${{ github.sha }}
         name: Build ${{ github.run_number }} (${{ github.sha }})
-        files: lock_${{ github.sha }}.bin
+        files: |
+          lock_${{ github.sha }}.bin
+          lock_${{ github.sha }}.bin.sig
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

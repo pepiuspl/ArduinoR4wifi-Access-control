@@ -11,24 +11,38 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Środowisko „production" — w GitHub: Settings → Environments → production →
+    # Required reviewers. Wtedy push na main NIE wdraża sam; każde wdrożenie wymaga
+    # kliknięcia „Approve" (README §7.7). Bez tej konfiguracji działa jak dotąd.
+    environment: production
 
     steps:
       - name: "01. Pobieranie kodu z repozytorium GitHub"
         uses: actions/checkout@v4
 
-      - name: "02. Wstrzykiwanie klucza prywatnego SSH"
+      - name: "02. Klucz SSH i PRZYPIĘTY klucz hosta"
         env:
           PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
         run: |
-          mkdir -p ~/.ssh
+          # Wcześniej: StrictHostKeyChecking=no — runner łączył się z KAŻDYM, kto podał
+          # się za serwer. Teraz klucz hosta musi się zgadzać z sekretem SERVER_KNOWN_HOSTS
+          # (wynik `ssh-keyscan -p 22044 <host>` zweryfikowany z odciskiem na serwerze).
+          if [ -z "$KNOWN_HOSTS" ]; then
+            echo "❌ Brak sekretu SERVER_KNOWN_HOSTS — wdrożenie wstrzymane (README §7.7)."
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
           echo "$PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+          echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
 
       - name: "03. Transfer & Execute Monolith (JEDNA SESJA + KEEPALIVE)"
         run: |
           echo "📦 Rozpoczynam transfer i wdrażanie w JEDNEJ sesji odpornej na zrywanie..."
           # Flagi ServerAliveInterval i TCPKeepAlive zmuszają router do utrzymania sesji!
-          tar -czf - -C Server_app server.js | ssh -T -p 22044 -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c '
+          tar -czf - -C Server_app server.js | ssh -T -p 22044 -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} "/bin/bash --noprofile --norc -c '
             echo "========================================="
             echo "1. Rozpakowywanie archiwum do /opt/smartlock-server/"
             tar -xzf - -C /opt/smartlock-server/ || exit 1
@@ -38,6 +52,11 @@ jobs:
               echo "✅ Kod zaktualizowany!"
             else
               echo "❌ Błąd: Nowy kod nie dotarł!"
+              exit 1
+            fi
+            # Nawracający błąd z README §3.4: licznik rate-limitu bez ++ = brak limitów.
+            if ! grep -q "store\[ip\].count++" /opt/smartlock-server/server.js; then
+              echo "❌ Błąd: w checkRateLimit brakuje count++ (README §3.4) — przerywam."
               exit 1
             fi
             

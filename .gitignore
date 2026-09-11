@@ -3,3 +3,8 @@
 # Klucz prywatny licencji — NIGDY nie commituj
 license_private.pem
 *.pem
+
+# Klucz podpisu firmware (ECDSA) — tylko w sekrecie GitHub FIRMWARE_SIGNING_KEY
+firmware_signing_private*
+klucze_podpisu_firmware/
+*.key

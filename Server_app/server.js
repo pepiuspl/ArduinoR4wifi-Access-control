@@ -67,11 +67,14 @@ if (!GITHUB_PAT) {
 
 // ─── JWT configuration ────────────────────────────────────────────────────────
 // Set a strong random secret:  export JWT_SECRET=$(openssl rand -hex 32)
-const JWT_SECRET  = process.env.JWT_SECRET  || 'CHANGE_ME_set_JWT_SECRET_env_variable';
+// BEZ DOMYŚLNEJ WARTOŚCI: znany sekret = każdy może podpisać token dowolnego konta.
+// Serwer bez poprawnego sekretu NIE STARTUJE (fail-closed) zamiast działać dziurawo.
+const JWT_SECRET  = process.env.JWT_SECRET || '';
 const JWT_EXPIRES = process.env.JWT_EXPIRES || '7d';   // token lifetime
 
-if (JWT_SECRET === 'CHANGE_ME_set_JWT_SECRET_env_variable') {
-  console.warn('[SECURITY] JWT_SECRET env variable not set — using insecure default. Set it before production use.');
+if (JWT_SECRET.length < 32 || JWT_SECRET === 'CHANGE_ME_set_JWT_SECRET_env_variable') {
+  console.error('[FATAL] Brak JWT_SECRET (min. 32 znaki) w /opt/smartlock-server/.env — serwer nie wystartuje bez sekretu. Wygeneruj: openssl rand -hex 32');
+  process.exit(1);
 }
 
 // ─── CORS allowlist ───────────────────────────────────────────────────────────
@@ -100,13 +103,20 @@ function isOriginAllowed(origin) {
 const loginAttempts   = {};   // { ip: { count, resetAt } }
 const forgotAttempts  = {};
 const inviteAttempts  = {};
+const codeCheckAttempts = {}; // sprawdzanie kodów 6-cyfrowych (reset, weryfikacja e-mail), per IP
+const forgotPerEmail  = {};   // prośby o kod resetu, per adres e-mail
+const registerAttempts = {};  // zakładanie kont (i ponowne wysyłanie kodu), per IP
+const selftestAttempts = {};  // self-test centralki, per MAC (raz na minutę)
 
 function checkRateLimit(store, ip, maxHits, windowMs) {
   const now = Date.now();
   if (!store[ip] || now > store[ip].resetAt) {
     store[ip] = { count: 0, resetAt: now + windowMs };
   }
-  store[ip].count;
+  // UWAGA: tu przez długi czas stało samo `store[ip].count;` (bez ++) — licznik nigdy
+  // nie rósł i ŻADEN limit (logowanie, reset hasła, zaproszenia) nie działał. README §3.4
+  // opisuje to jako błąd nawracający przy podmianie pliku — sprawdzaj po każdym deployu.
+  store[ip].count++;
   if (store[ip].count > maxHits) {
     const retryAfterSec = Math.ceil((store[ip].resetAt - now) / 1000);
     return retryAfterSec;   // seconds to wait
@@ -114,7 +124,52 @@ function checkRateLimit(store, ip, maxHits, windowMs) {
   return 0;   // allowed
 }
 
-let otaUpdatePending = false;
+// Kody jednorazowe (weryfikacja e-mail, reset hasła, deregistracja, usunięcie konta,
+// zaproszenie) z generatora KRYPTOGRAFICZNEGO — Math.random() jest przewidywalny.
+function genCode6() {
+  return crypto.randomInt(100000, 1000000).toString();
+}
+
+// Limit błędnych prób dla KONKRETNEGO kodu. Po CODE_MAX_ATTEMPTS pomyłkach kod jest
+// unieważniany, więc zgadywanie 6 cyfr (1 : 900 000) przestaje mieć sens — trzeba
+// poprosić o nowy kod, a te są limitowane per IP i per e-mail.
+const CODE_MAX_ATTEMPTS = 5;
+const codeFailures = {};   // klucz (np. "reset:jan@x.pl") -> liczba pomyłek
+function codeFailed(key) {
+  codeFailures[key] = (codeFailures[key] || 0) + 1;
+  return codeFailures[key] >= CODE_MAX_ATTEMPTS;   // true = kod właśnie spalony
+}
+function codeReset(key) { delete codeFailures[key]; }
+
+// Minimalna długość hasła konta — jedna wartość dla rejestracji, resetu, zmiany
+// hasła i akceptacji zaproszenia (aplikacja pokazuje tę samą liczbę).
+const MIN_PASSWORD_LENGTH = 8;
+
+// Serwer stoi za Nginx Proxy Managerem, więc socket zawsze pokazuje adres proxy.
+// Prawdziwy adres klienta bierzemy z X-Real-IP — ale TYLKO gdy żądanie przyszło
+// od zaufanego proxy; od kogokolwiek innego nagłówek byłby do podrobienia.
+const TRUSTED_PROXIES = (process.env.TRUSTED_PROXIES || '192.168.0.102')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+// ─── Konta serwisowe (README §7.15) ──────────────────────────────────────────
+// Serwis NIE ma stałego dostępu do żadnej centralki. Klient zaprasza konto z tej
+// listy jak zwykłego współadmina; udział jest oznaczony `is_service`, NIE liczy się
+// do limitu administratorów pakietu i WYGASA sam po SERVICE_SHARE_HOURS. Rozszerzone
+// akcje serwisowe wymagają dodatkowo potwierdzenia kodem wyświetlonym na OLED
+// centralki (obecność fizyczna). Lista w .env: SERVICE_ACCOUNTS=a@x.pl,b@x.pl
+const SERVICE_ACCOUNTS = new Set((process.env.SERVICE_ACCOUNTS || 'ctrlablenode@gmail.com')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+const SERVICE_SHARE_HOURS = parseInt(process.env.SERVICE_SHARE_HOURS || '48', 10) || 48;
+const isServiceEmail = (email) => SERVICE_ACCOUNTS.has(String(email || '').trim().toLowerCase());
+// Udział aktywny = bez daty wygaśnięcia albo jeszcze przed nią (udziały serwisowe).
+const SHARE_ACTIVE = `(expires_at IS NULL OR expires_at > NOW())`;
+// serviceSessions[mac] = { accountId, code, codeUntil, confirmedUntil, fails }
+const serviceSessions = {};
+
+// Aktualizacja uzbrojona per centralka (mac -> timestamp). Wcześniej jedna globalna
+// flaga: kliknięcie „Aktualizuj" przez dowolnego klienta aktualizowało WSZYSTKIE zamki.
+const otaPendingDevices = {};
+const firmwareVersionCache = { value: null, at: 0, inflight: null };
 let latestFirmwareVersion = "2.9.7";
 let latestFirmwareFile = "";
 const updatesDir = '/opt/smartlock-server/updates';
@@ -153,7 +208,7 @@ const LOG_CATEGORIES = {
   connections: ['Radar Traffic', 'Authentication Panel', 'Auth Rejection', 'Auth RateLimit', 'Core Daemon'],
   updates:     ['DEBUG OTA PUSH', 'DEBUG LOCK DOWNLOAD', 'DEBUG GITHUB', 'Hardware Remote Log'],
   security:    ['TAMPER', 'CORE PANIC RECOVERY BOUNDARY', 'Push Diagnostic', 'Push Notification Error', 'Push System Warning'],
-  provisioning:['Provisioning', 'Settings Update', 'User Mutation', 'Reset System'],
+  provisioning:['Provisioning', 'Settings Update', 'User Mutation', 'Reset System', 'Service', 'License', 'Hardware Registration'],
   mail:        ['SMTP Handshake Matrix', 'Welcome SMTP Fail', 'Błąd serwera SMTP', 'Push System'],
 };
 // Reverse lookup: module name -> category folder name
@@ -204,7 +259,7 @@ function writeToLocalLogFile(module, message) {
 // jest wklejany do każdego zapytania poniżej zamiast prostego "account_id = $1",
 // żeby zaproszeni administratorzy mieli te same możliwości odblokowywania,
 // zarządzania PIN-ami/kartami itd. co właściciel.
-const DEVICE_ACCESS_CONDITION = `(d.account_id = $1 OR d.mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1))`;
+const DEVICE_ACCESS_CONDITION = `(d.account_id = $1 OR d.mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1 AND ${SHARE_ACTIVE}))`;
 
 async function resolveTargetDevice(accountId, requestedMac, columns = 'mac_address, last_known_ip') {
   const cols = columns.split(',').map(c => `d.${c.trim()}`).join(', ');
@@ -237,14 +292,14 @@ async function resolveTargetDevice(accountId, requestedMac, columns = 'mac_addre
 async function enforceLicenseLimits(accountId) {
   try {
     const ent = await getEntitlements(accountId);
-    const devs = await dbPool.query('SELECT mac_address, last_known_ip FROM devices WHERE account_id = $1', [accountId]);
+    const devs = await dbPool.query('SELECT mac_address FROM devices WHERE account_id = $1', [accountId]);
 
     for (const dev of devs.rows) {
       const mac = dev.mac_address;
 
       // --- KARTY: właściciel pierwszy, potem najstarsze wg id ---
       const cards = await dbPool.query(
-        `SELECT id, hardware_slot_idx, is_active, license_locked
+        `SELECT id, card_uid, is_active, license_locked
            FROM card_credentials WHERE mac_address = $1
           ORDER BY keep_on_downgrade DESC, is_owner_card DESC, id ASC`, [mac]);
 
@@ -252,16 +307,16 @@ async function enforceLicenseLimits(accountId) {
         const c = cards.rows[i];
         const withinLimit = i < ent.max_cards;
 
+        // Stan karty trafia na centralkę przez kolejkę komend (odbiera ją przy pollu),
+        // a nie przez HTTP na jej prywatne IP — tamto działało tylko w sieci serwera.
         if (!withinLimit && c.is_active) {
           await dbPool.query('UPDATE card_credentials SET is_active = false, license_locked = true WHERE id = $1', [c.id]);
-          await syncMutationToHardware(dev.last_known_ip,
-            `/api/toggle_user_active?idx=${c.hardware_slot_idx ?? i}&pass=${getFactoryAdminPassword(mac)}`);
+          await queueCardCommand(mac, c.card_uid, 'A', '0');
           writeToLocalLogFile('License', `[Node: ${mac}] Karta id=${c.id} wyłączona — limit pakietu ${ent.license_tier} (${ent.max_cards}).`);
         } else if (withinLimit && c.license_locked && !c.is_active) {
           // Wróciliśmy w limit — przywracamy to, co zablokował system.
           await dbPool.query('UPDATE card_credentials SET is_active = true, license_locked = false WHERE id = $1', [c.id]);
-          await syncMutationToHardware(dev.last_known_ip,
-            `/api/toggle_user_active?idx=${c.hardware_slot_idx ?? i}&pass=${getFactoryAdminPassword(mac)}`);
+          await queueCardCommand(mac, c.card_uid, 'A', '1');
           writeToLocalLogFile('License', `[Node: ${mac}] Karta id=${c.id} przywrócona po zwiększeniu pakietu.`);
         }
       }
@@ -286,8 +341,9 @@ async function enforceLicenseLimits(accountId) {
       // --- WSPÓŁADMINISTRATORZY: max_admins LICZY właściciela, więc miejsc jest (max-1).
       // Odbieramy dostęp NAJNOWSZYM — najstarsi współpracownicy zostają.
       const slots = Math.max(0, (ent.max_admins || 1) - 1);
+      // Udziały serwisowe są poza limitem pakietu — ani nie zajmują miejsca, ani nie są odbierane.
       const shares = await dbPool.query(
-        'SELECT id FROM device_shares WHERE mac_address = $1 ORDER BY created_at ASC, id ASC', [mac]);
+        'SELECT id FROM device_shares WHERE mac_address = $1 AND is_service = false ORDER BY created_at ASC, id ASC', [mac]);
       if (shares.rows.length > slots) {
         const toRevoke = shares.rows.slice(slots).map(r => r.id);
         await dbPool.query('DELETE FROM device_shares WHERE id = ANY($1)', [toRevoke]);
@@ -309,7 +365,7 @@ async function enforceLicenseLimits(accountId) {
 // z centralką. `idx` obsługiwany dalej jako fallback dla starszych buildów aplikacji.
 async function resolveCardRow(targetMac, body) {
   const cards = await dbPool.query(
-    'SELECT id, is_active, hardware_slot_idx FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC',
+    'SELECT id, card_uid, is_active, hardware_slot_idx FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC',
     [targetMac]
   );
   if (body && body.id != null) {
@@ -319,29 +375,154 @@ async function resolveCardRow(targetMac, body) {
   if (body && body.idx != null) return cards.rows[body.idx] || null;   // stara apka
   return null;
 }
-// Slot do wysłania na sprzęt: z bazy, a gdy brak (stare wiersze) — to, co podała apka.
-function cardHwSlot(card, body) {
-  if (card && card.hardware_slot_idx != null) return card.hardware_slot_idx;
-  return (body && body.idx != null) ? body.idx : 0;
-}
 
 // Fragment SQL: zbiór MAC-ów, do których dane konto ma dostęp jako właściciel LUB
 // współadmin. `param` to numer placeholdera (np. '$2'). Używane do autoryzacji
 // operacji na PIN-ach po MAC-u urządzenia zamiast po koncie twórcy PIN-u.
 function macAccessSubquery(param) {
-  return `(SELECT mac_address FROM devices WHERE account_id=${param} UNION SELECT mac_address FROM device_shares WHERE account_id=${param})`;
+  return `(SELECT mac_address FROM devices WHERE account_id=${param} UNION SELECT mac_address FROM device_shares WHERE account_id=${param} AND ${SHARE_ACTIVE})`;
 }
 
-function getFactoryAdminPassword(mac) {
-  if (!mac) return 'admin';
-  const cleanMac = mac.toUpperCase();
-  const salt = "CTRLABLE_KEY_2026";
-  const combined = cleanMac + salt;
-  let hashNum = 0;
-  for (let i = 0; i < combined.length; i++) {
-    hashNum += combined.charCodeAt(i) * (i + 1);
+// =========================================================================
+// UWIERZYTELNIANIE CENTRALEK — klucz urządzenia (README §7.2)
+// =========================================================================
+// Dawniej jedynym „hasłem" centralki był jej MAC (widoczny w eterze), a hasło
+// lokalnego API wyliczało się z MAC-a jawnym algorytmem z publicznego repo.
+// Teraz każda centralka przy pierwszym starcie losuje 32-bajtowy klucz (NVS) i
+// dołącza go do KAŻDEGO żądania w nagłówku X-Device-Key (po TLS). Serwer trzyma
+// wyłącznie SHA-256 klucza (devices.device_key_hash).
+//
+// Przejście ze starego firmware: urządzenie zarejestrowane bez klucza przypina go
+// przy pierwszym połączeniu z nowym firmware (trust-on-first-use, tylko gdy hash
+// jest pusty). Dopóki LEGACY_DEVICE_AUTH != 'off', stare centralki bez klucza
+// działają dalej — żeby mogły odebrać OTA z poprawką. Po aktualizacji całej floty
+// ustaw LEGACY_DEVICE_AUTH=off w .env.
+const LEGACY_DEVICE_AUTH = (process.env.LEGACY_DEVICE_AUTH || 'on').toLowerCase() !== 'off';
+const legacyAuthLog = {};   // throttle logu „centralka bez klucza" (raz na godzinę per MAC)
+
+function hashDeviceKey(key) {
+  return crypto.createHash('sha256').update(String(key)).digest('hex');
+}
+
+function readDeviceKey(req) {
+  const k = String(req.headers['x-device-key'] || '').trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(k) ? k : '';
+}
+
+function normalizeMac(mac) {
+  const m = String(mac || '').trim().toUpperCase();
+  return /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(m) ? m : '';
+}
+
+// Szuka centralki po MAC, tolerując odwróconą kolejność bajtów (jak dotąd w pollu).
+async function findDeviceByMac(mac) {
+  const m = normalizeMac(mac);
+  if (!m) return null;
+  const cols = 'mac_address, account_id, device_key_hash';
+  let r = await dbPool.query(`SELECT ${cols} FROM devices WHERE mac_address = $1`, [m]);
+  if (r.rows.length === 0) {
+    r = await dbPool.query(`SELECT ${cols} FROM devices WHERE mac_address = $1`, [m.split(':').reverse().join(':')]);
   }
-  return "CN" + String(hashNum).substring(0, 5);
+  return r.rows[0] || null;
+}
+
+// Wynik: { ok, mac, device, legacy, reason }. `mac` = MAC w postaci z bazy.
+async function authenticateDevice(req, rawMac) {
+  const device = await findDeviceByMac(rawMac);
+  if (!device) return { ok: false, reason: 'unknown_device' };
+  const key = readDeviceKey(req);
+
+  if (device.device_key_hash) {
+    if (!key) return { ok: false, reason: 'missing_key', device };
+    const a = Buffer.from(hashDeviceKey(key), 'hex');
+    const b = Buffer.from(device.device_key_hash, 'hex');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, reason: 'bad_key', device };
+    return { ok: true, mac: device.mac_address, device };
+  }
+
+  if (key) {
+    // Przypięcie klucza — `IS NULL` w warunku sprawia, że wygrywa dokładnie jeden klucz.
+    await dbPool.query(
+      'UPDATE devices SET device_key_hash = $1 WHERE mac_address = $2 AND device_key_hash IS NULL',
+      [hashDeviceKey(key), device.mac_address]);
+    const again = await findDeviceByMac(device.mac_address);
+    if (again && again.device_key_hash === hashDeviceKey(key)) {
+      writeToLocalLogFile('Provisioning', `[Node: ${device.mac_address}] Przypięto klucz urządzenia (pierwsze połączenie z bezpiecznym firmware).`);
+      return { ok: true, mac: device.mac_address, device: again };
+    }
+    return { ok: false, reason: 'bad_key', device: again };
+  }
+
+  if (LEGACY_DEVICE_AUTH) {
+    const k = device.mac_address;
+    if (!legacyAuthLog[k] || Date.now() - legacyAuthLog[k] > 3600 * 1000) {
+      legacyAuthLog[k] = Date.now();
+      writeToLocalLogFile('Provisioning', `[Node: ${k}] Centralka bez klucza urządzenia (stary firmware) — dopuszczona w trybie przejściowym. Zaktualizuj ją przez OTA.`);
+    }
+    return { ok: true, mac: device.mac_address, device, legacy: true };
+  }
+  return { ok: false, reason: 'missing_key', device };
+}
+
+function logDeviceAuthFailure(auth, rawMac, pathname, ip) {
+  writeToLocalLogFile('Auth Rejection',
+    `[Node: ${normalizeMac(rawMac) || rawMac || 'BRAK-MAC'}] Odrzucono żądanie centralki ${pathname} (${auth.reason}) z IP ${ip}.`);
+}
+
+// =========================================================================
+// KOLEJKA KOMEND DLA CENTRALKI (README §7.3)
+// =========================================================================
+// Zmiany kart i Wi-Fi docierają do centralki w odpowiedzi na jej poll — tym samym
+// kanałem TLS, którym przychodzi zdalne otwarcie. Wcześniej serwer łączył się po
+// HTTP z PRYWATNYM IP centralki (last_known_ip), co działało wyłącznie w sieci
+// serwera: u klienta blokada zgubionego breloka po cichu nie docierała.
+//
+// Komendy są trwałe (tabela device_commands), idempotentne i adresują kartę po UID,
+// nie po numerze slotu — powtórne doręczenie niczego nie psuje, a usunięcie jednej
+// karty nie przesuwa celów kolejnych komend. Centralka potwierdza wykonanie
+// parametrem ack=<ostatnie id> w następnym pollu.
+//   A|<uid8>|<0/1>                 aktywność karty
+//   D|<uid8>                       usunięcie karty
+//   N|<uid8>|<nazwa hex>           zmiana nazwy (max 15 bajtów UTF-8)
+//   S|<uid8>|<en>|<dni>|<od>|<do>  harmonogram karty
+//   W|<ssid hex>|<hasło hex>       nowa sieć Wi-Fi (centralka restartuje się po ack)
+const DEVICE_CMD_BATCH = 5;
+
+function uidToHex8(cardUid) {
+  const h = String(cardUid || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+  return h.length >= 8 ? h.slice(0, 8) : '';
+}
+
+function toHex(s) {
+  return Buffer.from(String(s == null ? '' : s), 'utf8').toString('hex').toUpperCase();
+}
+
+// Obcina tekst do limitu BAJTÓW (UTF-8), nie rozcinając polskich znaków w połowie.
+function truncateUtf8(s, maxBytes) {
+  let out = String(s == null ? '' : s);
+  while (Buffer.byteLength(out, 'utf8') > maxBytes) out = out.slice(0, -1);
+  return out;
+}
+
+async function queueDeviceCommand(mac, cmd) {
+  await dbPool.query('INSERT INTO device_commands (mac_address, cmd) VALUES ($1, $2)', [mac, cmd]);
+}
+
+// kind: 'A' (aktywność), 'D' (usunięcie), 'N' (nazwa), 'S' (harmonogram); arg = reszta komendy.
+async function queueCardCommand(mac, cardUid, kind, arg) {
+  const uid = uidToHex8(cardUid);
+  if (!uid) {
+    writeToLocalLogFile('User Mutation', `[Node: ${mac}] Pominięto komendę ${kind}: karta bez poprawnego UID (${cardUid}).`);
+    return false;
+  }
+  await queueDeviceCommand(mac, arg === undefined ? `${kind}|${uid}` : `${kind}|${uid}|${arg}`);
+  return true;
+}
+
+async function pendingCommandCount(mac) {
+  const r = await dbPool.query(
+    'SELECT COUNT(*) FROM device_commands WHERE mac_address = $1 AND acked_at IS NULL', [mac]);
+  return parseInt(r.rows[0].count, 10) || 0;
 }
 
 const unlockQueues = {};
@@ -358,7 +539,7 @@ const pendingUnlocks = {};
 
 // Deregistracja (twarde odłączenie centralki): tylko właściciel, potwierdzane
 // kodem z maila. deregisterCodes[mac] = { code, accountId, expiresAt } — kod z maila.
-// deregisterQueues[mac] = timestamp do kiedy komenderujemy urządzeniu wipe EEPROM
+// deregisterQueues[mac] = { until, keyHash } — do kiedy komenderujemy urządzeniu wipe EEPROM
 // (factory reset) i blokujemy jego automatyczną ponowną rejestrację w pollu.
 const deregisterCodes = {};
 const deregisterQueues = {};
@@ -389,24 +570,44 @@ function _sendJSON(res, statusCode, data, origin) {
 }
 
 // ─── JWT helpers ─────────────────────────────────────────────────────────────
-function signToken(accountId) {
+// `tv` = accounts.token_version w chwili wydania tokenu. Zmiana lub reset hasła
+// podbija token_version, więc WSZYSTKIE wcześniej wydane tokeny przestają działać
+// (np. ten na zgubionym telefonie) — bez tego JWT żył 7 dni niezależnie od hasła.
+function signToken(accountId, tokenVersion = 0) {
   if (!jwt) return null;
-  return jwt.sign({ sub: String(accountId) }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+  return jwt.sign({ sub: String(accountId), tv: tokenVersion | 0 }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
 }
 
 /**
  * Verify the Bearer token from the Authorization header.
  * Returns the numeric accountId on success, or null on failure.
  */
-function verifyToken(req) {
+async function verifyToken(req) {
   if (!jwt) return null;
   const header = req.headers['authorization'] || '';
   const match  = header.match(/^Bearer\s(.+)$/i);
   if (!match) return null;
+  let payload;
   try {
-    const payload = jwt.verify(match[1], JWT_SECRET);
-    return parseInt(payload.sub, 10);
+    payload = jwt.verify(match[1], JWT_SECRET, { algorithms: ['HS256'] });
   } catch (_) {
+    return null;
+  }
+  const id = parseInt(payload.sub, 10);
+  if (!id) return null;
+  try {
+    const r = await dbPool.query('SELECT token_version FROM accounts WHERE id = $1', [id]);
+    if (r.rows.length === 0) return null;                    // konto usunięte → token martwy
+    if ((r.rows[0].token_version || 0) !== (payload.tv || 0)) return null;
+    return id;
+  } catch (e) {
+    // 42703 = brak kolumny (migracja jeszcze nie przeszła) — nie odcinamy wszystkich
+    // użytkowników, sprawdzamy tylko, czy konto istnieje. Każdy inny błąd = odmowa.
+    if (e && e.code === '42703') {
+      writeToLocalLogFile('Core Daemon', '[Auth] Brak kolumny accounts.token_version — sprawdź migracje (README §4.4).');
+      const r = await dbPool.query('SELECT 1 FROM accounts WHERE id = $1', [id]).catch(() => ({ rows: [] }));
+      return r.rows.length ? id : null;
+    }
     return null;
   }
 }
@@ -414,10 +615,10 @@ function verifyToken(req) {
 /**
  * Drop-in guard for protected routes.
  * Usage inside a route block:
- *   const accountId = requireAuth(req, res); if (!accountId) return;
+ *   const accountId = await requireAuth(req, res); if (!accountId) return;
  */
-function requireAuth(req, res) {
-  const id = verifyToken(req);
+async function requireAuth(req, res) {
+  const id = await verifyToken(req);
   if (!id) {
     // Use the module-level _sendJSON so we can call this before the scoped
     // sendJSON wrapper is available (shouldn't happen in practice, but safe).
@@ -428,24 +629,6 @@ function requireAuth(req, res) {
   return id;
 }
 
-function syncMutationToHardware(ip, pathUrl) {
-  return new Promise((resolve) => {
-    if (!ip || ip.length < 4) return resolve(false);
-    const options = {
-      hostname: ip,
-      port: 80,
-      path: pathUrl,
-      method: 'GET',
-      timeout: 3000
-    };
-    const req = http.request(options, (response) => {
-      response.on('data', () => {});
-      response.on('end', () => resolve(true));
-    });
-    req.on('error', () => resolve(false));
-    req.end();
-  });
-}
 
 // DYNAMICZNA FUNKCJA PARSOWANIA I SORTOWANIA WERSJI SEMVER Z PLIKÓW LOKALNYCH
 function getLatestFirmwareContext() {
@@ -483,6 +666,78 @@ function getLatestFirmwareContext() {
   } catch (e) {
     return { version: '0.0.0', filename: null };
   }
+}
+
+// ─── GitHub: odczyt wydania i pobieranie assetów (bin + podpis) ───────────────
+function githubRequestOptions(p, accept) {
+  return {
+    hostname: 'api.github.com', path: p, family: 4, timeout: 15000,
+    headers: {
+      'User-Agent': 'NodeJS-SmartLock-Server',
+      'Authorization': `token ${GITHUB_PAT}`,
+      ...(accept ? { 'Accept': accept } : {}),
+    },
+  };
+}
+
+function githubJson(p) {
+  return new Promise((resolve, reject) => {
+    const r = https.get(githubRequestOptions(p), (gr) => {
+      let data = '';
+      gr.on('data', (c) => { data += c; if (data.length > 2 * 1024 * 1024) gr.destroy(new Error('response too large')); });
+      gr.on('end', () => {
+        try {
+          const j = JSON.parse(data);
+          if (gr.statusCode !== 200) return reject(new Error(j.message || `HTTP ${gr.statusCode}`));
+          resolve(j);
+        } catch (e) { reject(e); }
+      });
+      gr.on('error', reject);
+    });
+    r.on('timeout', () => r.destroy(new Error('timeout')));
+    r.on('error', reject);
+  });
+}
+
+// Pobiera asset wydania do pliku (przez .part + rename, żeby centralka nigdy nie
+// dostała połowy pliku). Po przekierowaniu na serwer plików tokenu GitHub NIE
+// wysyłamy dalej — należy wyłącznie do api.github.com.
+function downloadGithubAsset(assetId, destPath) {
+  return new Promise((resolve, reject) => {
+    const tmp = destPath + '.part';
+    const fail = (e) => { try { fs.unlinkSync(tmp); } catch (_) {} reject(e); };
+    const fetchStep = (opts, hops) => {
+      const r = https.get(opts, (fr) => {
+        if ((fr.statusCode === 301 || fr.statusCode === 302) && fr.headers.location && hops < 5) {
+          fr.resume();
+          let u;
+          try { u = new URL(fr.headers.location); } catch (e) { return fail(e); }
+          if (u.protocol !== 'https:') return fail(new Error('redirect to non-https'));
+          return fetchStep({ hostname: u.hostname, path: u.pathname + u.search, family: 4, timeout: 30000,
+                             headers: { 'User-Agent': 'NodeJS-SmartLock-Server' } }, hops + 1);
+        }
+        if (fr.statusCode !== 200) { fr.resume(); return fail(new Error(`HTTP ${fr.statusCode}`)); }
+        const out = fs.createWriteStream(tmp);
+        fr.pipe(out);
+        out.on('finish', () => out.close(() => {
+          try { fs.renameSync(tmp, destPath); resolve(); } catch (e) { fail(e); }
+        }));
+        out.on('error', fail);
+        fr.on('error', fail);
+      });
+      r.on('timeout', () => r.destroy(new Error('timeout')));
+      r.on('error', fail);
+    };
+    fetchStep(githubRequestOptions(`/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${assetId}`, 'application/octet-stream'), 0);
+  });
+}
+
+// Wipe centralki (deregistracja / usunięcie konta): wiersz urządzenia zaraz zniknie,
+// więc hash klucza zapamiętujemy TERAZ — w oknie 120 s poll z komendą wipe odbierze
+// tylko prawdziwa centralka, a nie ktoś, kto zna jej MAC.
+async function scheduleDeviceWipe(mac) {
+  const r = await dbPool.query('SELECT device_key_hash FROM devices WHERE mac_address = $1', [mac]).catch(() => ({ rows: [] }));
+  deregisterQueues[mac] = { until: Date.now() + 120 * 1000, keyHash: (r.rows[0] && r.rows[0].device_key_hash) || null };
 }
 
 // Rate-limit store for keypad PIN attempts { mac: {count, resetAt} }
@@ -537,7 +792,7 @@ function renderInvitePage(opts) {
     <p class="sub">Zostałeś zaproszony jako administrator urządzenia <span class="dev">${escapeHtml(deviceName)}</span>. Utwórz konto, aby uzyskać dostęp.</p>
     <label>Adres e-mail</label>
     <input type="email" value="${escapeHtml(email)}" readonly>
-    <label>Ustaw hasło (min. 6 znaków)</label>
+    <label>Ustaw hasło (min. ${MIN_PASSWORD_LENGTH} znaków)</label>
     <div class="pwwrap">
       <input id="pw" type="password" autocomplete="new-password" placeholder="Twoje hasło" style="padding-right:64px">
       <span class="pweye" id="pweye" onclick="togglePw()">Pokaż</span>
@@ -556,7 +811,7 @@ function renderInvitePage(opts) {
       async function submitAccept(){
         var pw=document.getElementById('pw').value;
         var rodo=document.getElementById('rodo').checked;
-        if(pw.length<6){show('err','Hasło musi mieć co najmniej 6 znaków.');return;}
+        if(pw.length<${MIN_PASSWORD_LENGTH}){show('err','Hasło musi mieć co najmniej ${MIN_PASSWORD_LENGTH} znaków.');return;}
         if(!rodo){show('err','Zaznacz akceptację polityki prywatności.');return;}
         var btn=document.getElementById('go');btn.disabled=true;
         try{
@@ -600,11 +855,29 @@ const server = http.createServer(async (req, res) => {
 
   let rawIp = req.socket.remoteAddress || '';
   let cleanIp = rawIp.includes('::ffff:') ? rawIp.split('::ffff:')[1] : rawIp;
-  if (cleanIp === '127.0.0.1' || cleanIp === '::1') cleanIp = '192.168.0.46';
+  // Za proxy: prawdziwy adres klienta z X-Real-IP (ustawia NPM). Bez tego wszystkie
+  // limity per-IP liczyły się dla JEDNEGO adresu — proxy — wspólnie dla wszystkich.
+  // Sprawdzane PRZED mapowaniem localhost niżej, żeby działało też proxy na tym hoście.
+  const viaTrustedProxy = TRUSTED_PROXIES.includes(cleanIp);
+  if (viaTrustedProxy) {
+    const fwd = String(req.headers['x-real-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0] || '').trim();
+    if (/^[0-9a-fA-F:.]{3,45}$/.test(fwd)) cleanIp = fwd;
+  }
+  if (!viaTrustedProxy && (cleanIp === '127.0.0.1' || cleanIp === '::1')) cleanIp = '192.168.0.46';
 
+  // Body doklejane kawałkami (wcześniej `bodyStr = chunk` gubiło wszystko poza
+  // ostatnim fragmentem) i z twardym limitem — bez niego jedno żądanie mogło
+  // zapchać pamięć procesu.
+  const MAX_BODY_BYTES = 64 * 1024;
   let bodyStr = '';
-  req.on('data', chunk => { bodyStr = chunk; });
+  let bodyTooLarge = false;
+  req.on('data', chunk => {
+    if (bodyTooLarge) return;
+    bodyStr += chunk;
+    if (bodyStr.length > MAX_BODY_BYTES) { bodyTooLarge = true; bodyStr = ''; }
+  });
   req.on('end', async () => {
+    if (bodyTooLarge) return sendJSON(res, 413, { error: 'Payload too large' });
     let body = {};
     if (bodyStr) {
       try { body = JSON.parse(bodyStr); } catch (e) { }
@@ -626,6 +899,14 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       if (pathname === '/api/auth/register' && req.method === 'POST') {
         if (!body.email || !body.password) return sendJSON(res, 400, { error: "Missing identity payloads" });
+        if (String(body.password).length < MIN_PASSWORD_LENGTH) {
+          return sendJSON(res, 400, { error: `Hasło musi mieć co najmniej ${MIN_PASSWORD_LENGTH} znaków.` });
+        }
+        const regWait = checkRateLimit(registerAttempts, cleanIp, 10, 60 * 60 * 1000);
+        if (regWait > 0) {
+          res.setHeader('Retry-After', String(regWait));
+          return sendJSON(res, 429, { error: `Zbyt wiele prób rejestracji. Spróbuj ponownie za ${Math.ceil(regWait / 60)} min.` });
+        }
 
         // 🛡️ Strażnik RODO - sprawdzenie akceptacji z aplikacji mobilnej
         if (!body.privacy_policy_accepted) {
@@ -636,7 +917,8 @@ const server = http.createServer(async (req, res) => {
         const hash = await bcrypt.hash(body.password, 10);
         const acceptedTimestamp = new Date(); // Generowanie czasu TIMESTAMP dla Postgresa
 
-        const verifyCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const verifyCode = genCode6();
+        codeReset(`verify:${cleanEmail}`);
 
         // Wspólny nadawca kodu weryfikacyjnego (używany przy nowej rejestracji ORAZ
         // przy ponownej próbie rejestracji konta jeszcze niezweryfikowanego).
@@ -703,8 +985,13 @@ const server = http.createServer(async (req, res) => {
         if (!email || !code) return sendJSON(res, 400, { error: "Brak e-maila lub kodu." });
 
         const cleanEmail = email.trim().toLowerCase();
+        const vWait = checkRateLimit(codeCheckAttempts, cleanIp, 30, 15 * 60 * 1000);
+        if (vWait > 0) {
+          res.setHeader('Retry-After', String(vWait));
+          return sendJSON(res, 429, { error: 'Zbyt wiele prób. Spróbuj ponownie później.' });
+        }
         const userRes = await dbPool.query(
-          'SELECT id, email_verified FROM accounts WHERE email = $1 AND email_verify_code = $2 AND email_verify_expires > NOW()',
+          'SELECT id, email_verified, token_version FROM accounts WHERE email = $1 AND email_verify_code = $2 AND email_verify_expires > NOW()',
           [cleanEmail, String(code).trim()]
         );
 
@@ -714,8 +1001,17 @@ const server = http.createServer(async (req, res) => {
           if (already.rows.length > 0 && already.rows[0].email_verified === true) {
             return sendJSON(res, 200, { status: "already_verified" });
           }
+          // Po CODE_MAX_ATTEMPTS pomyłkach kod jest spalony — nowy wysyła ponowna
+          // rejestracja albo próba logowania.
+          if (already.rows.length > 0 && codeFailed(`verify:${cleanEmail}`)) {
+            await dbPool.query('UPDATE accounts SET email_verify_code = NULL WHERE email = $1', [cleanEmail]);
+            codeReset(`verify:${cleanEmail}`);
+            writeToLocalLogFile('Auth RateLimit', `Kod weryfikacyjny unieważniony po ${CODE_MAX_ATTEMPTS} błędnych próbach: ${cleanEmail}`);
+            return sendJSON(res, 429, { error: 'Za dużo błędnych prób — kod unieważniony. Zaloguj się ponownie, aby otrzymać nowy.' });
+          }
           return sendJSON(res, 400, { error: "Kod jest nieprawidłowy lub wygasł." });
         }
+        codeReset(`verify:${cleanEmail}`);
 
         // Aktywacja: kasujemy kod, ustawiamy verified.
         await dbPool.query(
@@ -740,7 +1036,7 @@ const server = http.createServer(async (req, res) => {
           if (err) writeToLocalLogFile('Welcome SMTP Fail', err.message);
         });
 
-        const token = signToken(userRes.rows[0].id);
+        const token = signToken(userRes.rows[0].id, userRes.rows[0].token_version || 0);
         writeToLocalLogFile('Authentication Panel', `Konto zweryfikowane i aktywowane: ${cleanEmail}`);
         return sendJSON(res, 200, { status: "verified", auth: true, token, accountId: userRes.rows[0].id });
       }
@@ -791,7 +1087,8 @@ const server = http.createServer(async (req, res) => {
         // ── Konto niezweryfikowane: nie wpuszczamy. Wysyłamy świeży kod i kierujemy
         //    apkę do ekranu weryfikacji (status:"unverified" + email). ─────────────
         if (result.rows[0].email_verified === false) {
-          const freshCode = Math.floor(100000 + Math.random() * 900000).toString();
+          const freshCode = genCode6();
+          codeReset(`verify:${cleanEmail}`);
           await dbPool.query(
             `UPDATE accounts SET email_verify_code = $1, email_verify_expires = NOW() + INTERVAL '15 minutes' WHERE id = $2`,
             [freshCode, result.rows[0].id]
@@ -812,7 +1109,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         // ── Success: issue a signed JWT ───────────────────────────────────────
-        const token = signToken(result.rows[0].id);
+        const token = signToken(result.rows[0].id, result.rows[0].token_version || 0);
         writeToLocalLogFile('Authentication Panel', `User logged in successfully: ${cleanEmail}`);
         return sendJSON(res, 200, {
           auth: true,
@@ -838,13 +1135,20 @@ const server = http.createServer(async (req, res) => {
 
         const cleanEmail = body.email ? body.email.trim().toLowerCase() : '';
         if (!cleanEmail) return sendJSON(res, 400, { error: "Nie podano email" });
+        // Limit także per e-mail: nowy kod = kolejne próby, więc bez tego atakujący
+        // zmieniający adres IP zamawiałby kody bez końca. Odpowiedź taka sama jak zawsze,
+        // żeby nie zdradzać, czy konto istnieje.
+        if (checkRateLimit(forgotPerEmail, cleanEmail, 5, 60 * 60 * 1000) > 0) {
+          return sendJSON(res, 200, { status: "processed" });
+        }
 
         const checkAccount = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [cleanEmail]);
         if (checkAccount.rows.length === 0) {
           return sendJSON(res, 200, { status: "processed" });
         }
 
-        const secureCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const secureCode = genCode6();
+        codeReset(`reset:${cleanEmail}`);
 
         await dbPool.query(
           `UPDATE accounts
@@ -869,45 +1173,57 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { status: "processed" });
       }
 
+      // Sprawdzenie kodu resetu — wspólne dla obu kroków. Kod 6-cyfrowy bez limitu prób
+      // dało się zgadnąć, a przejęte konto = zdalne otwieranie drzwi. Teraz: limit per IP
+      // oraz CODE_MAX_ATTEMPTS pomyłek na jeden kod, po których kod jest unieważniany.
+      const checkResetCode = async (email, code) => {
+        const cleanEmail = String(email).trim().toLowerCase();
+        const wait = checkRateLimit(codeCheckAttempts, cleanIp, 30, 15 * 60 * 1000);
+        if (wait > 0) return { status: 429, error: 'Zbyt wiele prób. Spróbuj ponownie później.' };
+        const userRes = await dbPool.query(
+          'SELECT id FROM accounts WHERE email = $1 AND reset_token = $2 AND reset_token_expires > NOW()',
+          [cleanEmail, String(code).trim()]
+        );
+        if (userRes.rows.length === 0) {
+          if (codeFailed(`reset:${cleanEmail}`)) {
+            await dbPool.query('UPDATE accounts SET reset_token = NULL, reset_token_expires = NULL WHERE email = $1', [cleanEmail]);
+            codeReset(`reset:${cleanEmail}`);
+            writeToLocalLogFile('Auth RateLimit', `Kod resetu unieważniony po ${CODE_MAX_ATTEMPTS} błędnych próbach: ${cleanEmail} (IP ${cleanIp})`);
+            return { status: 429, error: 'Za dużo błędnych prób — kod unieważniony. Poproś o nowy kod.' };
+          }
+          return { status: 400, error: 'Kod jest nieprawidłowy lub wygasł' };
+        }
+        return { status: 200, accountId: userRes.rows[0].id, cleanEmail };
+      };
+
       if (pathname === '/api/auth/verify_reset_code' && req.method === 'POST') {
         const { email, code } = body;
         if (!email || !code) return sendJSON(res, 400, { error: "Missing parameters" });
-
-        const cleanEmail = email.trim().toLowerCase();
-        const userRes = await dbPool.query(
-          'SELECT id FROM accounts WHERE email = $1 AND reset_token = $2 AND reset_token_expires > NOW()',
-          [cleanEmail, code]
-        );
-
-        if (userRes.rows.length === 0) {
-          return sendJSON(res, 400, { error: "Kod jest nieprawidłowy lub wygasł" });
-        }
-
+        const chk = await checkResetCode(email, code);
+        if (chk.status !== 200) return sendJSON(res, chk.status, { error: chk.error });
         return sendJSON(res, 200, { valid: true });
       }
 
       if (pathname === '/api/auth/confirm_password_reset' && req.method === 'POST') {
         const { email, code, newPassword } = body;
         if (!email || !code || !newPassword) return sendJSON(res, 400, { error: "Missing parameters" });
-
-        const cleanEmail = email.trim().toLowerCase();
-
-        const userRes = await dbPool.query(
-          'SELECT id FROM accounts WHERE email = $1 AND reset_token = $2 AND reset_token_expires > NOW()',
-          [cleanEmail, code]
-        );
-
-        if (userRes.rows.length === 0) {
-          return sendJSON(res, 400, { error: "Kod jest nieprawidłowy lub wygasł" });
+        if (String(newPassword).length < MIN_PASSWORD_LENGTH) {
+          return sendJSON(res, 400, { error: `Hasło musi mieć co najmniej ${MIN_PASSWORD_LENGTH} znaków.` });
         }
+        const chk = await checkResetCode(email, code);
+        if (chk.status !== 200) return sendJSON(res, chk.status, { error: chk.error });
 
-        const hash = await bcrypt.hash(newPassword, 10);
+        // token_version + 1 → wylogowanie ze wszystkich urządzeń (reset hasła zwykle
+        // oznacza, że ktoś inny mógł je znać).
+        const hash = await bcrypt.hash(String(newPassword), 10);
         await dbPool.query(
-          'UPDATE accounts SET password_hash = $1, reset_token = null, reset_token_expires = null WHERE id = $2',
-          [hash, userRes.rows[0].id]
+          `UPDATE accounts SET password_hash = $1, reset_token = null, reset_token_expires = null,
+                  token_version = COALESCE(token_version, 0) + 1 WHERE id = $2`,
+          [hash, chk.accountId]
         );
+        codeReset(`reset:${chk.cleanEmail}`);
 
-        writeToLocalLogFile('Reset System', `Hasło zostało pomyślnie zmienione dla: ${cleanEmail}`);
+        writeToLocalLogFile('Reset System', `Hasło zostało pomyślnie zmienione dla: ${chk.cleanEmail} (sesje unieważnione)`);
         return sendJSON(res, 200, { success: true });
       }
 
@@ -915,19 +1231,21 @@ const server = http.createServer(async (req, res) => {
       // DOSTARCZANIE DANYCH DO APLIKACJI MOBILNEJ
       // =========================================================================
       if (pathname === '/api/data' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
 
         const accountsRes = await dbPool.query('SELECT email, push_entries, push_alarms FROM accounts WHERE id = $1', [accountId]);
         if (accountsRes.rows.length === 0) return sendJSON(res, 404, { error: "Account invalid" });
 
-        const appAccountContext = { email: accountsRes.rows[0].email };
+        // serviceEmail: klient musi znać adres serwisu, żeby go zaprosić (przycisk w „Zespole").
+        const appAccountContext = { email: accountsRes.rows[0].email, isServiceAccount: isServiceEmail(accountsRes.rows[0].email),
+                                    serviceEmail: Array.from(SERVICE_ACCOUNTS)[0] || null, serviceShareHours: SERVICE_SHARE_HOURS };
 
         // Widoczne są zarówno urządzenia własne, jak i te udostępnione przez
         // innego właściciela (wielu administratorów na jeden zamek).
         const devicesRes = await dbPool.query(
           `SELECT d.*, (d.account_id = $1) AS is_owner
            FROM devices d
-           WHERE d.account_id = $1 OR d.mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1)
+           WHERE d.account_id = $1 OR d.mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1 AND ${SHARE_ACTIVE})
            ORDER BY d.mac_address ASC`, [accountId]);
         if (devicesRes.rows.length === 0) {
           return sendJSON(res, 200, { auth: true, account: appAccountContext, mode: 'Czuwanie', lock: false, total: 0, users: [], logs: [], devices: [] });
@@ -952,7 +1270,7 @@ const server = http.createServer(async (req, res) => {
         const primaryMac = primaryDevice.mac_address;
 
         const usersRes = await dbPool.query(
-          `SELECT id, holder_name as name, is_active as active, card_uid as uid, hardware_slot_idx,
+          `SELECT id, holder_name as name, is_active as active, hardware_slot_idx,
                   schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes,
                   is_owner_card, license_locked, keep_on_downgrade
            FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC`, [primaryMac]);
@@ -968,7 +1286,8 @@ const server = http.createServer(async (req, res) => {
           idx: row.hardware_slot_idx,   // slot sprzętowy — tylko do synchronizacji z centralką
           name: row.name,
           active: row.active,
-          uid: row.uid,
+          // UID karty celowo NIE trafia do aplikacji: przy kartach dopasowywanych po UID
+          // jego znajomość wystarcza do zrobienia duplikatu (README §7.6).
           schedule_enabled: row.schedule_enabled,
           schedule_days: row.schedule_days,
           schedule_start_minutes: row.schedule_start_minutes,
@@ -1038,7 +1357,11 @@ const server = http.createServer(async (req, res) => {
           users: processedUsersList,
           logs: localizedLogsFeed,
           version: primaryDevice.firmware_version || latestFirmwareVersion,
-          otaPending: otaUpdatePending,
+          otaPending: !!otaPendingDevices[primaryMac],
+          // Zmiany kart/Wi-Fi czekające na odebranie przez centralkę. Aplikacja pokazuje
+          // ostrzeżenie, dopóki > 0 — zablokowana karta NIE jest zablokowana na drzwiach,
+          // zanim centralka nie potwierdzi komendy.
+          pendingCommands: await pendingCommandCount(primaryMac).catch(() => 0),
           pushEntries: accountsRes.rows[0].push_entries !== false,
           pushAlarms: accountsRes.rows[0].push_alarms !== false,
           otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0),
@@ -1046,6 +1369,14 @@ const server = http.createServer(async (req, res) => {
           latestReleaseId: latestFirmwareReleaseId,
           autoLockSeconds: Math.round((primaryDevice.auto_lock_delay_ms || 3000) / 1000),
           isOwner: !!primaryDevice.is_owner,   // wyliczane w SELECT (d.account_id = $1)
+          // Stan sesji serwisowej tego konta na aktywnej centralce (tylko konto serwisowe).
+          serviceSession: (() => {
+            const s = serviceSessions[primaryMac];
+            if (!s || s.accountId !== accountId) return null;
+            if (Date.now() < s.confirmedUntil) return { state: 'confirmed', until: new Date(s.confirmedUntil).toISOString() };
+            if (Date.now() < s.codeUntil) return { state: 'awaiting_code', until: new Date(s.codeUntil).toISOString() };
+            return null;
+          })(),
           keypad_pins: kpPinsRes.rows,
           devices: deviceList,
           activeMac: primaryMac,
@@ -1056,29 +1387,24 @@ const server = http.createServer(async (req, res) => {
       // ZMIANA NAZWY LOKATORA
       // =========================================================================
       if (pathname === '/api/user/rename' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { name, mac: reqMac } = body;
         const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
         const targetMac = dev.rows[0].mac_address;
-        const targetIp = dev.rows[0].last_known_ip;
+        const cleanName = String(name || '').trim().slice(0, 64);
+        if (!cleanName) return sendJSON(res, 400, { error: "Podaj nazwę" });
 
         const card = await resolveCardRow(targetMac, body);
         if (!card) return sendJSON(res, 400, { error: "Nie znaleziono karty" });
 
-        await dbPool.query('UPDATE card_credentials SET holder_name = $1 WHERE id = $2', [name, card.id]);
+        await dbPool.query('UPDATE card_credentials SET holder_name = $1 WHERE id = $2', [cleanName, card.id]);
         writeToLocalLogFile('User Mutation', `Renamed card profile row ID: ${card.id}`);
 
-        // Wyliczamy hasło algorytmicznie dla tego konkretnego MAC urządzenia
-        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
-
-        // Do SPRZĘTU zawsze slot sprzętowy tej karty (nie pozycja w liście!)
-        const syncSuccess = await syncMutationToHardware(
-        targetIp,
-        `/api/rename_user?idx=${cardHwSlot(card, body)}&name=${encodeURIComponent(name)}&pass=${currentDynamicPassword}`
-        );
-        return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
+        // Centralka trzyma nazwę w 16-bajtowym polu — obcinamy po bajtach UTF-8.
+        const queued = await queueCardCommand(targetMac, card.card_uid, 'N', toHex(truncateUtf8(cleanName, 15)));
+        return sendJSON(res, 200, { status: "ok", queued });
       }
 
       // =========================================================================
@@ -1088,7 +1414,7 @@ const server = http.createServer(async (req, res) => {
       // i w bazie nie mógł się rozjechać przy równoległych zmianach.
       // =========================================================================
       if (pathname === '/api/license/keep_selection' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const targetMac = String(body.mac || '').toUpperCase();
         // AKTUALIZACJA CZĘŚCIOWA: brak pola = „nie ruszaj tej kategorii”. Bez tego
         // aplikacja wysyłająca tylko karty kasowałaby wybór PIN-ów (nie zna go, bo
@@ -1134,7 +1460,7 @@ const server = http.createServer(async (req, res) => {
       // Jedna karta i jeden PIN na centralkę; ustawienie nowej zdejmuje flagę z poprzedniej.
       // =========================================================================
       if (pathname === '/api/user/set_owner_card' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { id, mac, type } = body;
         const targetMac = String(mac || '').toUpperCase();
         if (!id || !targetMac) return sendJSON(res, 400, { error: 'Brak id lub mac.' });
@@ -1162,7 +1488,7 @@ const server = http.createServer(async (req, res) => {
       // POST { idx, mac, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes }
       // =========================================================================
       if (pathname === '/api/user/update_schedule' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { idx, mac: reqMac, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes } = body;
         const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
@@ -1182,33 +1508,31 @@ const server = http.createServer(async (req, res) => {
         );
         writeToLocalLogFile('User Mutation', `[Node: ${targetMac}] Schedule updated for card id=${card.id}`);
 
-        // RELAY DO CENTRALKI — bez tego harmonogram żył wyłącznie w bazie i w UI,
-        // a urządzenie i tak otwierało drzwi po samym UID (patrz README §5.7).
-        // Egzekwowanie jest lokalne, więc dane MUSZĄ trafić na urządzenie.
-        const schedPass = getFactoryAdminPassword(targetMac);
-        const schedSync = await syncMutationToHardware(
-          dev.rows[0].last_known_ip,
-          `/api/set_schedule?idx=${cardHwSlot(card, body)}` +
-          `&en=${scheduleEnabled ? 1 : 0}` +
-          `&days=${scheduleDays != null ? scheduleDays : 127}` +
-          `&start=${scheduleStartMinutes != null ? scheduleStartMinutes : 0}` +
-          `&end=${scheduleEndMinutes != null ? scheduleEndMinutes : 1440}` +
-          `&pass=${schedPass}`
-        );
-        return sendJSON(res, 200, { success: true, hardwareSynced: schedSync });
+        // Egzekwowanie harmonogramu jest LOKALNE (README §5.7), więc dane muszą trafić
+        // na urządzenie — kolejką komend, stan po zapisie (nie wartości z żądania).
+        const sch = (await dbPool.query(
+          `SELECT schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
+             FROM card_credentials WHERE id = $1`, [card.id])).rows[0] || {};
+        const clampInt = (v, lo, hi, dflt) => {
+          const n = parseInt(v, 10);
+          return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+        };
+        const queued = await queueCardCommand(targetMac, card.card_uid, 'S',
+          `${sch.schedule_enabled ? 1 : 0}|${clampInt(sch.schedule_days, 0, 127, 127)}|` +
+          `${clampInt(sch.schedule_start_minutes, 0, 1440, 0)}|${clampInt(sch.schedule_end_minutes, 0, 1440, 1440)}`);
+        return sendJSON(res, 200, { success: true, queued });
       }
 
       // =========================================================================
       // BLOKOWANIE / AKTYWACJA KARTY
       // =========================================================================
       if (pathname === '/api/user/toggle_active' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { idx, mac: reqMac } = body;
         const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
         const targetMac = dev.rows[0].mac_address;
-        const targetIp = dev.rows[0].last_known_ip;
 
         const card = await resolveCardRow(targetMac, body);
         if (!card) return sendJSON(res, 400, { error: "Nie znaleziono karty" });
@@ -1217,76 +1541,90 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('UPDATE card_credentials SET is_active = $1 WHERE id = $2', [flippedStateBit, card.id]);
         writeToLocalLogFile('User Mutation', `Toggled access bit flag for ID: ${card.id}`);
 
-        // Autoryzacja fabrycznym hasłem dynamicznym
-        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/toggle_user_active?idx=${cardHwSlot(card, body)}&pass=${currentDynamicPassword}`);
-        return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
+        // Komenda niesie STAN DOCELOWY (a nie „przełącz") — powtórne doręczenie nie
+        // odwróci blokady z powrotem.
+        const queued = await queueCardCommand(targetMac, card.card_uid, 'A', flippedStateBit ? '1' : '0');
+        return sendJSON(res, 200, { status: "ok", queued });
       }
 
       // =========================================================================
       // USUNIĘCIE UŻYTKOWNIKA
       // =========================================================================
       if (pathname === '/api/user/delete' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { idx, mac: reqMac } = body;
         const dev = await resolveTargetDevice(accountId, reqMac);
         if (dev.rows.length === 0) return sendJSON(res, 404, { error: "Hardware missing mapping" });
 
         const targetMac = dev.rows[0].mac_address;
-        const targetIp = dev.rows[0].last_known_ip;
 
         const card = await resolveCardRow(targetMac, body);
         if (!card) return sendJSON(res, 400, { error: "Nie znaleziono karty" });
 
-        const hwSlot = cardHwSlot(card, body);   // wyliczyć PRZED usunięciem wiersza
+        // Komendę kolejkujemy PRZED usunięciem wiersza (potrzebny UID karty).
+        const queued = await queueCardCommand(targetMac, card.card_uid, 'D');
         await dbPool.query('DELETE FROM card_credentials WHERE id = $1', [card.id]);
         writeToLocalLogFile('User Mutation', `Purged key ID context entry: ${card.id}`);
-
-        // Autoryzacja fabrycznym hasłem dynamicznym
-        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/delete_user?idx=${hwSlot}&pass=${currentDynamicPassword}`);
-        return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
+        return sendJSON(res, 200, { status: "ok", queued });
       }
 
       // =========================================================================
       // ZMIANA HASŁA UŻYTKOWNIKA W USTAWIENIACH
       // =========================================================================
       if (pathname === '/api/settings/password' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
-        const { newPassword } = body;
-        if (!newPassword || newPassword.length < 6) {
-        return sendJSON(res, 400, { error: "Nowe hasło musi mieć minimum 6 znaków." });
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const { currentPassword, newPassword } = body;
+        if (!newPassword || String(newPassword).length < MIN_PASSWORD_LENGTH) {
+          return sendJSON(res, 400, { error: `Nowe hasło musi mieć co najmniej ${MIN_PASSWORD_LENGTH} znaków.` });
+        }
+        // Obecne hasło jest wymagane: sam token (np. z odblokowanego na chwilę telefonu)
+        // nie może wystarczyć do przejęcia konta i wycięcia właściciela.
+        if (!currentPassword) return sendJSON(res, 400, { error: 'Podaj obecne hasło.' });
+        const pwWait = checkRateLimit(loginAttempts, `pw:${accountId}`, 10, 15 * 60 * 1000);
+        if (pwWait > 0) return sendJSON(res, 429, { error: 'Zbyt wiele prób. Spróbuj ponownie później.' });
+        const acc = await dbPool.query('SELECT password_hash FROM accounts WHERE id = $1', [accountId]);
+        if (acc.rows.length === 0 || !(await bcrypt.compare(String(currentPassword), acc.rows[0].password_hash))) {
+          writeToLocalLogFile('Auth Rejection', `Zmiana hasła odrzucona — błędne obecne hasło (konto ${accountId}, IP ${cleanIp}).`);
+          return sendJSON(res, 403, { error: 'Obecne hasło jest nieprawidłowe.' });
         }
 
-        // Hashujemy nowe hasło do APLIKACJI i zapisujemy w tabeli accounts
-        const newAccountHash = await bcrypt.hash(newPassword, 10);
-        await dbPool.query('UPDATE accounts SET password_hash = $1 WHERE id = $2', [newAccountHash, accountId]);
-        writeToLocalLogFile('Settings Update', `Użytkownik ID: ${accountId} zmienił swoje hasło logowania do aplikacji.`);
-
-        // Zwracamy czysty sukces - sprzęt (zamek) jest bezpieczny i nienaruszony
-        return sendJSON(res, 200, { success: true });
+        // token_version + 1 → pozostałe sesje (inne telefony) zostają wylogowane;
+        // bieżący klient dostaje nowy token w odpowiedzi.
+        const newAccountHash = await bcrypt.hash(String(newPassword), 10);
+        const upd = await dbPool.query(
+          `UPDATE accounts SET password_hash = $1, token_version = COALESCE(token_version, 0) + 1
+            WHERE id = $2 RETURNING token_version`, [newAccountHash, accountId]);
+        writeToLocalLogFile('Settings Update', `Użytkownik ID: ${accountId} zmienił hasło (pozostałe sesje unieważnione).`);
+        return sendJSON(res, 200, { success: true, token: signToken(accountId, upd.rows[0].token_version) });
       }
 
       // =========================================================================
       // ZMIANA PROFILU WI-FI ZAMKA
       // =========================================================================
       if (pathname === '/api/settings/wifi' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { wifiSSID, wifiPass, mac: reqMac } = body;
-        if (!wifiSSID) return sendJSON(res, 400, { error: "SSID cannot be blank" });
+        const ssidStr = String(wifiSSID || '');
+        const passStr = String(wifiPass || '');
+        if (!ssidStr) return sendJSON(res, 400, { error: "SSID cannot be blank" });
+        // Firmware trzyma SSID i hasło w polach po 32 bajty (31 znaków + zero).
+        if (Buffer.byteLength(ssidStr, 'utf8') > 31 || Buffer.byteLength(passStr, 'utf8') > 31) {
+          return sendJSON(res, 400, { error: 'Nazwa sieci i hasło Wi-Fi mogą mieć maks. 31 znaków.' });
+        }
 
-        // Pobieramy IP oraz adres MAC urządzenia
-        const dev = await resolveTargetDevice(accountId, reqMac);
-        if (dev.rows.length === 0) return sendJSON(res, 444, { error: "No system hardware linked" });
+        // TYLKO WŁAŚCICIEL (README §6.4) — wcześniej resolveTargetDevice wpuszczał też
+        // współadminów, którzy mogli w ten sposób odciąć centralkę od sieci.
+        const owned = await dbPool.query(
+          reqMac
+            ? 'SELECT mac_address FROM devices WHERE account_id = $1 AND mac_address = $2'
+            : 'SELECT mac_address FROM devices WHERE account_id = $1 ORDER BY mac_address ASC LIMIT 1',
+          reqMac ? [accountId, String(reqMac).toUpperCase()] : [accountId]);
+        if (owned.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może zmienić sieć Wi-Fi centralki.' });
 
-        const targetMac = dev.rows[0].mac_address;
-        const targetIp = dev.rows[0].last_known_ip;
-        writeToLocalLogFile('Settings Update', `[Node: ${targetMac}] Relaying fresh Wi-Fi configuration to ${targetIp}.`);
-
-        // Generujemy hasło na podstawie pobranego adresu MAC
-        const currentDynamicPassword = getFactoryAdminPassword(targetMac);
-        const syncSuccess = await syncMutationToHardware(targetIp, `/api/save_settings?s=${encodeURIComponent(wifiSSID)}&p=${encodeURIComponent(wifiPass)}&pass=${currentDynamicPassword}`);
-        return sendJSON(res, 200, { status: "ok", hardwareSynced: syncSuccess });
+        const targetMac = owned.rows[0].mac_address;
+        await queueDeviceCommand(targetMac, `W|${toHex(ssidStr)}|${toHex(passStr)}`);
+        writeToLocalLogFile('Settings Update', `[Node: ${targetMac}] Nowa konfiguracja Wi-Fi zakolejkowana przez właściciela ${accountId}.`);
+        return sendJSON(res, 200, { status: "ok", queued: true });
       }
 
       // =========================================================================
@@ -1305,13 +1643,13 @@ const server = http.createServer(async (req, res) => {
       // Widzi tylko zdarzenia z urządzeń, do których konto ma dostęp (właściciel LUB współadmin).
       // =========================================================================
       if (pathname === '/api/logs/search' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
 
         const params = [accountId];
         let where = `mac_address IN (
           SELECT mac_address FROM devices WHERE account_id = $1
           UNION
-          SELECT mac_address FROM device_shares WHERE account_id = $1
+          SELECT mac_address FROM device_shares WHERE account_id = $1 AND ${SHARE_ACTIVE}
         )`;
 
         if (query.mac) {
@@ -1365,11 +1703,11 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (pathname === '/api/devices/list' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const devicesRes = await dbPool.query(
           `SELECT mac_address, device_name, operational_mode, firmware_version, last_heartbeat, (account_id = $1) AS is_owner
            FROM devices
-           WHERE account_id = $1 OR mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1)
+           WHERE account_id = $1 OR mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $1 AND ${SHARE_ACTIVE})
            ORDER BY mac_address ASC`, [accountId]);
         const devices = devicesRes.rows.map(d => ({
           mac: d.mac_address,
@@ -1387,7 +1725,7 @@ const server = http.createServer(async (req, res) => {
       // Aplikacja pokazuje to na ekranie "Pakiet" i przy dodawaniu kart/PIN-ów.
       // =========================================================================
       if (pathname === '/api/license' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const ent = await getEntitlements(accountId);
         // Zużycie liczymy dla centralek, których to konto jest WŁAŚCICIELEM
         // (bo licencja jest właściciela). Współadmin widzi limity właściciela.
@@ -1397,7 +1735,7 @@ const server = http.createServer(async (req, res) => {
         for (const d of owned.rows) {
           const cc = await dbPool.query('SELECT COUNT(*) FROM card_credentials WHERE mac_address = $1', [d.mac_address]);
           const pc = await dbPool.query('SELECT COUNT(*) FROM keypad_pins WHERE mac_address = $1', [d.mac_address]);
-          const ac = await dbPool.query('SELECT COUNT(*) FROM device_shares WHERE mac_address = $1', [d.mac_address]);
+          const ac = await dbPool.query(`SELECT COUNT(*) FROM device_shares WHERE mac_address = $1 AND is_service = false AND ${SHARE_ACTIVE}`, [d.mac_address]);
           usage.push({
             mac: d.mac_address,
             name: d.device_name || d.mac_address,
@@ -1426,7 +1764,7 @@ const server = http.createServer(async (req, res) => {
       // podwójne użycie i wyścig. Kod normalizujemy (wielkie litery, bez spacji).
       // =========================================================================
       if (pathname === '/api/license/redeem' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         // Normalizacja: wielkie litery, usuwamy wszystko poza [A-Z0-9] (myślniki,
         // spacje) — klient może wpisać z myślnikami albo bez.
         const code = String((body.key || body.code || '')).toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -1461,8 +1799,30 @@ const server = http.createServer(async (req, res) => {
       // =========================================================================
       // ZMIANA NAZWY URZĄDZENIA (np. "Drzwi wejściowe", "Garaż")
       // =========================================================================
+      // =========================================================================
+      // RESET KLUCZA URZĄDZENIA — POST { mac }, tylko właściciel (README §7.2).
+      // Na wypadek wymiany płytki albo gdy klucz przypiął się z innego urządzenia:
+      // kasuje zapamiętany hash, a centralka przypina swój przy najbliższym pollu.
+      // =========================================================================
+      if (pathname === '/api/devices/reset_key' && req.method === 'POST') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const mac = normalizeMac(body.mac);
+        if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
+        // Właściciel — albo serwis z potwierdzoną (na miejscu) sesją serwisową.
+        const svcSess = serviceSessions[mac];
+        const viaService = !!(svcSess && svcSess.accountId === accountId && Date.now() < svcSess.confirmedUntil);
+        const r = await dbPool.query(
+          viaService
+            ? 'UPDATE devices SET device_key_hash = NULL WHERE mac_address = $1 RETURNING mac_address'
+            : 'UPDATE devices SET device_key_hash = NULL WHERE mac_address = $1 AND account_id = $2 RETURNING mac_address',
+          viaService ? [mac] : [mac, accountId]);
+        if (r.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel (lub serwis w potwierdzonej sesji) może zresetować klucz centralki.' });
+        writeToLocalLogFile('Provisioning', `[Node: ${mac}] Klucz urządzenia zresetowany przez ${viaService ? 'SERWIS' : 'właściciela'} ${accountId} (IP ${cleanIp}).`);
+        return sendJSON(res, 200, { status: 'ok' });
+      }
+
       if (pathname === '/api/devices/rename' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { mac, name } = body;
         if (!mac || !name) return sendJSON(res, 400, { error: "Missing mac or name" });
         const result = await dbPool.query(
@@ -1480,7 +1840,7 @@ const server = http.createServer(async (req, res) => {
       // centralki przy najbliższym pollu jako "auto_lock_delay" (w ms).
       // =========================================================================
       if (pathname === '/api/devices/auto_lock' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const mac = String(body.mac || '').toUpperCase();
         const seconds = parseInt(body.seconds, 10);
         if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
@@ -1510,7 +1870,7 @@ const server = http.createServer(async (req, res) => {
       // (nie są pytani o zgodę). Centralki dostają komendę wipe i wracają do trybu setup.
       // =========================================================================
       if (pathname === '/api/account/delete_request' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
 
         const acc = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
         if (acc.rows.length === 0) return sendJSON(res, 404, { error: 'Nie znaleziono konta.' });
@@ -1522,8 +1882,8 @@ const server = http.createServer(async (req, res) => {
           `SELECT COUNT(*) FROM device_shares WHERE mac_address IN (SELECT mac_address FROM devices WHERE account_id = $1)`,
           [accountId]);
 
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        accountDeleteCodes[accountId] = { code, expiresAt: Date.now() + 15 * 60 * 1000 };
+        const code = genCode6();
+        accountDeleteCodes[accountId] = { code, expiresAt: Date.now() + 15 * 60 * 1000, fails: 0 };
 
         const deviceList = owned.rows.length > 0
           ? owned.rows.map(d => `<li>${escapeHtml(d.device_name || d.mac_address)}</li>`).join('')
@@ -1562,12 +1922,13 @@ const server = http.createServer(async (req, res) => {
       // RODO art. 17 — USUNIĘCIE KONTA, KROK 2: potwierdzenie kodem → kasacja.
       // =========================================================================
       if (pathname === '/api/account/delete_confirm' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const code = String(body.code || '').trim();
         if (!code) return sendJSON(res, 400, { error: 'Brak kodu potwierdzającego.' });
 
         const pending = accountDeleteCodes[accountId];
         if (!pending || pending.code !== code || Date.now() > pending.expiresAt) {
+          if (pending && ++pending.fails >= CODE_MAX_ATTEMPTS) delete accountDeleteCodes[accountId];
           return sendJSON(res, 400, { error: 'Kod jest nieprawidłowy lub wygasł.' });
         }
 
@@ -1580,6 +1941,10 @@ const server = http.createServer(async (req, res) => {
 
         // 1) Dane przypięte do centralek właściciela (kolejność: dzieci → rodzic).
         for (const mac of macs) {
+          // Komenda wipe — centralka wyczyści EEPROM+LittleFS przy najbliższym pollu.
+          // Planujemy ją PRZED skasowaniem wiersza (potrzebny hash klucza urządzenia).
+          await scheduleDeviceWipe(mac);
+          await dbPool.query('DELETE FROM device_commands  WHERE mac_address = $1', [mac]).catch(() => {});
           await dbPool.query('DELETE FROM keypad_pins      WHERE mac_address = $1', [mac]);
           await dbPool.query('DELETE FROM card_credentials WHERE mac_address = $1', [mac]);
           await dbPool.query('DELETE FROM system_events    WHERE mac_address = $1', [mac]);
@@ -1587,8 +1952,6 @@ const server = http.createServer(async (req, res) => {
           await dbPool.query('DELETE FROM device_invites   WHERE mac_address = $1', [mac]);
           await dbPool.query('DELETE FROM pin_change_events WHERE mac_address = $1', [mac]).catch(() => {});
           await dbPool.query('DELETE FROM devices          WHERE mac_address = $1', [mac]);
-          // Komenda wipe — centralka wyczyści EEPROM+LittleFS przy najbliższym pollu.
-          deregisterQueues[mac] = Date.now() + 120 * 1000;
         }
 
         // 2) Dostępy tego konta do CUDZYCH centralek (jako współadmin) — też znikają.
@@ -1618,7 +1981,7 @@ const server = http.createServer(async (req, res) => {
       // danych konta w JSON-ie; aplikacja pozwala go zapisać/udostępnić.
       // =========================================================================
       if (pathname === '/api/account/export' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
 
         const acc = await dbPool.query(
           `SELECT email, privacy_policy_accepted_at, license_tier, license_valid_until, email_verified
@@ -1662,7 +2025,7 @@ const server = http.createServer(async (req, res) => {
       // POST { mac } — tylko właściciel. Twarde odłączenie centralki.
       // =========================================================================
       if (pathname === '/api/devices/deregister_request' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const mac = String(body.mac || '').toUpperCase();
         if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
 
@@ -1671,8 +2034,8 @@ const server = http.createServer(async (req, res) => {
            WHERE d.mac_address = $1 AND d.account_id = $2`, [mac, accountId]);
         if (owned.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może odłączyć centralkę.' });
 
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        deregisterCodes[mac] = { code, accountId, expiresAt: Date.now() + 15 * 60 * 1000 };
+        const code = genCode6();
+        deregisterCodes[mac] = { code, accountId, expiresAt: Date.now() + 15 * 60 * 1000, fails: 0 };
 
         const deviceName = owned.rows[0].device_name || mac;
         mailTransport.sendMail({
@@ -1698,17 +2061,21 @@ const server = http.createServer(async (req, res) => {
       // POST { mac, code } — tylko właściciel.
       // =========================================================================
       if (pathname === '/api/devices/deregister_confirm' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const mac = String(body.mac || '').toUpperCase();
         const code = String(body.code || '').trim();
         if (!mac || !code) return sendJSON(res, 400, { error: 'Missing mac or code' });
 
         const entry = deregisterCodes[mac];
         if (!entry || entry.accountId !== accountId || entry.code !== code || Date.now() > entry.expiresAt) {
+          if (entry && entry.accountId === accountId && ++entry.fails >= CODE_MAX_ATTEMPTS) delete deregisterCodes[mac];
           return sendJSON(res, 400, { error: 'Kod nieprawidłowy lub wygasł.' });
         }
         const owned = await dbPool.query('SELECT 1 FROM devices WHERE mac_address = $1 AND account_id = $2', [mac, accountId]);
         if (owned.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może odłączyć centralkę.' });
+
+        // Wipe planujemy PRZED usunięciem wiersza (zapamiętuje hash klucza urządzenia).
+        await scheduleDeviceWipe(mac);
 
         // Usuwamy dane powiązane jawnie (na wypadek braku ON DELETE CASCADE), potem centralkę.
         await dbPool.query('DELETE FROM keypad_pins WHERE mac_address = $1', [mac]).catch(() => {});
@@ -1716,11 +2083,11 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('DELETE FROM system_events WHERE mac_address = $1', [mac]).catch(() => {});
         await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1', [mac]).catch(() => {});
         await dbPool.query('DELETE FROM device_invites WHERE mac_address = $1', [mac]).catch(() => {});
+        await dbPool.query('DELETE FROM device_commands WHERE mac_address = $1', [mac]).catch(() => {});
         await dbPool.query('DELETE FROM devices WHERE mac_address = $1 AND account_id = $2', [mac, accountId]);
 
-        // Komenda wipe dla urządzenia + krótka blokada auto-rejestracji (okno na odebranie
-        // komendy; urządzenie pyta co ~1 s). Krótkie, by nie blokować późniejszego re-prowizjonowania.
-        deregisterQueues[mac] = Date.now() + 120 * 1000;
+        // Komenda wipe (zaplanowana wyżej) + krótka blokada auto-rejestracji: okno na odebranie
+        // komendy (urządzenie pyta co ~1 s). Krótkie, by nie blokować późniejszego re-prowizjonowania.
         delete deregisterCodes[mac];
 
         writeToLocalLogFile('Provisioning', `[Node: ${mac}] Deregistered by owner ${accountId} — device wipe commanded.`);
@@ -1733,7 +2100,7 @@ const server = http.createServer(async (req, res) => {
       // POST { mac, email }
       // =========================================================================
       if (pathname === '/api/devices/invite' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const waitSec = checkRateLimit(inviteAttempts, cleanIp, 10, 60 * 60 * 1000);
         if (waitSec > 0) {
           res.setHeader('Retry-After', String(waitSec));
@@ -1754,19 +2121,27 @@ const server = http.createServer(async (req, res) => {
 
         // Limit administratorów wg pakietu (łącznie z właścicielem). Liczymy
         // istniejących współadminów + oczekujące niewykorzystane zaproszenia + 1.
-        const adEnt = await getEntitlements(accountId);
-        const shCnt = await dbPool.query('SELECT COUNT(*) FROM device_shares WHERE mac_address = $1', [mac.toUpperCase()]);
-        const pendCnt = await dbPool.query(
-          `SELECT COUNT(*) FROM device_invites WHERE mac_address = $1 AND used = false AND expires_at > NOW()`,
-          [mac.toUpperCase()]);
-        const adminTotal = parseInt(shCnt.rows[0].count) + parseInt(pendCnt.rows[0].count) + 1;
-        if (adminTotal >= adEnt.max_admins)
-          return sendJSON(res, 403, {
-            error: `Limit administratorów (${adEnt.max_admins}) osiągnięty w pakiecie ${adEnt.license_tier}. Zwiększ pakiet, aby zaprosić kolejnych.`,
-            limit: adEnt.max_admins, tier: adEnt.license_tier, feature: 'max_admins'
-          });
+        // KONTO SERWISOWE (README §7.15) omija limit administratorów: klient z pełnym
+        // pakietem nie może być zmuszony do usuwania kogoś, żeby na chwilę wpuścić serwis.
+        // Udziały serwisowe i zaproszenia dla serwisu nie są też liczone do limitu.
+        const inviteIsService = isServiceEmail(cleanEmail);
+        if (!inviteIsService) {
+          const adEnt = await getEntitlements(accountId);
+          const shCnt = await dbPool.query(
+            `SELECT COUNT(*) FROM device_shares WHERE mac_address = $1 AND is_service = false AND ${SHARE_ACTIVE}`, [mac.toUpperCase()]);
+          const pendCnt = await dbPool.query(
+            `SELECT COUNT(*) FROM device_invites di WHERE di.mac_address = $1 AND di.used = false AND di.expires_at > NOW()
+                AND NOT (LOWER(di.invited_email) = ANY($2))`,
+            [mac.toUpperCase(), Array.from(SERVICE_ACCOUNTS)]);
+          const adminTotal = parseInt(shCnt.rows[0].count) + parseInt(pendCnt.rows[0].count) + 1;
+          if (adminTotal >= adEnt.max_admins)
+            return sendJSON(res, 403, {
+              error: `Limit administratorów (${adEnt.max_admins}) osiągnięty w pakiecie ${adEnt.license_tier}. Zwiększ pakiet, aby zaprosić kolejnych.`,
+              limit: adEnt.max_admins, tier: adEnt.license_tier, feature: 'max_admins'
+            });
+        }
 
-        const inviteCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const inviteCode = genCode6();
         const inviteToken = crypto.randomBytes(24).toString('hex');   // 48-znakowy token linku
         await dbPool.query(
           `INSERT INTO device_invites (mac_address, invited_email, invite_code, invite_token, invited_by, expires_at)
@@ -1802,17 +2177,20 @@ const server = http.createServer(async (req, res) => {
           if (mailError) writeToLocalLogFile('Błąd serwera SMTP', mailError.message);
         });
 
-        writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Invite sent to ${cleanEmail} by account ${accountId}.`);
-        return sendJSON(res, 200, { status: 'ok' });
+        writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Invite sent to ${cleanEmail} by account ${accountId}${inviteIsService ? ' (SERWIS — poza limitem, wygasa po ' + SERVICE_SHARE_HOURS + ' h)' : ''}.`);
+        return sendJSON(res, 200, { status: 'ok', service: inviteIsService, serviceShareHours: inviteIsService ? SERVICE_SHARE_HOURS : null });
       }
 
       // =========================================================================
       // AKCEPTACJA ZAPROSZENIA — POST { code }, wymaga zalogowania
       // =========================================================================
       if (pathname === '/api/devices/accept_invite' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { code } = body;
         if (!code) return sendJSON(res, 400, { error: 'Podaj kod zaproszenia' });
+        if (checkRateLimit(inviteAttempts, `accept:${accountId}`, 10, 60 * 60 * 1000) > 0) {
+          return sendJSON(res, 429, { error: 'Zbyt wiele prób. Spróbuj ponownie później.' });
+        }
 
         const accRes = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
         if (accRes.rows.length === 0) return sendJSON(res, 404, { error: 'Konto nie istnieje' });
@@ -1830,23 +2208,18 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, 403, { error: 'To zaproszenie zostało wysłane na inny adres e-mail.' });
         }
 
-        await dbPool.query(
-          `INSERT INTO device_shares (mac_address, account_id, invited_by)
-           SELECT $1, $2, invited_by FROM device_invites WHERE id = $3
-           ON CONFLICT (mac_address, account_id) DO NOTHING`,
-          [invite.mac_address, accountId, invite.id]
-        );
+        const grant = await grantShare(invite.mac_address, accountId, invite.id, myEmail);
         await dbPool.query('UPDATE device_invites SET used = true WHERE id = $1', [invite.id]);
 
-        writeToLocalLogFile('Provisioning', `[Node: ${invite.mac_address}] Account ${accountId} accepted invite, now co-admin.`);
-        return sendJSON(res, 200, { status: 'ok', mac: invite.mac_address });
+        writeToLocalLogFile('Provisioning', `[Node: ${invite.mac_address}] Account ${accountId} accepted invite, now ${grant.service ? 'SERVICE co-admin (expires ' + grant.expiresAt + ')' : 'co-admin'}.`);
+        return sendJSON(res, 200, { status: 'ok', mac: invite.mac_address, service: grant.service, expiresAt: grant.expiresAt });
       }
 
       // =========================================================================
       // LISTA WSPÓŁADMINISTRATORÓW — GET ?mac=X, tylko właściciel
       // =========================================================================
       if (pathname === '/api/devices/shared_users' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const mac = (query.mac || '').toUpperCase();
         if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
 
@@ -1854,18 +2227,21 @@ const server = http.createServer(async (req, res) => {
         if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel widzi listę administratorów.' });
 
         const sharesRes = await dbPool.query(
-          `SELECT ds.account_id, a.email, ds.created_at
+          `SELECT ds.account_id, a.email, ds.created_at, ds.is_service, ds.expires_at
            FROM device_shares ds JOIN accounts a ON a.id = ds.account_id
-           WHERE ds.mac_address = $1 ORDER BY ds.created_at ASC`, [mac]
+           WHERE ds.mac_address = $1 AND ${SHARE_ACTIVE} ORDER BY ds.created_at ASC`, [mac]
         );
-        return sendJSON(res, 200, { admins: sharesRes.rows.map(r => ({ accountId: r.account_id, email: r.email, since: r.created_at })) });
+        return sendJSON(res, 200, { admins: sharesRes.rows.map(r => ({
+          accountId: r.account_id, email: r.email, since: r.created_at,
+          service: !!r.is_service, expiresAt: r.expires_at || null,
+        })) });
       }
 
       // =========================================================================
       // ODEBRANIE DOSTĘPU WSPÓŁADMINISTRATOROWI — POST { mac, accountId }, tylko właściciel
       // =========================================================================
       if (pathname === '/api/devices/revoke_share' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { mac, accountId: targetAccountId } = body;
         if (!mac || !targetAccountId) return sendJSON(res, 400, { error: 'Missing mac or accountId' });
 
@@ -1875,6 +2251,156 @@ const server = http.createServer(async (req, res) => {
         await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1 AND account_id = $2', [mac.toUpperCase(), targetAccountId]);
         writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Access revoked for account ${targetAccountId} by owner ${accountId}.`);
         return sendJSON(res, 200, { status: 'ok' });
+      }
+
+      // =========================================================================
+      // WSPÓŁADMIN ODŁĄCZA SIĘ SAM — POST { mac }. Serwis sprząta po sobie bez
+      // czekania na właściciela (README §7.15); działa też dla zwykłego współadmina.
+      // =========================================================================
+      if (pathname === '/api/devices/leave' && req.method === 'POST') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const mac = normalizeMac(body.mac);
+        if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
+        const r = await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1 AND account_id = $2 RETURNING is_service', [mac, accountId]);
+        if (r.rows.length === 0) return sendJSON(res, 404, { error: 'Nie masz udziału w tej centralce.' });
+        if (serviceSessions[mac] && serviceSessions[mac].accountId === accountId) delete serviceSessions[mac];
+        writeToLocalLogFile('Provisioning', `[Node: ${mac}] Account ${accountId} left the device${r.rows[0].is_service ? ' (service)' : ''}.`);
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+          [mac, r.rows[0].is_service ? 'Serwis zakończył dostęp do centralki' : 'Współadministrator odłączył się od centralki', 'provisioning']).catch(() => {});
+        return sendJSON(res, 200, { status: 'ok' });
+      }
+
+      // =========================================================================
+      // TRYB SERWISOWY (README §7.15) — tylko konta z SERVICE_ACCOUNTS, tylko na
+      // centralce, którą klient im udostępnił, a rozszerzone akcje dopiero po
+      // przepisaniu kodu z OLED centralki (dowód obecności fizycznej).
+      // =========================================================================
+      if (pathname === '/api/service/start' && req.method === 'POST') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const svc = await requireServiceShare(accountId, body.mac, res); if (!svc) return;
+        const code = genCode6();
+        serviceSessions[svc.mac] = { accountId, code, codeUntil: Date.now() + 15 * 60 * 1000, confirmedUntil: 0, fails: 0 };
+        await queueDeviceCommand(svc.mac, `V|${code}`);          // centralka pokaże kod na OLED
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+          [svc.mac, 'Rozpoczęto sesję serwisową — oczekiwanie na potwierdzenie kodem z centralki', 'provisioning']).catch(() => {});
+        notifyOwner(svc.mac, '🛠️ Serwis centralki', `Serwisant rozpoczął sesję na centralce ${svc.deviceName}. Potwierdzenie wymaga kodu z jej ekranu.`);
+        writeToLocalLogFile('Service', `[Node: ${svc.mac}] Service session started by ${accountId} (IP ${cleanIp}); code sent to device.`);
+        return sendJSON(res, 200, { status: 'code_sent', codeValidSeconds: 900 });
+      }
+
+      if (pathname === '/api/service/confirm' && req.method === 'POST') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const svc = await requireServiceShare(accountId, body.mac, res); if (!svc) return;
+        const s = serviceSessions[svc.mac];
+        const code = String(body.code || '').trim();
+        if (!s || s.accountId !== accountId || Date.now() > s.codeUntil) {
+          return sendJSON(res, 400, { error: 'Brak aktywnego kodu — rozpocznij sesję ponownie.' });
+        }
+        if (code !== s.code) {
+          if (++s.fails >= CODE_MAX_ATTEMPTS) {
+            delete serviceSessions[svc.mac];
+            writeToLocalLogFile('Auth RateLimit', `[Node: ${svc.mac}] Service code burned after ${CODE_MAX_ATTEMPTS} wrong attempts (account ${accountId}).`);
+            return sendJSON(res, 429, { error: 'Za dużo błędnych prób — kod unieważniony. Rozpocznij sesję ponownie.' });
+          }
+          return sendJSON(res, 400, { error: 'Kod nieprawidłowy.' });
+        }
+        s.confirmedUntil = Date.now() + 60 * 60 * 1000;
+        s.code = null;
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+          [svc.mac, 'Sesja serwisowa potwierdzona kodem z centralki (obecność na miejscu)', 'provisioning']).catch(() => {});
+        writeToLocalLogFile('Service', `[Node: ${svc.mac}] Service session CONFIRMED on-site by ${accountId}.`);
+        return sendJSON(res, 200, { status: 'confirmed', validSeconds: 3600 });
+      }
+
+      if (pathname === '/api/service/end' && req.method === 'POST') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const mac = normalizeMac(body.mac);
+        if (mac && serviceSessions[mac] && serviceSessions[mac].accountId === accountId) {
+          delete serviceSessions[mac];
+          await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+            [mac, 'Sesja serwisowa zakończona', 'provisioning']).catch(() => {});
+        }
+        return sendJSON(res, 200, { status: 'ok' });
+      }
+
+      // Akcje serwisowe — POST { mac, action }: diagnostics (pełny raport z listą kart),
+      // relay_test (raport + krótkie wysterowanie przekaźnika — OTWIERA DRZWI), restart.
+      if (pathname === '/api/service/command' && req.method === 'POST') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const svc = await requireServiceSession(accountId, body.mac, res); if (!svc) return;
+        const action = String(body.action || '');
+        const cmd = { diagnostics: 'G|1', relay_test: 'G|2', restart: 'R' }[action];
+        if (!cmd) return sendJSON(res, 400, { error: 'Nieznana akcja.' });
+        await queueDeviceCommand(svc.mac, cmd);
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+          [svc.mac, `Serwis: ${{ diagnostics: 'pobranie diagnostyki', relay_test: 'test przekaźnika', restart: 'restart centralki' }[action]}`, 'provisioning']).catch(() => {});
+        writeToLocalLogFile('Service', `[Node: ${svc.mac}] Service action '${action}' queued by ${accountId}.`);
+        return sendJSON(res, 200, { status: 'queued' });
+      }
+
+      // Ostatni raport diagnostyczny centralki — pełny (z kartami) + porównanie kart z bazą.
+      if (pathname === '/api/service/report' && req.method === 'GET') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const svc = await requireServiceSession(accountId, query.mac, res); if (!svc) return;
+        const rep = await latestDeviceReport(svc.mac);
+        if (!rep) return sendJSON(res, 200, { report: null });
+        const payload = rep.payload;
+        const dbCards = (await dbPool.query(
+          'SELECT id, holder_name, card_uid, is_active FROM card_credentials WHERE mac_address = $1 ORDER BY id ASC', [svc.mac])).rows;
+        const devCards = Array.isArray(payload.cards) ? payload.cards : [];
+        const devByUid = new Map(devCards.map(c => [String(c.u || '').toUpperCase(), c]));
+        const dbByUid = new Map(dbCards.map(c => [uidToHex8(c.card_uid), c]));
+        const comparison = {
+          onlyOnDevice: devCards.filter(c => !dbByUid.has(String(c.u || '').toUpperCase())).map(c => ({ name: c.n, uidTail: String(c.u || '').slice(-4), active: !!c.a })),
+          onlyInDb: dbCards.filter(c => !devByUid.has(uidToHex8(c.card_uid))).map(c => ({ id: c.id, name: c.holder_name, uidTail: uidToHex8(c.card_uid).slice(-4), active: !!c.is_active })),
+          activeMismatch: dbCards.filter(c => devByUid.has(uidToHex8(c.card_uid)) && !!devByUid.get(uidToHex8(c.card_uid)).a !== !!c.is_active)
+            .map(c => ({ id: c.id, name: c.holder_name, dbActive: !!c.is_active, deviceActive: !!devByUid.get(uidToHex8(c.card_uid)).a })),
+          deviceCount: devCards.length, dbCount: dbCards.length,
+        };
+        return sendJSON(res, 200, {
+          report: { at: rep.created_at, kind: rep.kind, raw: payload, checks: evaluateReport(payload), comparison,
+                    pendingCommands: await pendingCommandCount(svc.mac).catch(() => 0) },
+        });
+      }
+
+      // =========================================================================
+      // SELF-TEST DLA KLIENTA — właściciel lub współadmin. Tylko odczyt: BEZ testu
+      // przekaźnika (ten otwiera drzwi) i BEZ listy kart w odpowiedzi. Raport prostym
+      // językiem + zalecenie serwisu, gdy któryś komponent zgłasza problem.
+      // =========================================================================
+      if (pathname === '/api/devices/selftest' && req.method === 'POST') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const dev = await resolveTargetDevice(accountId, body.mac, 'mac_address');
+        if (dev.rows.length === 0) return sendJSON(res, 403, { error: 'Brak dostępu do tej centralki.' });
+        const mac = dev.rows[0].mac_address;
+        if (checkRateLimit(selftestAttempts, mac, 1, 60 * 1000) > 0) {
+          return sendJSON(res, 429, { error: 'Self-test można uruchamiać raz na minutę.' });
+        }
+        await queueDeviceCommand(mac, 'G|0');
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+          [mac, 'Uruchomiono self-test centralki', 'provisioning']).catch(() => {});
+        return sendJSON(res, 200, { status: 'queued', requestedAt: new Date().toISOString() });
+      }
+
+      if (pathname === '/api/devices/selftest' && req.method === 'GET') {
+        const accountId = await requireAuth(req, res); if (!accountId) return;
+        const dev = await resolveTargetDevice(accountId, query.mac, 'mac_address');
+        if (dev.rows.length === 0) return sendJSON(res, 403, { error: 'Brak dostępu do tej centralki.' });
+        const rep = await latestDeviceReport(dev.rows[0].mac_address);
+        if (!rep) return sendJSON(res, 200, { report: null });
+        const checks = evaluateReport(rep.payload);
+        const failed = checks.filter(c => c.ok === false);
+        return sendJSON(res, 200, {
+          report: {
+            at: rep.created_at,
+            checks,
+            firmware: rep.payload.fw || null,
+            summary: failed.length === 0
+              ? 'Wszystkie komponenty centralki działają prawidłowo.'
+              : `Wykryto problem: ${failed.map(c => c.label).join(', ')}. Zalecany kontakt z serwisem.`,
+            serviceRecommended: failed.length > 0,
+          },
+        });
       }
 
       // =========================================================================
@@ -1911,7 +2437,7 @@ const server = http.createServer(async (req, res) => {
         const { token, password, privacy_policy_accepted } = body;
         if (!token || !password) return sendJSON(res, 400, { error: 'Brak danych.' });
         if (!privacy_policy_accepted) return sendJSON(res, 400, { error: 'Wymagana akceptacja polityki prywatności.' });
-        if (String(password).length < 6) return sendJSON(res, 400, { error: 'Hasło musi mieć co najmniej 6 znaków.' });
+        if (String(password).length < MIN_PASSWORD_LENGTH) return sendJSON(res, 400, { error: `Hasło musi mieć co najmniej ${MIN_PASSWORD_LENGTH} znaków.` });
 
         try {
           const inv = await dbPool.query(
@@ -1936,11 +2462,7 @@ const server = http.createServer(async (req, res) => {
             targetAccountId = insAcc.rows[0].id;
           }
 
-          await dbPool.query(
-            `INSERT INTO device_shares (mac_address, account_id, invited_by)
-             SELECT $1, $2, invited_by FROM device_invites WHERE id = $3
-             ON CONFLICT (mac_address, account_id) DO NOTHING`,
-            [invite.mac_address, targetAccountId, invite.id]);
+          await grantShare(invite.mac_address, targetAccountId, invite.id, email);
           await dbPool.query('UPDATE device_invites SET used = true WHERE id = $1', [invite.id]);
 
           writeToLocalLogFile('Provisioning',
@@ -1953,13 +2475,15 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (pathname === '/api/unlock' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const devRes = await resolveTargetDevice(accountId, query.mac, 'mac_address');
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
 
+          // TYLKO ta centralka. Wcześniej ustawiano też unlockQueues['00:00:00:00:00:00'],
+          // które sprawdzał poll KAŻDEJ centralki — zdalne otwarcie u jednego klienta
+          // otwierało drzwi pierwszego innego klienta, który odpytał serwer w ciągu 8 s.
           unlockQueues[targetMac] = true;
-          unlockQueues['00:00:00:00:00:00'] = true;
 
           // 🌟 Zapisujemy TYLKO czas zgłoszenia komendy. Realny stan rygla
           // (`actualLockStates`) zostanie zaktualizowany wyłącznie wtedy, gdy
@@ -1986,7 +2510,6 @@ const server = http.createServer(async (req, res) => {
           // nie powinna zostać aktywna w nieskończoność.
           setTimeout(() => {
             unlockQueues[targetMac] = false;
-            unlockQueues['00:00:00:00:00:00'] = false;
           }, 8000);
         }
         return sendJSON(res, 200, { status: "ok" });
@@ -1996,7 +2519,7 @@ const server = http.createServer(async (req, res) => {
       // WŁĄCZENIE TRYBU UCZENIA CZYTNIKA RFID
       // =========================================================================
       if (pathname === '/api/toggle_learn' && req.method === 'GET') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const devRes = await resolveTargetDevice(accountId, query.mac, 'mac_address, operational_mode');
         if (devRes.rows.length > 0) {
           const targetMac = devRes.rows[0].mac_address;
@@ -2015,7 +2538,10 @@ const server = http.createServer(async (req, res) => {
           }
           await dbPool.query('UPDATE devices SET operational_mode = $1 WHERE mac_address = $2', [nextMode, targetMac]);
           if (nextMode === 'Uczenie') {
-            learningQueues[targetMac] = query.username ? decodeURIComponent(query.username) : 'Nowy Użytkownik';
+            // url.parse już zdekodował parametr (ponowny decodeURIComponent rzucał na '%').
+            // Bez cudzysłowów i ukośników — firmware wycina nazwę z odpowiedzi prostym parserem.
+            const learnName = truncateUtf8(String(query.username || '').replace(/["\\\u0000-\u001f]/g, '').trim(), 15);
+            learningQueues[targetMac] = learnName || 'Nowy Użytkownik';
           } else {
             delete learningQueues[targetMac];
           }
@@ -2028,8 +2554,12 @@ const server = http.createServer(async (req, res) => {
       // LOGOWANIE NACIŚNIĘCIA FIZYCZNEGO PRZYCISKU
       // =========================================================================
       if (pathname === '/api/hardware/log_button' && req.method === 'GET') {
-        const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
-        const targetMac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
+        const btnAuth = await authenticateDevice(req, query.mac);
+        if (!btnAuth.ok) {
+          logDeviceAuthFailure(btnAuth, query.mac, pathname, cleanIp);
+          return sendJSON(res, 401, { error: 'device_auth_failed' });
+        }
+        const targetMac = btnAuth.mac;
 
         await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [targetMac, 'Naciśnięto przycisk fizyczny', 'entries']);
         writeToLocalLogFile('Hardware Handshake', `[Node: ${targetMac}] Local physical click recorded quietly.`);
@@ -2041,17 +2571,15 @@ const server = http.createServer(async (req, res) => {
 
       //  UPDATE -- OTA CHECK
       if (pathname === '/api/hardware/log' && req.method === 'GET') {
-        const msg = String(query.msg || '').trim();
-        const mac = String(query.mac || '00:00:00:00:00:00').toUpperCase();
-        let eventMac = mac;
-        if (mac.includes(':')) {
-          const directDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1 LIMIT 1', [mac]).catch(() => ({ rows: [] }));
-          if (directDev.rows.length === 0) {
-            const reversedMac = mac.split(':').reverse().join(':');
-            const revDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1 LIMIT 1', [reversedMac]).catch(() => ({ rows: [] }));
-            if (revDev.rows.length > 0) eventMac = reversedMac;
-          }
+        // Dziennik widoczny w aplikacji — przyjmujemy wpisy wyłącznie od uwierzytelnionej
+        // centralki (wcześniej każdy znający MAC mógł dopisać dowolny tekst), z limitem długości.
+        const logAuth = await authenticateDevice(req, query.mac);
+        if (!logAuth.ok) {
+          logDeviceAuthFailure(logAuth, query.mac, pathname, cleanIp);
+          return sendJSON(res, 401, { error: 'device_auth_failed' });
         }
+        const msg = String(query.msg || '').trim().slice(0, 500);
+        const eventMac = logAuth.mac;
         // Pełny, techniczny komunikat (rozmiar pliku, nagłówki, transmisja blokowa
         // itd.) zawsze trafia do pliku logów na dysku — do debugowania.
         writeToLocalLogFile('Hardware Remote Log', `[Node: ${eventMac}] ${msg}`);
@@ -2091,296 +2619,155 @@ const server = http.createServer(async (req, res) => {
       // UPDATE LOGIC -- CHECK NEW PACKAGES
 
       if (pathname === '/api/firmware/version' && req.method === 'GET') {
-    const logFile = '/var/log/smartlock/smartlock_system.log';
-
-    const forceLog = (msg) => {
-        try {
-            fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG GITHUB] ${msg}\n`);
-        } catch (e) {}
-    };
-
-    forceLog("Inicjalizacja bezpiecznego zapytania do GitHub API...");
-
-    const options = {
-        hostname: 'api.github.com',
-        path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
-        family: 4,
-        headers: {
-            'User-Agent': 'NodeJS-SmartLock-Server',
-            'Authorization': `token ${GITHUB_PAT}`
-        }
-    };
-
-    const githubReq = https.get(options, (githubRes) => {
-        let data = '';
-        forceLog(`Odebrano odpowiedź z GitHuba. Kod statusu: ${githubRes.statusCode}`);
-
-        githubRes.on('data', (chunk) => data += chunk);
-        githubRes.on('end', () => {
-            try {
-                const release = JSON.parse(data);
-
-                if (githubRes.statusCode !== 200) {
-                    forceLog(`GitHub odrzucił autoryzację. Powód: ${release.message}`);
-                    if (!res.headersSent) {
-                        res.writeHead(githubRes.statusCode, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: release.message }));
-                    }
-                    return;
-                }
-
-                latestFirmwareVersion = release.tag_name;
-                latestFirmwareReleaseId = release.id;
-                forceLog(`Sukces! Najnowsza wersja na GitHubie to: ${latestFirmwareVersion}`);
-
-                // Wysyłamy odpowiedź do aplikacji tylko, jeśli wątek główny jej nie uprzedził
-                if (!res.headersSent) {
-                  res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({
-                    latestVersion: latestFirmwareVersion,
-                    releaseId: latestFirmwareReleaseId  // ADD THIS
-                  }));
-                }
-            } catch (e) {
-                forceLog(`Błąd parsowania odpowiedzi JSON z GitHuba: ${e.message}`);
-                if (!res.headersSent) {
-                    res.writeHead(500, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: "Blad parsowania" }));
-                }
+        // Publiczne, ale z pamięcią podręczną: wcześniej KAŻDE wywołanie szło do GitHuba
+        // z tokenem, więc zalewając ten adres dało się wyczerpać limit API i zablokować OTA.
+        const fresh = firmwareVersionCache.value && (Date.now() - firmwareVersionCache.at) < 5 * 60 * 1000;
+        if (!fresh) {
+          try {
+            if (!firmwareVersionCache.inflight) {
+              firmwareVersionCache.inflight = githubJson(`/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`)
+                .finally(() => { firmwareVersionCache.inflight = null; });
             }
-        });
-    });
-
-
-    githubReq.on('error', (err) => {
-        forceLog(`Krytyczny błąd sieciowy połączenia HTTPS: ${err.message}`);
-        if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
+            const release = await firmwareVersionCache.inflight;
+            latestFirmwareVersion = release.tag_name;
+            latestFirmwareReleaseId = release.id;
+            firmwareVersionCache.value = { latestVersion: release.tag_name, releaseId: release.id };
+            firmwareVersionCache.at = Date.now();
+          } catch (e) {
+            writeToLocalLogFile('DEBUG GITHUB', `Sprawdzenie wersji nieudane: ${e.message}`);
+            if (!firmwareVersionCache.value) return sendJSON(res, 502, { error: 'Nie udało się sprawdzić wersji oprogramowania.' });
+          }
         }
-    });
-    return;
-}
+        return sendJSON(res, 200, firmwareVersionCache.value);
+      }
 
     // UPDATE LOGIC -- GET NEW PACKAGE
 
+    // Wymaga zalogowania (wcześniej każdy mógł jednym żądaniem wymusić aktualizację
+    // WSZYSTKICH centralek) i uzbraja OTA tylko dla centralek, do których konto ma dostęp.
+    // Wydanie MUSI mieć podpis ECDSA (<plik>.bin.sig) — bezpieczny firmware odrzuca obraz
+    // bez poprawnego podpisu (README §7.5), więc niepodpisanego w ogóle nie rozsyłamy.
     if (pathname === '/api/ota/push' && (req.method === 'POST' || req.method === 'GET')) {
+      const accountId = await requireAuth(req, res); if (!accountId) return;
       const logFile = '/var/log/smartlock/smartlock_system.log';
       const forceLog = (msg) => {
         try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG OTA PUSH] ${msg}\n`); } catch (e) {}
       };
 
-      forceLog("Inicjalizacja żądania OTA PUSH z aplikacji mobilnej...");
+      const wantedMac = normalizeMac(body.mac || query.mac);
+      const targets = await dbPool.query(
+        `SELECT d.mac_address FROM devices d WHERE ${DEVICE_ACCESS_CONDITION}` + (wantedMac ? ' AND d.mac_address = $2' : ''),
+        wantedMac ? [accountId, wantedMac] : [accountId]);
+      if (targets.rows.length === 0) return sendJSON(res, 404, { error: 'Brak centralki do aktualizacji.' });
+      const targetMacs = targets.rows.map(r => r.mac_address);
 
-      const options = {
-        hostname: 'api.github.com',
-        path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`,
-        family: 4,
-        timeout: 8000,
-        headers: {
-          'User-Agent': 'NodeJS-SmartLock-Server',
-          'Authorization': `token ${GITHUB_PAT}`
+      try {
+        forceLog(`Żądanie OTA od konta ${accountId} dla: ${targetMacs.join(', ')}`);
+        const release = await githubJson(`/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest`);
+        const assets = release.assets || [];
+        const binAsset = assets.find(a => a.name.endsWith('.bin') && !a.name.includes('merged'));
+        if (!binAsset) return sendJSON(res, 404, { error: 'Brak właściwego pliku .bin w wydaniu.' });
+        const sigAsset = assets.find(a => a.name === binAsset.name + '.sig');
+        if (!sigAsset) {
+          forceLog(`Wydanie ${release.tag_name} nie ma podpisu ${binAsset.name}.sig — OTA wstrzymana.`);
+          return sendJSON(res, 409, { error: 'Najnowsze wydanie nie jest podpisane — aktualizacja wstrzymana.' });
         }
-      };
 
-      const githubReq = https.get(options, (githubRes) => {
-        let data = '';
-        githubRes.on('data', (chunk) => data += chunk);
-        githubRes.on('end', () => {
-          try {
-            const release = JSON.parse(data);
+        const safeName = path.basename(binAsset.name);
+        const binPath = path.join(updatesDir, safeName);
+        const sigPath = binPath + '.sig';
+        if (!fs.existsSync(updatesDir)) fs.mkdirSync(updatesDir, { recursive: true });
+        if (!(fs.existsSync(binPath) && fs.statSync(binPath).size > 0)) {
+          forceLog(`Pobieram ${safeName}...`);
+          await downloadGithubAsset(binAsset.id, binPath);
+        }
+        if (!(fs.existsSync(sigPath) && fs.statSync(sigPath).size > 0)) {
+          await downloadGithubAsset(sigAsset.id, sigPath);
+        }
 
-            if (githubRes.statusCode !== 200) {
-              forceLog(`GitHub odrzucił autoryzację: ${release.message}`);
-              return sendJSON(res, githubRes.statusCode, { error: release.message });
-            }
-
-            // Szukamy pliku .bin, pomijając ewentualne pozostałości merged
-            const binAsset = release.assets.find(asset => asset.name.endsWith('.bin') && !asset.name.includes('merged'));
-            if (!binAsset) {
-              forceLog("Krytyczny błąd: Brak poprawnego pliku .bin w wydaniu GitHub!");
-              return sendJSON(res, 404, { error: "Brak właściwego pliku .bin" });
-            }
-
-            const targetFileName = binAsset.name;
-            const targetFilePath = path.join(updatesDir, targetFileName);
-
-            if (fs.existsSync(targetFilePath) && fs.statSync(targetFilePath).size > 0) {
-              forceLog(`[CACHE HIT] Plik ${targetFileName} jest już na dysku Proxmox.`);
-              latestFirmwareFile = targetFileName;
-              otaUpdatePending = true;
-              return sendJSON(res, 200, { success: true, cached: true });
-            }
-
-            forceLog(`Rozpoczynam pobieranie paczki z GitHuba: ${targetFileName}...`);
-
-            const downloadOptions = {
-              hostname: 'api.github.com',
-              path: `/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/assets/${binAsset.id}`,
-              family: 4,
-              headers: {
-                'User-Agent': 'NodeJS-SmartLock-Server',
-                'Authorization': `token ${GITHUB_PAT}`,
-                'Accept': 'application/octet-stream'
-              }
-            };
-
-            const fileStream = fs.createWriteStream(targetFilePath);
-
-            // Rekurencyjna funkcja radząca sobie z przekierowaniami 302 (GitHub -> S3)
-            const executeDownloadPipeline = (downloadUrl) => {
-
-              // 1. Definiujemy osobną funkcję zwrotną (callback), by kod był czytelny
-              const callback = (fileRes) => {
-                if (fileRes.statusCode === 302 || fileRes.statusCode === 301) {
-                  // Wywołanie rekurencyjne dla nowego adresu URL z nagłówka location
-                  executeDownloadPipeline(fileRes.headers.location);
-                } else if (fileRes.statusCode === 200) {
-                  fileRes.pipe(fileStream);
-                  fileStream.on('finish', () => {
-                    fileStream.close();
-                    latestFirmwareFile = targetFileName;
-                    otaUpdatePending = true;
-                    forceLog(`Sukces! Nowy soft ${targetFileName} pobrany pomyślnie.`);
-                    sendJSON(res, 200, { success: true, cached: false });
-                  });
-                } else {
-                  fileStream.close();
-                  try { fs.unlinkSync(targetFilePath); } catch(e) {}
-                  sendJSON(res, 500, { error: `S3 Server returned status ${fileRes.statusCode}` });
-                }
-              };
-
-              // 2. Zamieniamy wszystko na stały obiekt opcji, by uniknąć błędu "listener"
-              let finalOptions = {};
-              if (typeof downloadUrl === 'string') {
-                const urlObj = url.parse(downloadUrl);
-                finalOptions = {
-                  hostname: urlObj.hostname,
-                  path: urlObj.path,
-                  port: urlObj.port,
-                  protocol: urlObj.protocol,
-                  family: 4,
-                  headers: { 'User-Agent': 'NodeJS-SmartLock-Server' }
-                };
-              } else {
-                finalOptions = { ...downloadUrl, family: 4 };
-              }
-
-              // 3. Wywołujemy żądanie przesyłając ZAWSZE tylko 2 argumenty: (Object, Function)
-              const req = https.get(finalOptions, callback);
-
-              req.on('error', (err) => {
-                fileStream.close();
-                try { fs.unlinkSync(targetFilePath); } catch(e) {}
-                forceLog(`Błąd pobierania strumienia: ${err.message}`);
-                sendJSON(res, 500, { error: err.message });
-              });
-            };
-
-            // Uruchomienie bezpiecznego potoku pobierania
-            executeDownloadPipeline(downloadOptions);
-
-          } catch (e) {
-            forceLog(`Błąd krytyczny parsowania: ${e.message}`);
-            sendJSON(res, 500, { error: e.message });
-          }
-        });
-      });
-
-      githubReq.on('error', (err) => {
-        forceLog(`Błąd połączenia z GitHub API: ${err.message}`);
-        sendJSON(res, 504, { error: "Timeout połączenia z GitHub" });
-      });
-      return;
+        latestFirmwareFile = safeName;
+        latestFirmwareVersion = release.tag_name;
+        latestFirmwareReleaseId = release.id;
+        for (const m of targetMacs) otaPendingDevices[m] = Date.now();
+        forceLog(`OTA uzbrojona: ${safeName} (release ${release.id}) dla ${targetMacs.length} centralek.`);
+        return sendJSON(res, 200, { success: true, devices: targetMacs.length });
+      } catch (e) {
+        forceLog(`Błąd przygotowania OTA: ${e.message}`);
+        return sendJSON(res, 502, { error: 'Nie udało się pobrać aktualizacji z GitHub.' });
+      }
     }
       // Return .bin file
 
       if (pathname === '/api/lock/download-firmware' && req.method === 'GET') {
-    const logFile = '/var/log/smartlock/smartlock_system.log';
-    const forceLog = (msg) => {
-        try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
-    };
+        const logFile = '/var/log/smartlock/smartlock_system.log';
+        const forceLog = (msg) => {
+          try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG LOCK DOWNLOAD] ${msg}\n`); } catch (e) {}
+        };
 
-    // 🌟 Identyfikujemy urządzenie. Wcześniej ten handler odwoływał się do
-    // niezadeklarowanej zmiennej "mac", co rzucało ReferenceError DOKŁADNIE
-    // po wysłaniu nagłówków 200 - urządzenie dostawało Content-Length, ale
-    // nigdy nie dostawało body, i wyrzucało timeout po 10s. Cała ścieżka
-    // "pull" OTA była przez to całkowicie niesprawna.
-    let mac = query.mac ? query.mac.toUpperCase() : null;
-    if (!mac) {
-      const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
-      mac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
-    }
+        // Obraz firmware dostaje wyłącznie uwierzytelniona centralka z uzbrojoną OTA
+        // (wcześniej plik mógł pobrać każdy — łącznie z wszytymi w niego sekretami).
+        const dlAuth = await authenticateDevice(req, query.mac);
+        if (!dlAuth.ok) {
+          logDeviceAuthFailure(dlAuth, query.mac, pathname, cleanIp);
+          res.writeHead(401, { 'Content-Type': 'text/plain' });
+          return res.end('device auth failed');
+        }
+        const mac = dlAuth.mac;
+        if (!latestFirmwareFile || !otaPendingDevices[mac]) {
+          forceLog(`Zamek [${mac}] chciał pobrać firmware, ale nie ma dla niego uzbrojonej aktualizacji.`);
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          return res.end("Brak aktywnej aktualizacji dla tej centralki.");
+        }
 
-    if (!latestFirmwareFile) {
-        forceLog("Zamek próbował pobrać soft, ale brak zdefiniowanego pliku w pamięci serwera.");
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        return res.end("Brak aktywnego pliku aktualizacji.");
-    }
+        const filePath = path.join(updatesDir, latestFirmwareFile);
+        const sigPath = filePath + '.sig';
+        if (!fs.existsSync(filePath) || !fs.existsSync(sigPath)) {
+          forceLog(`Krytyczny błąd: brak ${latestFirmwareFile} lub jego podpisu na dysku serwera!`);
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          return res.end("Plik nie istnieje na dysku.");
+        }
 
-    const filePath = path.join(updatesDir, latestFirmwareFile);
-
-    if (fs.existsSync(filePath)) {
         const fileSize = fs.statSync(filePath).size;
-        forceLog(`Zamek [${mac}] podłączył się. Rozpoczynam strumieniowanie pliku: ${latestFirmwareFile} (${fileSize} bajtów) do Arduino...`);
+        // Podpis ECDSA (DER) obrazu — firmware liczy SHA-256 w trakcie zapisu i odrzuca
+        // aktualizację, jeśli podpis nie pasuje do klucza publicznego wszytego w firmware.
+        const signatureB64 = fs.readFileSync(sigPath).toString('base64');
+        forceLog(`Zamek [${mac}] pobiera ${latestFirmwareFile} (${fileSize} B).`);
 
         res.writeHead(200, {
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': fileSize
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': fileSize,
+          'X-Firmware-Signature': signatureB64,
         });
 
         const readStream = fs.createReadStream(filePath);
         let transmittedBytes = 0;
-
-        // Scalamy z istniejącym rekordem (stan rygla) - nigdy nie nadpisujemy całości.
         actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, timestamp: Date.now() };
 
         readStream.on('data', (chunk) => {
-          transmittedBytes = chunk.length;
-          const currentPercentage = Math.round((transmittedBytes / fileSize) * 100);
-
-          // Odświeżamy też "timestamp", żeby urządzenie nie pokazało się jako
-          // offline w trakcie długiego transferu (w tym czasie nie pollinguje).
+          transmittedBytes += chunk.length;
+          const currentPercentage = Math.min(98, Math.round((transmittedBytes / fileSize) * 100));
+          // Odświeżamy "timestamp", żeby urządzenie nie pokazało się jako offline
+          // w trakcie długiego transferu (w tym czasie nie pollinguje).
           actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: currentPercentage, timestamp: Date.now() };
         });
-
         readStream.pipe(res);
-
         readStream.on('end', () => {
-            otaUpdatePending = false;
-            actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 99, timestamp: Date.now() };
-            forceLog(`Sukces! Strumieniowanie pliku ${latestFirmwareFile} do zamka [${mac}] zakończone pomyślnie.`);
+          delete otaPendingDevices[mac];
+          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 99, timestamp: Date.now() };
+          forceLog(`Strumieniowanie ${latestFirmwareFile} do zamka [${mac}] zakończone.`);
         });
-
         readStream.on('error', (err) => {
-          otaUpdatePending = false;
+          delete otaPendingDevices[mac];
           forceLog(`Błąd podczas przesyłania pliku do zamka [${mac}]: ${err.message}`);
         });
+        return;
+      }
 
-    } else {
-        forceLog(`Krytyczny błąd: Plik ${latestFirmwareFile} zniknął z dysku serwera!`);
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end("Plik nie istnieje na dysku.");
-    }
-    return;
-}
-      // =========================================================================
-      // PROVISIONING: PAROWANIE KOLEJNYCH NOWYCH ZAMKÓW W BAZIE POPRZEZ ADRES MAC
-      // =========================================================================
-      if (pathname === '/api/device/provision' && req.method === 'POST') {
-        const { mac, ownerId, currentIp, firmware } = body;
-        // LIMIT CENTRALEK ZNIESIONY — liczba urządzeń na koncie nie jest sprzedawana.
-        // Pakiet ogranicza pojemność KAŻDEJ centralki (karty/PIN-y/administratorzy),
-        // więc dołożenie kolejnego urządzenia nie omija limitów, tylko dokłada sprzęt.
-        await dbPool.query(
-          `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (mac_address) DO UPDATE
-           SET last_known_ip = $3, firmware_version = $4, last_heartbeat = CURRENT_TIMESTAMP`,
-          [mac, ownerId, currentIp, firmware]
-        );
-        return sendJSON(res, 200, { status: "paired" });
+      // /api/device/provision USUNIĘTY: bez żadnego uwierzytelnienia przypinał dowolny MAC
+      // do dowolnego ownerId (przejęcie centralki przed jej pierwszą rejestracją), a firmware
+      // nigdy go nie używał. Centralki rejestrują się wyłącznie w pollu (klucz urządzenia).
+      if (pathname === '/api/device/provision') {
+        return sendJSON(res, 410, { error: 'Endpoint usunięty.' });
       }
 
       // =========================================================================
@@ -2392,8 +2779,15 @@ const server = http.createServer(async (req, res) => {
       // inside the second-board enclosure opens or closes.
       // =========================================================================
       if (pathname === '/api/tamper' && req.method === 'POST') {
-        const { mac, active } = body;
-        if (!mac) return sendJSON(res, 400, { error: 'Missing mac' });
+        // Fałszywe alarmy sabotażu (spam push, aż właściciel wyłączy alarmy) były
+        // możliwe dla każdego znającego MAC — teraz tylko uwierzytelniona centralka.
+        const tamperAuth = await authenticateDevice(req, body.mac);
+        if (!tamperAuth.ok) {
+          logDeviceAuthFailure(tamperAuth, body.mac, pathname, cleanIp);
+          return sendJSON(res, 401, { error: 'device_auth_failed' });
+        }
+        const mac = tamperAuth.mac;
+        const active = !!body.active;
 
         const severity  = active ? '⚠️  TAMPER ALERT' : '✅ Tamper Cleared';
         const detail    = active
@@ -2436,259 +2830,213 @@ const server = http.createServer(async (req, res) => {
           try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] [DEBUG HARDWARE POLL] ${msg}\n`); } catch (e) {}
         };
 
-        let mac = query.mac;
-        if (mac) mac = mac.toUpperCase();
+        const rawMac = normalizeMac(query.mac);
+        if (!rawMac) return sendJSON(res, 400, { error: 'Missing or invalid mac' });
+        const reversedRawMac = rawMac.split(':').reverse().join(':');
 
         // DIAGNOSTYKA: bezwarunkowy ślad KAŻDEGO polla (throttle 60s per MAC). Rozstrzyga
-        // pytanie „czy centralka w ogóle odpytuje?" — /poll jest wyciszony w Radar Traffic,
-        // więc bez tego nie widać go w logach wcale.
+        // pytanie „czy centralka w ogóle odpytuje?" — /poll jest wyciszony w Radar Traffic.
         {
-          const _k = `arrive:${mac || 'NOMAC'}`;
+          const _k = `arrive:${rawMac}`;
           if (!provisionSkipLog[_k] || Date.now() - provisionSkipLog[_k] > 60000) {
             provisionSkipLog[_k] = Date.now();
-            writeToLocalLogFile('Provisioning', `[Node: ${mac || 'BRAK-MAC'}] POLL przyszedł: email='${query.email || ''}' version='${query.version || ''}' release_id=${query.release_id || '?'} ip=${cleanIp}`);
+            writeToLocalLogFile('Provisioning', `[Node: ${rawMac}] POLL przyszedł: email='${String(query.email || '').slice(0, 80)}' version='${String(query.version || '').slice(0, 32)}' release_id=${query.release_id || '?'} key=${readDeviceKey(req) ? 'tak' : 'NIE'} ip=${cleanIp}`);
           }
         }
 
-        // Deregistracja: jeśli ta centralka jest w oknie wyrejestrowania, komenderujemy
-        // jej wyczyszczenie (deregister:true) i NIE pozwalamy się ponownie zarejestrować.
-        let deregActive = false;
-        if (mac && deregisterQueues[mac]) {
-          if (Date.now() < deregisterQueues[mac]) deregActive = true;
-          else delete deregisterQueues[mac];
-        }
-
-        // Jeśli system nie znajdzie takiego adresu MAC w bazie, automatycznie odwracamy bajty,
-        // aby zapytania SQL idealnie trafiły w zarejestrowane urządzenie.
-        if (mac && mac.includes(':')) {
-          let checkDev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [mac]);
-          if (checkDev.rows.length === 0) {
-            const reversedMac = mac.split(':').reverse().join(':');
-            const checkDevRev = await dbPool.query('SELECT mac_address FROM devices WHERE mac_address = $1', [reversedMac]);
-
-            if (checkDevRev.rows.length > 0) {
-              mac = reversedMac;
-            } else if (query.email && !deregActive) {
-              // PROVISIONING: Automatyczne dodanie nowej centralki do bazy danych
-              const accountRes = await dbPool.query('SELECT id FROM accounts WHERE email = $1', [query.email.trim().toLowerCase()]);
-              if (accountRes.rows.length > 0) {
-                // LIMIT CENTRALEK ZNIESIONY — każda nowa centralka rejestruje się
-                // niezależnie od pakietu. Limity dotyczą pojemności urządzenia
-                // (karty/PIN-y/administratorzy), nie liczby samych urządzeń.
-                {
-                  await dbPool.query(
-                    `INSERT INTO devices (mac_address, account_id, last_known_ip, firmware_version, operational_mode)
-                    VALUES ($1, $2, $3, $4, 'Czuwanie')`,
-                    // Adres raportowany przez centralkę (&ip=), nie adres proxy — patrz niżej.
-                    [mac,
-                     accountRes.rows[0].id,
-                     (typeof query.ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(query.ip.trim())) ? query.ip.trim() : cleanIp,
-                     query.version || 'v2.9.6']
-                  );
-                  writeToLocalLogFile('Provisioning', `[Node: ${mac}] Pomyślnie utworzono i przypisano centralkę do konta: ${query.email}`);
-                  // E-mail „dodano centralkę" do właściciela (jednorazowo — ta gałąź
-                  // wykonuje się tylko dla NOWEGO MAC-a, już zarejestrowane trafiają wyżej).
-                  mailTransport.sendMail({
-                    from: '"CTRLABLE Node System" <node@ctrlable.pl>',
-                    to: query.email.trim().toLowerCase(),
-                    subject: 'Nowa centralka dodana do Twojego konta CTRLABLE',
-                    html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-                        <h2>Centralka została dodana ✓</h2>
-                        <p>Nowa centralka CTRLABLE Node właśnie zgłosiła się i została przypisana do Twojego konta.</p>
-                        <p style="font-family:monospace; color:#0284c7;">MAC: ${mac}</p>
-                        <p>Możesz nią teraz zarządzać w aplikacji — dodać karty RFID i kody PIN. Jeśli to nie Ty dodawałeś urządzenie, skontaktuj się z nami.</p>
-                        <br>
-                        <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
-                      </div>`
-                  }, (err) => { if (err) writeToLocalLogFile('DeviceAdded SMTP Fail', err.message); });
-                }
-              } else {
-                // Poll z e-mailem, ale e-mail NIE pasuje do żadnego konta → rejestracja pominięta.
-                // Najczęstsza przyczyna „centralka nie pojawia się na koncie" (zły/pusty e-mail albo
-                // konto jeszcze niezałożone/niezweryfikowane). Log throttlowany co 60s.
-                if (!provisionSkipLog[mac] || Date.now() - provisionSkipLog[mac] > 60000) {
-                  provisionSkipLog[mac] = Date.now();
-                  writeToLocalLogFile('Provisioning', `[Node: ${mac}] NIE zarejestrowano: e-mail '${query.email}' nie pasuje do żadnego konta. Załóż i zweryfikuj konto najpierw.`);
-                }
-              }
-            } else {
-              // checkDevRev pusty i NIE (email && !deregActive): brak e-maila w pollu albo trwa deregistracja.
-              if (mac && mac.includes(':') && (!provisionSkipLog[mac] || Date.now() - provisionSkipLog[mac] > 60000)) {
-                provisionSkipLog[mac] = Date.now();
-                writeToLocalLogFile('Provisioning', `[Node: ${mac}] POMINIĘTO rejestrację: ${!query.email ? 'brak e-maila w pollu' : 'trwa okno deregistracji (deregister)'}.`);
-              }
+        // DEREGISTRACJA (okno 120 s): wiersza centralki już nie ma, więc klucz sprawdzamy
+        // względem hasha zapamiętanego w chwili odłączenia (scheduleDeviceWipe). Dopóki
+        // okno trwa, centralka NIE może się też ponownie zarejestrować.
+        const wipeKey = deregisterQueues[rawMac] ? rawMac : (deregisterQueues[reversedRawMac] ? reversedRawMac : null);
+        if (wipeKey) {
+          const wipe = deregisterQueues[wipeKey];
+          if (Date.now() < wipe.until) {
+            const key = readDeviceKey(req);
+            const keyOk = wipe.keyHash ? (!!key && hashDeviceKey(key) === wipe.keyHash) : (!!key || LEGACY_DEVICE_AUTH);
+            if (!keyOk) {
+              logDeviceAuthFailure({ reason: 'bad_key_wipe' }, rawMac, pathname, cleanIp);
+              return sendJSON(res, 401, { error: 'device_auth_failed' });
             }
+            return sendJSON(res, 200, { unlock: false, learn: false, ota: false, deregister: true });
+          }
+          delete deregisterQueues[wipeKey];
+        }
+
+        let auth = await authenticateDevice(req, rawMac);
+
+        // REJESTRACJA NOWEJ CENTRALKI: nieznany MAC + e-mail właściciela z konfiguracji.
+        if (!auth.ok && auth.reason === 'unknown_device') {
+          const email = String(query.email || '').trim().toLowerCase();
+          const key = readDeviceKey(req);
+          const skipLog = (why) => {
+            if (!provisionSkipLog[rawMac] || Date.now() - provisionSkipLog[rawMac] > 60000) {
+              provisionSkipLog[rawMac] = Date.now();
+              writeToLocalLogFile('Provisioning', `[Node: ${rawMac}] NIE zarejestrowano: ${why}`);
+            }
+          };
+          if (!email) {
+            skipLog('brak e-maila w pollu.');
+            return sendJSON(res, 200, { unlock: false, learn: false, ota: false, deregister: false });
+          }
+          if (!key && !LEGACY_DEVICE_AUTH) {
+            skipLog('brak klucza urządzenia (stary firmware, LEGACY_DEVICE_AUTH=off).');
+            return sendJSON(res, 401, { error: 'device_auth_failed' });
+          }
+          const accountRes = await dbPool.query('SELECT id, email_verified FROM accounts WHERE email = $1', [email]);
+          if (accountRes.rows.length === 0 || accountRes.rows[0].email_verified === false) {
+            skipLog(`e-mail '${email.slice(0, 80)}' nie pasuje do żadnego ZWERYFIKOWANEGO konta. Załóż i zweryfikuj konto najpierw.`);
+            return sendJSON(res, 200, { unlock: false, learn: false, ota: false, deregister: false });
+          }
+          // Klucz przypinamy przy rejestracji — od tej chwili ten MAC obsłuży wyłącznie
+          // urządzenie, które go zna. ON CONFLICT: dwa równoległe polle nie zdublują wiersza.
+          const ins = await dbPool.query(
+            `INSERT INTO devices (mac_address, account_id, firmware_version, operational_mode, device_key_hash)
+             VALUES ($1, $2, $3, 'Czuwanie', $4)
+             ON CONFLICT (mac_address) DO NOTHING RETURNING mac_address`,
+            [rawMac, accountRes.rows[0].id, String(query.version || 'v2.9.6').slice(0, 32), key ? hashDeviceKey(key) : null]);
+          if (ins.rows.length > 0) {
+            writeToLocalLogFile('Provisioning', `[Node: ${rawMac}] Pomyślnie utworzono i przypisano centralkę do konta: ${email}${key ? '' : ' (BEZ klucza — stary firmware)'}`);
+            mailTransport.sendMail({
+              from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+              to: email,
+              subject: 'Nowa centralka dodana do Twojego konta CTRLABLE',
+              html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+                  <h2>Centralka została dodana ✓</h2>
+                  <p>Nowa centralka CTRLABLE Node właśnie zgłosiła się i została przypisana do Twojego konta.</p>
+                  <p style="font-family:monospace; color:#0284c7;">MAC: ${rawMac}</p>
+                  <p>Możesz nią teraz zarządzać w aplikacji — dodać karty RFID i kody PIN. Jeśli to nie Ty dodawałeś urządzenie, skontaktuj się z nami.</p>
+                  <br>
+                  <p>Pozdrawiamy,<br><strong>Zespół CTRLABLE</strong></p>
+                </div>`
+            }, (err) => { if (err) writeToLocalLogFile('DeviceAdded SMTP Fail', err.message); });
+          }
+          auth = await authenticateDevice(req, rawMac);
+        }
+
+        if (!auth.ok) {
+          logDeviceAuthFailure(auth, rawMac, pathname, cleanIp);
+          return sendJSON(res, 401, { error: 'device_auth_failed' });
+        }
+        const mac = auth.mac;
+
+        // Heartbeat + wersja. Adres IP zapisujemy wyłącznie informacyjnie i tylko prywatny
+        // IPv4 — serwer NIGDY się pod niego nie łączy (dawniej: HTTP z hasłem na port 80,
+        // a podrobione ip= kierowało te żądania pod dowolny adres).
+        const ipStr = String(query.ip || '').trim();
+        const reportedIp = (/^\d{1,3}(\.\d{1,3}){3}$/.test(ipStr) && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ipStr)) ? ipStr : null;
+        const clientReportedVersion = query.version ? String(query.version).slice(0, 32) : null;
+        let currentHardwareVersion = '0.0.0';
+        const devLookup = await dbPool.query(
+          `UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP,
+                  last_known_ip = COALESCE($1, last_known_ip),
+                  firmware_version = COALESCE($3, firmware_version)
+            WHERE mac_address = $2 RETURNING firmware_version, auto_lock_delay_ms`,
+          [reportedIp, mac, clientReportedVersion]);
+        if (devLookup.rows.length > 0) currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
+
+        // 🌟 PRAWDA SPRZĘTOWA: centralka w KAŻDYM pollu zgłasza realny stan przekaźnika
+        // ("opened"). To JEDYNE miejsce, gdzie ustawiamy actualLockStates[mac].state.
+        // Sanityzacja release_id: po wyczyszczeniu EEPROM (0xFF) urządzenie zgłasza
+        // 4294967295 — traktujemy to jako "nieznane" (0), inaczej OTA nigdy by się nie proponowała.
+        let deviceReleaseId = parseInt(query.release_id || '0', 10);
+        if (!Number.isFinite(deviceReleaseId) || deviceReleaseId > 4000000000) deviceReleaseId = 0;
+        if (query.opened !== undefined) {
+          const reportedOpen = query.opened === '1';
+          actualLockStates[mac] = {
+            ...(actualLockStates[mac] || {}),
+            state: reportedOpen,
+            timestamp: Date.now(),
+            deviceReleaseId: deviceReleaseId || (() => {
+              const prev = actualLockStates[mac]?.deviceReleaseId || 0;
+              return prev > 4000000000 ? 0 : prev;
+            })()
+          };
+          if (reportedOpen) delete pendingUnlocks[mac];
+        } else {
+          actualLockStates[mac] = { state: false, ...(actualLockStates[mac] || {}), timestamp: Date.now() };
+        }
+
+        if ((actualLockStates[mac]?.otaProgress || 0) === 99) {
+          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100 };
+        }
+
+        // Komenda otwarcia — wyłącznie dla TEJ centralki (bez kolejki „wieloznacznej").
+        const unlockAction = !!unlockQueues[mac];
+        if (unlockAction) unlockQueues[mac] = false;
+        const isLearning = !!learningQueues[mac];
+
+        // KOLEJKA KOMEND: potwierdzenie wykonanych (ack) i kolejna porcja do wykonania.
+        // Stary firmware (bez klucza) komend nie rozumie — nie wysyłamy mu ich, zostają
+        // w kolejce do czasu aktualizacji (aplikacja pokazuje je jako oczekujące).
+        const ackId = parseInt(query.ack || '0', 10);
+        if (Number.isFinite(ackId) && ackId > 0) {
+          await dbPool.query(
+            'UPDATE device_commands SET acked_at = NOW() WHERE mac_address = $1 AND id <= $2 AND acked_at IS NULL',
+            [mac, ackId]);
+        }
+        let cmdBatch = '';
+        if (!auth.legacy) {
+          const pend = await dbPool.query(
+            'SELECT id, cmd FROM device_commands WHERE mac_address = $1 AND acked_at IS NULL ORDER BY id ASC LIMIT $2',
+            [mac, DEVICE_CMD_BATCH]);
+          if (pend.rows.length > 0) {
+            cmdBatch = pend.rows.map(r => `${r.id}:${r.cmd}`).join(';');
+            await dbPool.query('UPDATE device_commands SET delivered_at = COALESCE(delivered_at, NOW()) WHERE id = ANY($1)',
+              [pend.rows.map(r => r.id)]);
           }
         }
 
-  // Definiujemy stany na podstawie Twoich globalnych kolejek rygla, zapobiegając ReferenceError
-  const unlockAction = !!(unlockQueues[mac] || unlockQueues['00:00:00:00:00:00']);
-  const isLearning = !!learningQueues[mac];
+        // OTA: tylko gdy właściciel/współadmin uzbroił aktualizację DLA TEJ centralki
+        // i serwer ma nowsze wydanie niż zgłoszone przez urządzenie.
+        const latestFw = getLatestFirmwareContext();
+        const otaUpdateTrigger = (
+          latestFirmwareReleaseId > 0 &&
+          latestFirmwareReleaseId > deviceReleaseId &&
+          !!otaPendingDevices[mac]
+        );
+        if (otaUpdateTrigger) {
+          forceLog(`[OTA ACTIVATED] Zezwolono urządzeniu [${mac}] na pobranie wydania ${latestFirmwareReleaseId} (ma ${deviceReleaseId}, wersja ${currentHardwareVersion}).`);
+        }
 
-  let clientReportedVersion = query.version || null;
-  let currentHardwareVersion = '0.0.0';
+        // Czas otwarcia rygla ustawiony przez właściciela (per centralka).
+        const autoLockDelayMs = devLookup.rows.length > 0 ? devLookup.rows[0].auto_lock_delay_ms : null;
 
-  // WYCISZONE: Usunięto stąd forceLog ("=== NOWE ZAPYTANIE POLL ==="), całkowicie żegnając sekundowy spam!
-
-  if (!mac) {
-    const ipLookup = await dbPool.query('SELECT mac_address, firmware_version FROM devices WHERE last_known_ip = $1', [cleanIp]);
-    if (ipLookup.rows.length > 0) {
-      mac = ipLookup.rows[0].mac_address;
-      currentHardwareVersion = ipLookup.rows[0].firmware_version || '0.0.0';
-    } else {
-      mac = '00:00:00:00:00:00';
-    }
-  } else {
-    // ADRES CENTRALKI: bierzemy ten, który urządzenie SAMO raportuje (&ip= w pollu),
-    // a NIE adres źródłowy zapytania. Poll idzie przez proxy NPM, więc cleanIp to
-    // 192.168.0.102 (proxy), nie centralka — a na ten adres serwer próbował potem
-    // wysyłać zmiany nazwy/harmonogramu/ustawień przez syncMutationToHardware (port 80).
-    // Efekt: WSZYSTKIE przekazania do urządzenia po cichu trafiały w proxy i nic nie robiły.
-    const reportedIp = (typeof query.ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(query.ip.trim()))
-      ? query.ip.trim()
-      : null;
-    const deviceIp = reportedIp || cleanIp;
-
-    // Zapisujemy i aktualizujemy tętno (heartbeat) urządzenia oraz jego wersję
-    let queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1 WHERE mac_address = $2 RETURNING firmware_version';
-    let queryParams = [deviceIp, mac];
-
-    if (clientReportedVersion) {
-      queryText = 'UPDATE devices SET last_heartbeat = CURRENT_TIMESTAMP, last_known_ip = $1, firmware_version = $3 WHERE mac_address = $2 RETURNING firmware_version';
-      queryParams = [deviceIp, mac, clientReportedVersion];
-    }
-
-    const devLookup = await dbPool.query(queryText, queryParams);
-    if (devLookup.rows.length > 0) {
-      currentHardwareVersion = devLookup.rows[0].firmware_version || '0.0.0';
-    }
-  }
-
-  // 🌟 PRAWDA SPRZĘTOWA: centralka w KAŻDYM pollu zgłasza realny stan
-  // przekaźnika w parametrze "opened" (1 = drzwi fizycznie otwarte, 0 = zamknięte).
-  // To jest JEDYNE miejsce w całym serwerze, gdzie ustawiamy actualLockStates[mac].state -
-  // nigdy nie zgadujemy stanu na podstawie samego wysłania komendy z aplikacji,
-  // bo wtedy UI pokazywałoby "OTWARTY" zanim zamek faktycznie się odblokuje.
-  // Ta sama sanityzacja co przy otaUpdateTrigger — TU jest źródło wartości, którą
-  // widzi aplikacja (/api/data -> deviceReleaseId -> ekran „Aktualizacja"). Bez tego
-  // apka porównywała 4294967295 >= <id release'u> i meldowała „Jesteś na najnowszej
-  // wersji", mimo że urządzenie miało tylko wyczyszczony EEPROM (0xFF).
-  let deviceReleaseId = parseInt(query.release_id || '0', 10);
-  if (!Number.isFinite(deviceReleaseId) || deviceReleaseId > 4000000000) deviceReleaseId = 0;
-  if (query.opened !== undefined) {
-    const reportedOpen = query.opened === '1';
-    actualLockStates[mac] = {
-      ...(actualLockStates[mac] || {}),
-      state: reportedOpen,
-      timestamp: Date.now(),
-      // Fallback też sanityzowany — inaczej raz zapamiętane 4294967295 przeżyłoby
-      // każdy kolejny poll (0 || 4294967295 = 4294967295).
-      deviceReleaseId: deviceReleaseId || (() => {
-        const prev = actualLockStates[mac]?.deviceReleaseId || 0;
-        return prev > 4000000000 ? 0 : prev;
-      })()
-    };
-    if (reportedOpen) delete pendingUnlocks[mac];
-  } else {
-    // Starszy firmware bez pola "opened" - podtrzymujemy tylko heartbeat,
-    // nie zmieniamy ostatniego znanego stanu rygla.
-    actualLockStates[mac] = { state: false, ...(actualLockStates[mac] || {}), timestamp: Date.now() };
-  }
-
-  // Mark OTA as 100% complete when device polls back after restart
-  if ((actualLockStates[mac]?.otaProgress || 0) === 99) {
-    actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100 };
-  }
-
-  // PRZYWRÓCENIE DZIAŁANIA PRZEKAŹNIKA (Konsumpcja tokenu otwierania z kolejki)
-  // Zerujemy TYLKO kolejkę komend - realny stan rygla (powyżej) pochodzi
-  // wyłącznie z potwierdzenia sprzętu, nigdy z samego faktu wysłania komendy.
-  if (unlockAction) {
-    unlockQueues[mac] = false;
-    unlockQueues['00:00:00:00:00:00'] = false;
-  }
-
-  // PANCERNA LOGIKA OTA (Odporna na pętle i sterowana z aplikacji)
-  const latestFw = getLatestFirmwareContext();
-  const cleanCurrent = currentHardwareVersion.replace('v', '').trim();
-  const cleanLatest = latestFw.version.replace('v', '').trim();
-
-  // Zezwalamy na update TYLKO, gdy wersje się różnią ORAZ kliknięto przycisk w aplikacji (otaUpdatePending === true)
-  // Compare by release ID: if the server has a newer release (higher ID) than
-  // what the device is running, trigger OTA — even if the version string is identical.
-  // latestFirmwareReleaseId comes from the GitHub release object and is always
-  // a higher integer for a newer release, regardless of tag name.
-  // Sanityzacja ID build-u zgłoszonego przez centralkę: po factory resecie EEPROM
-  // jest wypełniony 0xFF, więc urządzenie raportuje 4294967295 — liczbę większą od
-  // każdego realnego release'u z GitHuba. Bez tego porównanie (latest > installed)
-  // zawsze wypadało na "nie", aplikacja pokazywała „masz najnowszy soft" i OTA
-  // nigdy się nie proponowało (a naprawa w firmware wymagałaby... OTA — zapętlenie).
-  // Traktujemy takie ID jako "nieznane" (0), więc aktualizacja znów jest oferowana.
-  let deviceKnownReleaseId = parseInt(query.release_id || '0', 10);
-  if (!Number.isFinite(deviceKnownReleaseId) || deviceKnownReleaseId > 4000000000) {
-    deviceKnownReleaseId = 0;
-  }
-  const otaUpdateTrigger = (
-    latestFirmwareReleaseId > 0 &&
-    latestFirmwareReleaseId > deviceKnownReleaseId &&
-    otaUpdatePending === true
-  );
-  // Jedyny log, jaki tu zostaje – zapisze się WYŁĄCZNIE w ułamku sekundy, w którym faktycznie rusza aktualizacja
-  if (otaUpdateTrigger) {
-    forceLog(`[OTA ACTIVATED] Zezwolono urządzeniu [${mac}] na pobranie wersji ${cleanLatest}`);
-  }
-
-  // Czas otwarcia rygla ustawiony przez właściciela (per centralka). Firmware nadpisze
-  // nim swoją wartość domyślną (przyjmuje 1000–60000 ms). Zapytanie jest lekkie, a poll
-  // i tak trafia do bazy wyżej; przy błędzie po prostu nie wysyłamy pola.
-  let autoLockDelayMs = null;
-  if (mac && mac.includes(':')) {
-    const alRes = await dbPool.query('SELECT auto_lock_delay_ms FROM devices WHERE mac_address = $1', [mac])
-      .catch(() => ({ rows: [] }));
-    if (alRes.rows.length > 0 && alRes.rows[0].auto_lock_delay_ms) {
-      autoLockDelayMs = alRes.rows[0].auto_lock_delay_ms;
-    }
-  }
-
-  return sendJSON(res, 200, {
-    unlock: unlockAction,
-    learn: isLearning,
-    username: learningQueues[mac] || '',
-    ota: otaUpdateTrigger,
-    deregister: deregActive,
-    latest_release_id: latestFirmwareReleaseId,
-    latest_version: latestFw.version,
-    ...(autoLockDelayMs ? { auto_lock_delay: autoLockDelayMs } : {})
-  });
-}
+        return sendJSON(res, 200, {
+          unlock: unlockAction,
+          learn: isLearning,
+          username: learningQueues[mac] || '',
+          ota: otaUpdateTrigger,
+          deregister: false,
+          latest_release_id: latestFirmwareReleaseId,
+          latest_version: latestFw.version,
+          cmds: cmdBatch,
+          ...(autoLockDelayMs ? { auto_lock_delay: autoLockDelayMs } : {})
+        });
+      }
 
       // =========================================================================
       // ODBIERANIE STRUMIENIA TELEMETRII Z ZAMKA
       // =========================================================================
       if ((pathname === '/api/log' || pathname === '/log') && req.method === 'POST') {
-        const rawTelemetryLogString = bodyStr.trim();
-        const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
-        const targetMac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
-
-        if (rawTelemetryLogString.length > 0) {
-          await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)', [targetMac, rawTelemetryLogString, 'connections']);
-          writeToLocalLogFile('Hardware Ingest', `[Node: ${targetMac}] Telemetry: "${rawTelemetryLogString}"`);
-        }
-        res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
-        res.end("OK");
-        return;
+        // Usunięty: bez uwierzytelnienia, a centralkę wybierał po adresie IP źródła — za
+        // proxy to zawsze adres proxy. Firmware loguje przez /api/hardware/log (z kluczem).
+        return sendJSON(res, 410, { error: 'Endpoint usunięty.' });
       }
 
       // =========================================================================
       // SPRAWDZANIE WŁAŚCIWOŚCI PERYFERJÓW
       // =========================================================================
       if ((pathname === '/api/hardware/scan' || pathname === '/api/scan' || pathname === '/scan') && req.method === 'POST') {
-        let mac = body.mac;
-        let uid = body.uid;
-        if (!mac) {
-          const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
-          mac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
+        // Raport skanu (log + push). Bez uwierzytelnienia służył jako wyrocznia UID
+        // i pozwalał wstawiać do dziennika fałszywe „Otwarto: <imię>".
+        const scanAuth = await authenticateDevice(req, body.mac);
+        if (!scanAuth.ok) {
+          logDeviceAuthFailure(scanAuth, body.mac, pathname, cleanIp);
+          return sendJSON(res, 401, { error: 'device_auth_failed' });
         }
+        const mac = scanAuth.mac;
+        const uid = String(body.uid || '').toUpperCase();
+        if (!/^[0-9A-F]{2}( [0-9A-F]{2}){3,9}$/.test(uid)) return sendJSON(res, 400, { error: 'Invalid uid' });
         const credentialRes = await dbPool.query(
           `SELECT holder_name, is_active, schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
            FROM card_credentials WHERE mac_address = $1 AND card_uid = $2`, [mac, uid]);
@@ -2767,14 +3115,19 @@ const server = http.createServer(async (req, res) => {
       // MAPOWANIE NOWEJ KARTY ZE SLOTEM DO BAZY
       // =========================================================================
       if ((pathname === '/api/hardware/register' || pathname === '/api/register' || pathname === '/register') && req.method === 'POST') {
-        let mac = body.mac;
-        let uid = body.uid;
-        let slot = body.slot || 0;
-
-        if (!mac) {
-          const ipLookup = await dbPool.query('SELECT mac_address FROM devices WHERE last_known_ip = $1', [cleanIp]);
-          mac = ipLookup.rows.length > 0 ? ipLookup.rows[0].mac_address : '00:00:00:00:00:00';
+        // Zapis nowej karty do bazy — tylko od uwierzytelnionej centralki. Wcześniej każdy
+        // znający MAC mógł dopisać kartę albo przestawić slot istniejącej, przez co blokada
+        // w aplikacji trafiała potem w niewłaściwą kartę.
+        const regAuth = await authenticateDevice(req, body.mac);
+        if (!regAuth.ok) {
+          logDeviceAuthFailure(regAuth, body.mac, pathname, cleanIp);
+          return sendJSON(res, 401, { error: 'device_auth_failed' });
         }
+        const mac = regAuth.mac;
+        const uid = String(body.uid || '').toUpperCase();
+        if (!/^[0-9A-F]{2}( [0-9A-F]{2}){3,9}$/.test(uid)) return sendJSON(res, 400, { error: 'Invalid uid' });
+        const slotNum = parseInt(body.slot, 10);
+        const slot = Number.isFinite(slotNum) && slotNum >= 0 && slotNum < 1000 ? slotNum : 0;
         const pendingLabel = learningQueues[mac] || 'Nowy Użytkownik';
 
         await dbPool.query(
@@ -2787,9 +3140,35 @@ const server = http.createServer(async (req, res) => {
         delete learningQueues[mac];
         return sendJSON(res, 200, { status: "registered" });
       }
+      // =========================================================================
+      // RAPORT DIAGNOSTYCZNY / SELF-TEST Z CENTRALKI — POST JSON, klucz urządzenia.
+      // kind: 0 = self-test klienta (bez kart), 1 = diagnostyka serwisowa (z kartami),
+      // 2 = jak 1 + wynik testu przekaźnika. Trzymamy 5 ostatnich raportów per centralka.
+      // =========================================================================
+      if (pathname === '/api/hardware/diag' && req.method === 'POST') {
+        const diagAuth = await authenticateDevice(req, body.mac);
+        if (!diagAuth.ok) {
+          logDeviceAuthFailure(diagAuth, body.mac, pathname, cleanIp);
+          return sendJSON(res, 401, { error: 'device_auth_failed' });
+        }
+        const mac = diagAuth.mac;
+        const kind = [0, 1, 2].includes(parseInt(body.kind, 10)) ? parseInt(body.kind, 10) : 0;
+        const payload = sanitizeDeviceReport(body);
+        await dbPool.query('INSERT INTO device_reports (mac_address, kind, payload) VALUES ($1, $2, $3)',
+          [mac, kind, JSON.stringify(payload)]);
+        await dbPool.query(
+          `DELETE FROM device_reports WHERE mac_address = $1 AND id NOT IN
+             (SELECT id FROM device_reports WHERE mac_address = $1 ORDER BY id DESC LIMIT 5)`, [mac]).catch(() => {});
+        const failed = evaluateReport(payload).filter(c => c.ok === false).map(c => c.label);
+        await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+          [mac, failed.length ? `Raport centralki: problem — ${failed.join(', ')}` : 'Raport centralki: wszystkie komponenty OK', 'provisioning']).catch(() => {});
+        writeToLocalLogFile('Hardware Remote Log', `[Node: ${mac}] Diagnostic report kind=${kind} (${failed.length ? 'FAIL: ' + failed.join(', ') : 'OK'}).`);
+        return sendJSON(res, 200, { status: 'stored' });
+      }
+
       // OBSŁUGA PUSH TOKENÓW DLA APLIKACJI MOBILNEJ
       if (pathname === '/api/auth/save_push_token' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { token } = body;
         if (!token) return sendJSON(res, 400, { error: "Missing push token" });
 
@@ -2801,7 +3180,7 @@ const server = http.createServer(async (req, res) => {
       // POWIADOMIENIA PUSH PREFERENCJE
 
       if (pathname === '/api/settings/push_preferences' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { pushEntries, pushAlarms } = body;
 
         await dbPool.query('UPDATE accounts SET push_entries = $1, push_alarms = $2 WHERE id = $3', [pushEntries, pushAlarms, accountId]);
@@ -2821,8 +3200,18 @@ const server = http.createServer(async (req, res) => {
       if (pathname === '/api/auth/keypad' && req.method === 'POST') {
 
         const { pin } = body;
-        const mac = String(body.mac || '').toUpperCase();
-        if (!mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
+        if (!body.mac || !pin) return sendJSON(res, 400, { error: 'Missing mac or pin' });
+        // Bez uwierzytelnienia każdy znający MAC mógł zdalnie zgadywać PIN-y (i blokować
+        // klawiaturę właścicielowi limitem prób). Teraz PIN sprawdza tylko prawdziwa
+        // centralka; limit prób liczony per centralka — a nie osobno dla MAC-a i MAC-a
+        // odwróconego, co wcześniej dawało podwójną pulę prób.
+        const kpAuth = await authenticateDevice(req, body.mac);
+        if (!kpAuth.ok) {
+          logDeviceAuthFailure(kpAuth, body.mac, pathname, cleanIp);
+          return sendJSON(res, 401, { granted: false, error: 'device_auth_failed' });
+        }
+        const mac = kpAuth.mac;
+        if (!/^\d{4,8}$/.test(String(pin))) return sendJSON(res, 200, { granted: false });
         const now = Date.now();
         if (!keypadAttempts[mac] || now > keypadAttempts[mac].resetAt)
           keypadAttempts[mac] = { count: 0, resetAt: now + 15 * 60 * 1000 };
@@ -2935,7 +3324,7 @@ const server = http.createServer(async (req, res) => {
       // POST { name, pin }  →  { success, id }
       // =========================================================================
       if (pathname === '/api/keypad/add' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const {
           name, pin, mac: reqMac,
           scheduleEnabled = false, scheduleDays = 127,
@@ -3000,7 +3389,7 @@ const server = http.createServer(async (req, res) => {
 
       // KEYPAD PIN UPDATE SCHEDULE/EXPIRY  POST { id, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, expiresAt, maxUses }
       if (pathname === '/api/keypad/update_schedule' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { id, scheduleEnabled, scheduleDays, scheduleStartMinutes, scheduleEndMinutes, expiresAt, maxUses } = body;
         if (!id) return sendJSON(res, 400, { error: 'Missing id' });
         const r = await dbPool.query(
@@ -3020,7 +3409,7 @@ const server = http.createServer(async (req, res) => {
 
       // KEYPAD PIN DELETE  POST { id }
       if (pathname === '/api/keypad/delete' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { id } = body;
         if (!id) return sendJSON(res, 400, { error: 'Missing id' });
         const r = await dbPool.query(
@@ -3032,7 +3421,7 @@ const server = http.createServer(async (req, res) => {
 
       // KEYPAD PIN RENAME  POST { id, name }
       if (pathname === '/api/keypad/rename' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { id, name } = body;
         if (!id || !name || !name.trim()) return sendJSON(res, 400, { error: 'Missing id or name' });
         const rr = await dbPool.query(
@@ -3044,7 +3433,7 @@ const server = http.createServer(async (req, res) => {
 
       // KEYPAD PIN TOGGLE ACTIVE  POST { id }
       if (pathname === '/api/keypad/toggle_active' && req.method === 'POST') {
-        const accountId = requireAuth(req, res); if (!accountId) return;
+        const accountId = await requireAuth(req, res); if (!accountId) return;
         const { id } = body;
         if (!id) return sendJSON(res, 400, { error: 'Missing id' });
         const r = await dbPool.query(
@@ -3227,6 +3616,15 @@ async function runSchemaMigrations() {
     // płatnych i wartości ustawionych ręcznie (individual) nie rusza.
     `UPDATE accounts SET max_admins = 2
        WHERE max_admins = 1 AND (license_tier = 'free' OR license_tier IS NULL)`,
+    // Bezpieczeństwo (audyt 2026-09-11, README §7):
+    // SHA-256 klucza urządzenia — NULL = centralka sprzed zmiany, przypnie klucz przy
+    // pierwszym połączeniu z nowym firmware.
+    `ALTER TABLE devices ADD COLUMN IF NOT EXISTS device_key_hash VARCHAR(64) DEFAULT NULL`,
+    // Wersja tokenów konta — podbijana przy zmianie/resecie hasła, unieważnia stare JWT.
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_version INT DEFAULT 0`,
+    // Udziały serwisowe (README §7.15): poza limitem adminów, wygasają same.
+    `ALTER TABLE device_shares ADD COLUMN IF NOT EXISTS is_service BOOLEAN DEFAULT false`,
+    `ALTER TABLE device_shares ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT NULL`,
   ];
   // Wielu administratorów na jedno urządzenie: konto-właściciel (devices.account_id)
   // pozostaje jedynym uprawnionym do usuwania/zmiany WiFi/zapraszania innych,
@@ -3273,6 +3671,25 @@ async function runSchemaMigrations() {
        created_at TIMESTAMP DEFAULT NOW()
      )`,
     `CREATE INDEX IF NOT EXISTS idx_pin_change_events_mac_time ON pin_change_events(mac_address, created_at)`,
+    // Kolejka komend dla centralek (zmiany kart, Wi-Fi) — odbierana w pollu, README §7.3.
+    `CREATE TABLE IF NOT EXISTS device_commands (
+       id SERIAL PRIMARY KEY,
+       mac_address VARCHAR(17) NOT NULL,
+       cmd TEXT NOT NULL,
+       created_at TIMESTAMP DEFAULT NOW(),
+       delivered_at TIMESTAMP,
+       acked_at TIMESTAMP
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_device_commands_pending ON device_commands(mac_address, acked_at, id)`,
+    // Raporty diagnostyczne / self-test z centralek (README §7.15), 5 ostatnich per MAC.
+    `CREATE TABLE IF NOT EXISTS device_reports (
+       id SERIAL PRIMARY KEY,
+       mac_address VARCHAR(17) NOT NULL,
+       kind SMALLINT NOT NULL DEFAULT 0,
+       payload TEXT NOT NULL,
+       created_at TIMESTAMP DEFAULT NOW()
+     )`,
+    `CREATE INDEX IF NOT EXISTS idx_device_reports_mac ON device_reports(mac_address, id)`,
     // RODO art. 17 — rejestr żądań usunięcia („tombstone"). Trzymamy WYŁĄCZNIE
     // hash e-maila, nigdy samego adresu: inaczej lista usuniętych osób sama byłaby
     // zbiorem danych osobowych. Służy do ponownego zastosowania kasacji, gdyby
@@ -3332,6 +3749,23 @@ async function purgeExpiredData() {
       if (ev.rowCount > 0)
         writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${ev.rowCount} osieroconych zdarzeń starszych niż ${LOG_RETENTION_DAYS} dni.`);
     }
+    // Kolejka komend: potwierdzone po 7 dniach (niosą np. hasło Wi-Fi w hex — nie trzymamy
+    // ich dłużej niż trzeba); niepotwierdzone tylko, gdy centralki już nie ma w bazie.
+    const cmds = await dbPool.query(
+      `DELETE FROM device_commands dc
+        WHERE (dc.acked_at IS NOT NULL AND dc.acked_at < NOW() - INTERVAL '7 days')
+           OR (NOT EXISTS (SELECT 1 FROM devices d WHERE d.mac_address = dc.mac_address)
+               AND dc.created_at < NOW() - INTERVAL '30 days')`
+    ).catch(() => ({ rowCount: 0 }));
+    if (cmds.rowCount > 0)
+      writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${cmds.rowCount} starych komend centralek.`);
+    // Udziały serwisowe po terminie — filtr SHARE_ACTIVE i tak je ignoruje, tu sprzątamy wiersze.
+    const svcSh = await dbPool.query(`DELETE FROM device_shares WHERE expires_at IS NOT NULL AND expires_at < NOW()`).catch(() => ({ rowCount: 0 }));
+    if (svcSh.rowCount > 0)
+      writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${svcSh.rowCount} wygasłych udziałów serwisowych.`);
+    const reps = await dbPool.query(`DELETE FROM device_reports WHERE created_at < NOW() - INTERVAL '30 days'`).catch(() => ({ rowCount: 0 }));
+    if (reps.rowCount > 0)
+      writeToLocalLogFile('Core Daemon', `[Retention] Usunięto ${reps.rowCount} starych raportów diagnostycznych.`);
     // Zaproszenia żyją 48 h — cokolwiek starszego niż 30 dni to martwy rekord z e-mailem.
     const inv = await dbPool.query(
       `DELETE FROM device_invites WHERE created_at < NOW() - INTERVAL '30 days'`
@@ -3395,6 +3829,127 @@ server.listen(3000, () => {
   }
 });
 
+// ─── Tryb serwisowy — pomocnicze (README §7.15) ───────────────────────────────
+// Udział z akceptacji zaproszenia: dla konta serwisowego oznaczony i wygasający;
+// ponowne zaproszenie serwisu odświeża datę wygaśnięcia zamiast być ignorowane.
+async function grantShare(mac, accountId, inviteId, email) {
+  const service = isServiceEmail(email);
+  const expiresAt = service ? new Date(Date.now() + SERVICE_SHARE_HOURS * 3600 * 1000) : null;
+  await dbPool.query(
+    `INSERT INTO device_shares (mac_address, account_id, invited_by, is_service, expires_at)
+     SELECT $1, $2, invited_by, $4, $5 FROM device_invites WHERE id = $3
+     ON CONFLICT (mac_address, account_id) DO UPDATE SET is_service = EXCLUDED.is_service, expires_at = EXCLUDED.expires_at`,
+    [mac, accountId, inviteId, service, expiresAt]);
+  return { service, expiresAt: expiresAt ? expiresAt.toISOString() : null };
+}
+
+// Konto serwisowe z AKTYWNYM udziałem na tej centralce (albo 403). Zwraca { mac, deviceName }.
+async function requireServiceShare(accountId, rawMac, res) {
+  const acc = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
+  if (acc.rows.length === 0 || !isServiceEmail(acc.rows[0].email)) {
+    _sendJSON(res, 403, { error: 'Tryb serwisowy jest dostępny tylko dla konta serwisowego.' }, '');
+    return null;
+  }
+  const mac = normalizeMac(rawMac);
+  if (!mac) { _sendJSON(res, 400, { error: 'Missing mac' }, ''); return null; }
+  const r = await dbPool.query(
+    `SELECT d.device_name FROM devices d
+      WHERE d.mac_address = $1 AND d.mac_address IN (SELECT mac_address FROM device_shares WHERE account_id = $2 AND ${SHARE_ACTIVE})`,
+    [mac, accountId]);
+  if (r.rows.length === 0) {
+    _sendJSON(res, 403, { error: 'Klient nie udostępnił tej centralki serwisowi (albo udział wygasł).' }, '');
+    return null;
+  }
+  return { mac, deviceName: r.rows[0].device_name || mac };
+}
+
+// Jak wyżej, ale wymaga też sesji POTWIERDZONEJ kodem z OLED (obecność na miejscu).
+async function requireServiceSession(accountId, rawMac, res) {
+  const svc = await requireServiceShare(accountId, rawMac, res);
+  if (!svc) return null;
+  const s = serviceSessions[svc.mac];
+  if (!s || s.accountId !== accountId || Date.now() >= s.confirmedUntil) {
+    _sendJSON(res, 403, { error: 'Potwierdź obecność kodem z ekranu centralki, aby użyć akcji serwisowych.' }, '');
+    return null;
+  }
+  return svc;
+}
+
+async function latestDeviceReport(mac) {
+  const r = await dbPool.query(
+    'SELECT kind, payload, created_at FROM device_reports WHERE mac_address = $1 ORDER BY id DESC LIMIT 1', [mac]).catch(() => ({ rows: [] }));
+  if (r.rows.length === 0) return null;
+  let payload = r.rows[0].payload;
+  if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch (_) { payload = {}; } }
+  return { kind: r.rows[0].kind, payload: payload || {}, created_at: r.rows[0].created_at };
+}
+
+// Raport z centralki to dane od urządzenia — bierzemy tylko znane pola, w znanych typach.
+function sanitizeDeviceReport(b) {
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  const bool = (v) => (v === true || v === 1 || v === '1' || v === 'true');
+  const out = {
+    fw: String(b.fw || '').slice(0, 32),
+    rfid_ver: String(b.rfid_ver || '').slice(0, 8),
+    oled: bool(b.oled),
+    fs_mounted: bool(b.fs_mounted), fs_selftest: bool(b.fs_selftest),
+    fs_total: num(b.fs_total), fs_used: num(b.fs_used),
+    kp_installed: bool(b.kp_installed),
+    kp_rows: Array.isArray(b.kp_rows) ? b.kp_rows.slice(0, 4).map(bool) : null,
+    tamper_installed: bool(b.tamper_installed), tamper_active: bool(b.tamper_active),
+    rssi: num(b.rssi), ntp: bool(b.ntp),
+    heap_free: num(b.heap_free), heap_min: num(b.heap_min),
+    uptime_s: num(b.uptime_s), reset_reason: num(b.reset_reason),
+    cards_total: num(b.cards_total),
+    relay_test: b.relay_test === undefined ? null : num(b.relay_test),
+  };
+  if (Array.isArray(b.cards)) {
+    out.cards = b.cards.slice(0, 200).map(c => ({
+      u: String(c.u || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase().slice(0, 8),
+      n: String(c.n || '').slice(0, 24), a: bool(c.a), s: bool(c.s),
+    })).filter(c => c.u.length === 8);
+  }
+  return out;
+}
+
+// Ocena raportu prostym językiem — te same reguły dla klienta i serwisu.
+// ok: true/false, albo null = informacja bez oceny (np. element niezainstalowany).
+function evaluateReport(p) {
+  const checks = [];
+  const add = (key, label, ok, detail) => checks.push({ key, label, ok, detail });
+  const rv = String(p.rfid_ver || '').toUpperCase();
+  add('rfid', 'Czytnik kart RFID', rv !== '' && rv !== '00' && rv !== 'FF',
+      rv ? `wersja układu 0x${rv}` : 'brak odpowiedzi z czytnika');
+  add('oled', 'Wyświetlacz', !!p.oled, p.oled ? 'wykryty' : 'niewykryty na I2C');
+  add('storage', 'Pamięć kart (LittleFS)', !!p.fs_mounted && !!p.fs_selftest,
+      p.fs_mounted ? `${p.fs_used ?? '?'}/${p.fs_total ?? '?'} B, selftest ${p.fs_selftest ? 'OK' : 'BŁĄD'}` : 'niezamontowana — praca w trybie awaryjnym (EEPROM, 10 kart)');
+  if (p.kp_installed) {
+    const rows = Array.isArray(p.kp_rows) ? p.kp_rows : [];
+    const bad = rows.map((v, i) => (v ? null : i + 1)).filter(Boolean);
+    add('keypad', 'Klawiatura', rows.length === 4 && bad.length === 0,
+        bad.length ? `wiersz ${bad.join(', ')} zwarty do masy lub brak rezystora` : 'wszystkie wiersze w spoczynku');
+  } else add('keypad', 'Klawiatura', null, 'niezainstalowana');
+  if (p.tamper_installed) add('tamper', 'Czujnik sabotażu', !p.tamper_active, p.tamper_active ? 'obudowa OTWARTA' : 'obudowa zamknięta');
+  else add('tamper', 'Czujnik sabotażu', null, 'niezainstalowany');
+  if (p.rssi != null) add('wifi', 'Zasięg Wi-Fi', p.rssi > -80, `${p.rssi} dBm${p.rssi <= -80 ? ' — słaby sygnał, rozważ przeniesienie routera/centralki' : p.rssi <= -70 ? ' — przeciętny' : ' — dobry'}`);
+  add('clock', 'Zegar (NTP)', !!p.ntp, p.ntp ? 'zsynchronizowany' : 'brak czasu — harmonogramy kart z ograniczeniem czasowym są odrzucane');
+  if (p.heap_free != null) add('memory', 'Pamięć RAM', p.heap_free > 20000 && (p.heap_min == null || p.heap_min > 8000),
+      `wolne ${p.heap_free} B${p.heap_min != null ? ', min. ' + p.heap_min + ' B' : ''}`);
+  if (p.relay_test != null) add('relay', 'Przekaźnik', p.relay_test === 1, p.relay_test === 1 ? 'test wysterowania wykonany' : 'test nie został wykonany (drzwi były otwarte?)');
+  return checks;
+}
+
+// Push do WŁAŚCICIELA centralki (np. początek sesji serwisowej) — respektuje push_alarms.
+function notifyOwner(mac, title, body) {
+  dbPool.query(
+    `SELECT a.push_token, a.push_alarms FROM accounts a JOIN devices d ON d.account_id = a.id WHERE d.mac_address = $1 LIMIT 1`, [mac])
+    .then((r) => {
+      if (r.rows.length && r.rows[0].push_token && r.rows[0].push_token !== 'LOGGED_OUT' && r.rows[0].push_alarms !== false) {
+        sendPushNotification(r.rows[0].push_token, title, body);
+      }
+    }).catch(() => {});
+}
+
 function sendPushNotification(token, title, body) {
   if (!token) return;
 
@@ -3437,7 +3992,7 @@ function sendPushNotification(token, title, body) {
   const req = https.request(options, (res) => {
     // Expo zwraca odpowiedź w formacie JSON - warto ją chociaż zalogować w razie problemów
     let responseData = '';
-    res.on('data', (chunk) => { responseData = chunk; });
+    res.on('data', (chunk) => { responseData += chunk; });
     res.on('end', () => {
       if (res.statusCode !== 200) {
         writeToLocalLogFile('Push System Warning', `Bramka Expo zwróciła kod ${res.statusCode}: ${responseData}`);

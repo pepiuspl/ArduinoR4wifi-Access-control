@@ -1,6 +1,6 @@
 # CTRLABLE Node — Full System Documentation
 
-**Last updated:** August 13, 2026
+**Last updated:** September 11, 2026 — security hardening after the 2026-09-11 audit (§7)
 
 ---
 
@@ -102,13 +102,17 @@ docker exec nginx-proxy-manager grep -rl "node.ctrlable" /data/nginx/
 
 ### 3.2 Environment file (.env)
 ```
-JWT_SECRET=<random 64-char hex>
+JWT_SECRET=<random 64-char hex>   # REQUIRED, min. 32 chars — server refuses to start without it (§7.4)
 GITHUB_PAT=<GitHub PAT with repo scope>
 DB_PASSWORD=<PostgreSQL password for admin user>
 DB_USER=admin
 DB_NAME=smartlock_db
 EXPO_TOKEN=<Expo access token for EAS CLI>
 LOG_RETENTION_DAYS=90        # optional; auto-purge system_events older than N days (0 = keep forever)
+LEGACY_DEVICE_AUTH=on        # optional; 'off' = reject devices without a device key (§7.2) — set once the fleet is updated
+TRUSTED_PROXIES=192.168.0.102  # optional; only these peers may supply X-Real-IP (§7.4)
+SERVICE_ACCOUNTS=ctrlablenode@gmail.com  # service account(s), comma-separated — outside the admin limit, expiring share (§7.15)
+SERVICE_SHARE_HOURS=48       # optional; how long a service share lives
 ```
 Loaded with `override: true` — essential, or pm2's cached env wins over `.env`.
 
@@ -134,11 +138,16 @@ grep "for (let i = 0; i <" server.js          # must show i++)
 grep "header.match" server.js                  # must show (.+) not (.)
 grep "keypadAttempts\[mac\].count" server.js    # must show count++ not count;
 grep "test(String(pin))" server.js              # must show /^\d+$/ not /^\d$/
-grep -A6 "function getFactoryAdminPassword" server.js  # must use hashNum += (accumulate), return "CN"+first 5 digits
+grep "store\[ip\].count" server.js               # must show count++ — without it NO rate limit works (it was broken until 2026-09-11)
+grep "bodyStr += chunk" server.js               # request body must be appended, not overwritten
+grep "00:00:00:00:00:00'\] = true" server.js     # must be EMPTY — a wildcard unlock queue opens other customers' doors (§7.3)
+grep -c "await requireAuth(req, res)" server.js # requireAuth is async (token_version check) — every call must be awaited
+grep "getFactoryAdminPassword\|syncMutationToHardware" server.js  # must be EMPTY — both removed for good (§7.1–7.3)
 grep "githubRes.on('data'" server.js            # must show data += chunk
 grep "override" server.js                       # must show override: true
 grep "ORDER BY d\.id\|ORDER BY id ASC" server.js  # must be EMPTY — devices table has no 'id' column, only mac_address. card_credentials DOES have 'id', so hits there are fine.
 ```
+The deploy workflow now fails the deployment itself if `count++` is missing (§7.7).
 
 ### 3.5 Database table ownership — recurring gotcha
 **Every new/altered table in this project has hit "must be owner of table" or "permission denied for schema public" at least once**, because the `admin` DB user isn't always the owner. After any migration failure, check and fix:
@@ -151,41 +160,55 @@ Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `sys
 
 ### 3.6 API Endpoints (current, full list)
 
+> **Auth column:** `JWT` = app user token (`Authorization: Bearer`), checked against `accounts.token_version`. `Device key` = `X-Device-Key` header from the centralka (§7.2). `—` = public. Every device-facing endpoint requires the device key; with `LEGACY_DEVICE_AUTH=on` devices that have no key bound yet are still admitted so they can take the OTA.
+
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | /api/auth/login | — | Login, returns JWT |
+| POST | /api/auth/login | — | Login, returns JWT (10 attempts / 15 min per client IP) |
 | POST | /api/auth/register | — | Create account — **now creates it UNVERIFIED**, emails a 6-digit code, returns `{status:"code_sent"}`. Re-registering an unverified email re-sends a fresh code |
 | POST | /api/auth/verify_email | — | Redeem the 6-digit code → activates the account, sends the welcome email, returns a JWT (auto-login) |
-| POST | /api/auth/forgot_password | — | Password reset step 1 |
-| POST | /api/auth/verify_reset_code | — | Password reset step 2 |
-| POST | /api/auth/confirm_password_reset | — | Password reset step 3 |
-| GET | /api/data | JWT | Dashboard data (lock state, users, logs, devices list, keypad_pins w/ schedule fields) |
+| POST | /api/auth/forgot_password | — | Password reset step 1 — 5/h per IP **and** per email; response never reveals whether the account exists |
+| POST | /api/auth/verify_reset_code | — | Password reset step 2 — the code is **burned after 5 wrong guesses** (§7.4) |
+| POST | /api/auth/confirm_password_reset | — | Password reset step 3 — min. 8 chars; bumps `token_version` (logs out every session) |
+| POST | /api/settings/password | JWT | Change password — **requires `currentPassword`**, bumps `token_version`, returns a fresh token for the calling phone |
+| GET | /api/data | JWT | Dashboard data (lock state, users, logs, devices list, keypad_pins w/ schedule fields, `pendingCommands`). **Card UIDs are no longer returned** (§7.6) |
 | GET | /api/unlock | JWT | Remote unlock (`?mac=` optional) |
 | GET | /api/toggle_learn | JWT | Toggle RFID learning mode |
-| POST | /api/settings/wifi | JWT | Change ESP32 WiFi credentials |
+| POST | /api/settings/wifi | JWT | **Owner-only.** New WiFi for the centralka, `{mac, wifiSSID, wifiPass}` (≤ 31 chars each) → queued `W` command (§7.3) |
+| POST | /api/devices/reset_key | JWT | Owner — or the service account in a **confirmed** service session (§7.15). Clears the bound device key so the board re-binds on its next poll (board swap / key mismatch, §7.2) |
+| POST | /api/devices/selftest | JWT | Owner or co-admin: queue a self-test (`G|0`, no relay, no card list); 1/min per device. `GET ?mac=` returns the latest report as plain-language checks + `serviceRecommended` (§7.15) |
+| POST | /api/devices/leave | JWT | A co-admin removes their **own** share (service cleans up after itself) |
+| POST | /api/service/start, confirm, end | JWT (service acct) | Service session: `start` shows a 6-digit code on the device OLED (`V` command) and pushes the owner; `confirm {code}` proves on-site presence (5 wrong guesses burn it); session valid 60 min (§7.15) |
+| POST | /api/service/command | JWT (service, confirmed) | `{mac, action}`: `diagnostics` (`G|1`, with card list), `relay_test` (`G|2`, **opens the door 0.4 s**), `restart` (`R`) |
+| GET | /api/service/report | JWT (service, confirmed) | Latest device report: raw values, checks, and the device↔DB card comparison (§5.8) |
+| POST | /api/hardware/diag | Device key | Device posts a self-test/diagnostic report (JSON); last 5 kept per device |
 | POST | /api/devices/auto_lock | JWT | **Owner-only.** Set that device's auto-lock delay, `{mac, seconds}` (1–60). Stored in `devices.auto_lock_delay_ms`, pushed to the ESP32 in the poll response as `auto_lock_delay` (ms). *(An earlier draft of this doc listed `/api/settings/auto_lock` — that endpoint never existed; see §6.7.)* |
-| GET | /api/firmware/version | — | Latest GitHub release check |
-| GET | /api/ota/push | JWT | Push OTA update |
-| GET | /api/hardware/poll | — | ESP32 heartbeat/command poll — carries `?email=<owner_email>` every cycle (used for auto-provisioning) and returns command flags incl. `unlock`, `ota`, and `deregister` (owner-triggered EEPROM wipe → CTRLABLE_SETUP) |
-| GET | /api/hardware/log | — | ESP32 remote log — **filters/simplifies OTA messages** before storing (raw detail stays in file log only, client sees 3 clean states: connecting/updating/success) |
-| GET | /api/hardware/log_button | — | Physical button press log |
-| POST | /api/hardware/scan | — | RFID scan reported by ESP32 — **this only logs/queues server-side; the actual unlock decision on RFID is made LOCALLY on the ESP32 from its own EEPROM, see §5.7.** |
-| POST | /api/auth/keypad | — | Keypad PIN verification — **fully server-side**, enforces schedule/expiry/max-uses |
+| GET | /api/firmware/version | — | Latest GitHub release check — **cached 5 min** (it used to hit GitHub with the PAT on every call) |
+| POST | /api/ota/push | JWT | Arm OTA for `{mac}` (or all devices the account can access). Downloads the release `.bin` **and its `.bin.sig`**; refuses unsigned releases (§7.5) |
+| GET | /api/hardware/poll | Device key | Heartbeat/command poll. Registers a new MAC to `?email=` (verified accounts only) and binds its key. `?ack=<id>` confirms executed commands; response carries `unlock`, `learn`, `ota`, `deregister`, `auto_lock_delay`, `cmds` (§7.3). No MAC = 400 (no more guessing by IP) |
+| GET | /api/hardware/log | Device key | Remote log (max 500 chars) — **filters/simplifies OTA messages** before storing (raw detail stays in the file log) |
+| GET | /api/hardware/log_button | Device key | Physical button press log (`?mac=`) |
+| POST | /api/hardware/scan | Device key | RFID scan report (log + push) — the unlock decision is LOCAL on the ESP32 (§5.7) |
+| POST | /api/hardware/register | Device key | Card learned in learning mode → `card_credentials` |
+| POST | /api/tamper | Device key | Tamper alert |
+| GET | /api/lock/download-firmware | Device key | Firmware image, only if OTA is armed for that device; sends `X-Firmware-Signature` |
+| POST | /api/auth/keypad | Device key | Keypad PIN verification — **fully server-side**, enforces schedule/expiry/max-uses; 5 attempts / 15 min per device |
+| — | /api/device/provision, POST /api/log | — | **Removed (410).** Unauthenticated, unused by the firmware (§7.2) |
 | POST | /api/auth/save_push_token | JWT | Save Expo push token |
 | POST | /api/keypad/add | JWT | Add PIN to a device (`mac`, defaults to the account's first device; supports `isGuestCode`, `expiresAt`, `maxUses`). Per-device scoping — see §4.1/§6.5 |
 | POST | /api/keypad/delete / toggle_active / rename | JWT | Manage PINs (authorized by device access — owner or co-admin) |
 | POST | /api/keypad/update_schedule | JWT | Set day/time window for a PIN |
-| POST | /api/user/update_schedule | JWT | Set day/time window for an RFID card — **enforced only in `/api/hardware/scan`'s logging/queue decision, NOT in the ESP32's actual local unlock decision. See §5.7 — this is a known limitation.** |
+| POST | /api/user/update_schedule | JWT | Set day/time window for an RFID card → queued `S` command; enforced **locally** by the ESP32 (§5.7) |
 | GET/POST | /api/devices/list, rename | JWT | Multi-device management. (Removal is the hard `deregister_*` flow below — the old soft `remove` endpoint was deleted because the device just re-registered on its next poll.) |
 | POST | /api/devices/deregister_request | JWT | Owner-only, **hard** deregister step 1: emails a 6-digit confirm code |
 | POST | /api/devices/deregister_confirm | JWT | Owner-only step 2: verifies code → deletes device + all its data → commands the ESP32 to wipe its EEPROM (factory reset) via the poll's `deregister:true` flag, blocking auto-re-registration for 120 s |
-| POST | /api/devices/invite, accept_invite | JWT | Multi-admin: owner invites a co-admin by email; email now carries a **link** (`invite_token`) AND a 6-digit `invite_code` fallback. `accept_invite` still redeems the code in-app |
+| POST | /api/devices/invite, accept_invite | JWT | Multi-admin: owner invites a co-admin by email; email now carries a **link** (`invite_token`) AND a 6-digit `invite_code` fallback. `accept_invite` still redeems the code in-app. **An address from `SERVICE_ACCOUNTS` bypasses `max_admins`** and its share is flagged `is_service` + expires after `SERVICE_SHARE_HOURS` (§7.15) |
 | GET | /invite?token= | — | **Server-rendered HTML** invite-acceptance page (opened from the email link). Shows device name + locked email, collects password + RODO consent |
 | POST | /api/devices/accept_via_web | — | Redeems an `invite_token`: creates the account (if new) + `device_shares` row. Never resets an existing account's password |
 | GET | /api/devices/shared_users | JWT | Owner-only: list co-admins on a device |
-| POST | /api/devices/revoke_share | JWT | Owner-only: remove a co-admin |
+| POST | /api/devices/revoke_share | JWT | Owner-only: remove a co-admin (service shares included) |
 | GET | /api/logs/search | JWT | Filtered/paginated log search — `mac`, `category`, `q`, `from`, `to`, `limit`, `offset` |
-| POST | /api/user/rename / toggle_active / delete | JWT | Manage RFID cards **in the server's database** (address by stable `id`; `idx` = hardware slot is only relayed to the device) — see §5.8 for the device-sync caveat |
+| POST | /api/user/rename / toggle_active / delete | JWT | Manage RFID cards (address by stable `id`). The change is written to the DB and **queued for the device by card UID** (`N`/`A`/`D`, §7.3) — responds `{queued:true}`; the app shows a warning until the device acks |
 
 ---
 
@@ -209,14 +232,21 @@ SELECT * FROM accounts;
 --               license_valid_until, p24_customer_ref
 -- verification: email_verified (DEFAULT true → existing accounts are grandfathered;
 --               registration sets it false explicitly), email_verify_code, email_verify_expires
+-- sessions:     token_version (bumped on password change/reset → old JWTs die, §7.4)
 
 -- Devices (multi-device: one account can own many; device_shares grants co-admin access)
 SELECT * FROM devices;
--- mac_address (PK, no 'id' column!), account_id, device_name, last_known_ip,
--- operational_mode, firmware_version, last_heartbeat, auto_lock_delay_ms
+-- mac_address (PK, no 'id' column!), account_id, device_name, last_known_ip (informational only,
+-- private IPv4 — the server never connects to it), operational_mode, firmware_version,
+-- last_heartbeat, auto_lock_delay_ms, device_key_hash (SHA-256 of the device key, §7.2)
+
+-- Command queue for devices (card changes, WiFi) — delivered in the poll, §7.3
+SELECT * FROM device_commands;  -- id, mac_address, cmd, created_at, delivered_at, acked_at
 
 -- Multi-admin
-SELECT * FROM device_shares;   -- id, mac_address, account_id, invited_by, created_at
+SELECT * FROM device_shares;   -- id, mac_address, account_id, invited_by, created_at,
+                               -- is_service (outside the admin limit), expires_at (NULL = permanent; service shares expire)
+SELECT * FROM device_reports;  -- id, mac_address, kind (0 self-test / 1 diagnostics / 2 +relay), payload (JSON), created_at
 SELECT * FROM device_invites;  -- id, mac_address, invited_email, invite_code, invite_token, invited_by, expires_at, used
 
 -- Convenience view: which device belongs to whom (owner email via JOIN,
@@ -279,6 +309,8 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 
 **TLS migration — DONE and verified in the field (Aug 2026).** All outbound cloud calls use `WiFiClientSecure` on port **443** through NPM (same path as the app), replacing plain-HTTP `WiFiClient` on 3000. Server identity is validated against a **pinned root CA** — `ROOT_CA_LE` holds the Let's Encrypt **ISRG Root X1** PEM (embedded) via `setCACert` — MITM-resistant; the LE leaf renews every ~90 days but the root is stable for years. Local AP/provisioning `server.accept()` clients are unchanged. Poll, keypad PIN, app unlock and OTA are all confirmed working over TLS; port 3000 is closed at the router.
 
+**Every request to the server carries `X-Device-Key`** (the device's random 32-byte key, §7.2) — poll, scan, register, keypad, tamper, logs, firmware download. The poll also sends `ack=<last executed command id>` and receives the next command batch in `cmds` (§7.3).
+
 Poll cadence is **1 s**, backing off to **8 s** after 3 consecutive failures. An earlier note here described 2.5 s with "widened read deadlines" — that approach is obsolete and was actively harmful; see §5.2b for why the read must end on a complete JSON body rather than on socket close.
 
 ### 5.2b Dual-core split — **NEVER call TLS from `loop()`** (read before touching networking)
@@ -299,6 +331,8 @@ Layout now:
 **Read the response until the JSON is complete, not until the socket closes.** With TLS, `connected()` stays true well after the body arrives, so a "wait for close" loop burns the whole deadline. A 6 s read window made each poll take ~6 s → remote unlock timed out, the device flapped offline for 15–20 s. The loop now counts braces and exits on the closing `}`; the deadline is only a backstop.
 
 ### 5.3 OTA update workflow
+**Only signed images are installed (§7.5).** `compile-ESP32.yml` signs every build with the `FIRMWARE_SIGNING_KEY` secret and attaches `lock_<sha>.bin.sig`; the server refuses to arm OTA for a release without it, and the firmware rejects an image whose signature doesn't match the public key compiled into it. A manual Arduino-IDE build must be signed the same way (`openssl dgst -sha256 -sign <key> -out lock_x.bin.sig lock_x.bin`) before it is attached to a release.
+
 1. Build `.bin` (Arduino IDE or GitHub Actions auto-build on push)
 2. **Don't edit an existing release's assets** — delete the release (keep the tag), draft a new one on the same tag, attach the new `.bin`. Keeps version string stable while giving OTA logic a fresh `release.id`.
 3. `rm /opt/smartlock-server/updates/lock_*.bin` to clear cache
@@ -324,10 +358,13 @@ Firmware additionally writes `0` to offset 480 on factory reset and zeroes impla
 | 260 | ssid | ✅ |
 | 292 | pass | ✅ |
 | 324 | owner_email | ✅ |
+| 400 | local admin password (16 chars, offline mode only) — random per offline setup, wiped by factory reset | ✅ since 2026-09-11 (§7.1) |
 | 480 | installedReleaseId | ✅ — **factory-reset trap, see §5.3** |
 | 0 / 10+ / 220+ | totalCards / `User` structs / isCardActive flags | ⚠️ **fallback only** — used when LittleFS fails to mount, capped at 10 cards |
 
 **Degradation is deliberate:** if `LittleFS.begin()` fails, `fsMounted = false` and the firmware falls back to the old EEPROM path (10-card cap) instead of losing cards entirely — a lock must never lose its credentials. `persistCards()` dispatches to whichever store is active; on first boot with an existing EEPROM card set it migrates them into `/cards.db` (`[FS] Migracja kart EEPROM->LittleFS`).
+
+**NVS (Preferences, namespace `ctrlsec`)** holds the device secrets that deliberately **survive a factory reset**: `dkey` (device key, §7.2) and `appw` (WPA2 password of `CTRLABLE_SETUP`, §7.1). Keeping the key means a factory-reset device re-attaches to its existing server record instead of being rejected; an ownership change goes through deregistration anyway.
 
 `factoryResetSettings()` clears **both**: `0xFF` across all 512 EEPROM bytes (plus `totalCards = 0`, and `0` written back to offset 480) **and** removal of `/cards.db` + `/pins.db`.
 
@@ -389,24 +426,7 @@ Now `card_credentials.id` is the single identity: `/api/data` returns both `id` 
 
 **Card naming only started working on Aug 17 2026.** The "new profile name" field wrote to `newName`, but `handleToggleLearn()` called `executeCommand('/api/toggle_learn')` with no parameters, so the name was silently dropped and every card became "Nowy Użytkownik". `/api/toggle_learn` is a **GET** (the helper only POSTs when handed a payload), so the name has to ride in the URL: `?username=...` → `learningQueues[mac]` → poll response `username` → firmware `req_username` → `pendingUsername`.
 
-**To inspect the ESP32's actual EEPROM state directly** (bypasses the cloud/database entirely):
-```bash
-curl -s 'http://192.168.0.76/api/data?pass=<factory-admin-password>'
-```
-Compute the factory admin password:
-```bash
-node -e "
-const mac = 'D4:E9:F4:78:08:60'; const salt = 'CTRLABLE_KEY_2026';
-const combined = mac.toUpperCase() + salt; let h = 0;
-for (let i=0;i<combined.length;i++) h += combined.charCodeAt(i)*(i+1);
-console.log('CN'+String(h).substring(0,5));
-"
-```
-To delete a stray local-only EEPROM entry directly:
-```bash
-curl -s 'http://192.168.0.76/api/delete_user?idx=<N>&pass=<factory-password>'
-```
-**Recommended clean-resync procedure** if the two get out of sync: clear the device-side entries via the local endpoint above, confirm `total:0`, then re-learn the card fresh through the app — this writes to both sides simultaneously and keeps them matched. (These local endpoints address cards by **hardware slot**, which is exactly the ambiguity described above — prefer the app, and use them only for inspection or when the app can't reach the device.)
+**Direct local inspection is gone (2026-09-11).** In online mode the ESP32 no longer listens on the home network at all, and the MAC-derived "factory password" that these commands used no longer exists (§7.1). Card changes reach the device by UID through the command queue (§7.3), which also removes the slot-index ambiguity described above for everything the app does. To see what the device holds, use the app, the server logs (`Hardware Remote Log` / `User Mutation`) and `device_commands` (acked or still pending).
 
 For a genuinely clean slate, the physical factory reset (§5.1) plus deleting that MAC's rows server-side is more reliable than reconciling by hand:
 ```sql
@@ -421,15 +441,12 @@ rfid.PCD_SetAntennaGain(rfid.RxGain_max);  // in forceHardwareRFIDReset(), after
 Set to maximum (48dB) to help with weaker tags (keyfobs vs. cards). **Tested and did not resolve** a specific case of a keyfob failing to read behind a keyboard enclosure — that turned out to be a pure physical range limitation (small keyfob antenna + added plastic distance), not a gain/software issue. RC522's antenna is etched directly on the PCB (not a swappable/extendable coil), so options there are limited to: physically reducing the distance (machining a recess in the enclosure), or accepting cards-only in that specific mounting location.
 
 ### 5.10 Provisioning page security
-The local setup page (`http://192.168.4.1` in `CTRLABLE_SETUP` AP mode) does **not** pre-fill the saved WiFi password anymore:
-```cpp
-client.println("<input type='password' id='wifi_pass' name='p' placeholder='Password' required>");
-```
+See **§7.1** for the full model. In short: the setup page (`http://192.168.4.1`) exists **only** on the `CTRLABLE_SETUP` access point, which is WPA2-protected with a random per-device password shown on the OLED **only in first-setup mode**; in online mode nothing listens on the home network. The page never pre-fills the saved WiFi password, escapes the SSID/email it echoes, and the full request line (which contains the WiFi password) is no longer written to the log.
 
 ### 5.11 Deregistration command (owner-triggered device wipe)
 Every poll response is parsed for `"deregister":true` (alongside `unlock`/`ota`/`learn`). When set, the firmware runs `factoryResetSettings()` then `ESP.restart()`. On reboot `loadConfiguration()` finds no `0x55` magic at addr 250 → `provisioningMode = true` → `CTRLABLE_SETUP`. This wipes **stored data only** — 0xFF across the 512-byte EEPROM (WiFi, owner_email, release id, legacy card fallback) **plus** LittleFS `/cards.db` and `/pins.db`; the program flash is separate and untouched.
 
-**A deregister only reaches a device that is online and polling.** A device sitting in `CTRLABLE_SETUP`, or one that can't reach the server, never receives the flag — use the physical reset button (§5.1) instead. Likewise a factory-reset, unprovisioned device blocks in the provisioning `while(true)` loop and never starts `networkTask`, so it sends **no poll and no remote log at all**: total silence server-side is expected until it is provisioned, not a fault. The server sends `deregister:true` only during the 120 s window after an owner confirms deregistration (§3.6, §6.11), and blocks auto-re-registration during that window so the wiped device can't immediately re-add itself. **This command handling must be present in the deployed firmware** — build + OTA after changing it.
+**A deregister only reaches a device that is online and polling.** A device sitting in `CTRLABLE_SETUP`, or one that can't reach the server, never receives the flag — use the physical reset button (§5.1) instead. Likewise a factory-reset, unprovisioned device blocks in the provisioning `while(true)` loop and never starts `networkTask`, so it sends **no poll and no remote log at all**: total silence server-side is expected until it is provisioned, not a fault. The server sends `deregister:true` only during the 120 s window after an owner confirms deregistration (§3.6, §6.11), and blocks auto-re-registration during that window so the wiped device can't immediately re-add itself. **The wipe command is only handed to the real device:** the hash of its key is captured before the DB row is deleted, and polls in the window without that key get 401 (§7.2). **This command handling must be present in the deployed firmware** — build + OTA after changing it.
 
 ---
 
@@ -560,50 +577,140 @@ Use `cmd.exe`, not PowerShell, if `npm` is blocked by execution policy. Press `w
 ### 6.11 Device deregistration (hard removal) — Settings → "⚠️ Strefa zaawansowana"
 Owner-only, per selected device, two-step with an emailed 6-digit code (the section only renders when the active device's `isOwner` is true). Flow: "🔌 Odłącz i zresetuj centralkę" → `deregister_request` emails a code → enter code → `deregister_confirm`. On confirm the server deletes the device and **all its data** (keypad PINs, cards, logs, co-admin shares) and commands the ESP32 (via poll `deregister:true`) to run `factoryResetSettings()` — wiping **stored data only** (EEPROM: WiFi + owner_email + release id; LittleFS: `/cards.db`, `/pins.db`); the **firmware/program flash is untouched**. The device reboots into `CTRLABLE_SETUP`; reconnecting means re-provisioning it as new. See §3.6 for the endpoints and §5.11 for the firmware side. **Requires the updated firmware (OTA) to work** — old firmware ignores `deregister` and simply re-registers after the 120 s block.
 
+### 6.12 Security-relevant app behaviour (2026-09-11)
+- **Session token and the offline local password live in `expo-secure-store`** (iOS Keychain / Android Keystore), not AsyncStorage. A small wrapper redirects just those two keys, so the rest of the code still calls `AsyncStorage`; values stored by older builds migrate on first read. On web it falls back to plain storage.
+- **The hidden installer menu (5 taps on the logo) exists only in `__DEV__` builds** and forces `https://` — it used to remap the backend to plain `http://`, sending the password and token in clear text.
+- **Password change** (Settings) asks for the current password and stores the fresh token the server returns; other phones are logged out.
+- **"⏳ Zmiany czekają na centralkę (N)"** banner on Dashboard and the user list while `pendingCommands > 0` — until the device acks, a blocked card still opens the door.
+- **Setup instructions mention the `CTRLABLE_SETUP` password** shown on the centralka's display.
+- WiFi change and OTA now send the selected device's `mac`; minimum password length is 8 everywhere.
+- **Self-test** button on every device card (*Centralki*) with a plain-language report; **"🛠️ Zaproś serwis (poza limitem)"** in *Zespół* (shown even when the admin limit is full); service shares are labelled with their expiry; a co-admin can leave a device ("Odłącz się"). The **Serwis** screen (session start → code from the OLED → diagnostics / relay test / restart / key reset / leave) renders only for `account.isServiceAccount` (§7.15).
+
 ---
 
 ## 7. Security
 
-### 7.1 Firewall (UFW on smartlock-backend)
+**Security audit 2026-09-11 → fixes in this revision.** The audit found that the door could be opened without any permission: from the customer's WiFi (unauthenticated `/save_setup` handing out the admin password, a local unlock guarded by a password derived from the MAC with a public algorithm), from anywhere in radio range in offline mode (open `CTRLABLE_SETUP`), and even at other customers' sites (wildcard remote-unlock queue). It also found that blocking a card in the app never reached devices outside the server's LAN, that devices were not authenticated at all (MAC = identity), that password-reset codes could be brute-forced (and the rate limiter never counted), and that anyone could trigger OTA on every device. The sections below describe the model that replaced it. The full audit report with exploit details is kept **outside this public repository**.
+
+**Principles:** the server trusts a device only by its key, never by MAC or IP; the server never connects *to* a device — the device pulls everything over TLS; a centralka in online mode exposes no port on the home network; firmware runs only if signed by a key that is not on the server.
+
+### 7.1 Device network exposure
+- **Online mode: no listening socket on the home network.** `server.begin()` is never called when connected to WiFi, and `server.end()` runs when the device returns online from the fallback AP. All management goes through the server.
+- **`CTRLABLE_SETUP` is WPA2-protected.** Password: 12 random characters (`apPassword`, NVS key `appw`), generated at first boot, kept across factory resets (like a sticker). **The OLED shows it only in first-setup mode** (new device or factory reset with the button inside the enclosure); the offline-mode screen and the fallback AP never display it. It is also printed on the serial port at boot (physical access).
+- **Where the AP runs:** first setup, offline-standalone mode, and as a fallback when WiFi fails at boot (so a changed router can be fixed on site — still behind WPA2).
+- **One local HTTP dispatcher (`handleLocalHttp`) serves the AP only:** the setup page / `/save_setup`, and the offline-mode local API. The old `handleProvisioningServer()` ran in every `loop()` iteration "also when online" with no authentication; it and `handleOnlineInstallerServer()` (which displayed the WiFi password) are gone.
+- **Offline local API** is authorised by `localAdminPass`: 16 random characters generated **at every offline setup** (EEPROM @400), returned once in the `/save_setup?offline=1` JSON as `admin_pass` (field name kept for app compatibility), compared in constant time, 5 failures → 5 min lockout. Online setups clear it, so an online device has no usable local API even in fallback mode. **Removed from the local API:** `/api/update` (unsigned firmware over LAN), `/api/save_settings`, card UIDs and the admin password in `/api/data`.
+- The old MAC-derived "factory password" (`getFactoryAdminPassword()`, a few thousand possible values computable from a MAC visible over the air) is deleted from firmware and server. Devices still running old firmware remain exposed until they take the OTA (§7.8).
+
+### 7.2 Device key — how the server authenticates a centralka
+- At first boot the firmware draws **32 random bytes** from the hardware RNG (radio enabled first, so `esp_random()` is truly random) and stores them in NVS (`dkey`). Every request carries it as `X-Device-Key: <64 hex>` over TLS.
+- The server stores only `SHA-256(key)` in `devices.device_key_hash` and compares in constant time (`authenticateDevice()`). Poll, scan, register, keypad, tamper, logs and firmware download all require it; failures are logged as `Auth Rejection … (missing_key|bad_key|unknown_device)`.
+- **Registration** (poll from an unknown MAC with `?email=`): only to a **verified** account, and the key is bound in the same INSERT. A second party that knows the MAC cannot take the device over — its key won't match.
+- **Migration of deployed devices (TOFU):** a device registered before this change has `device_key_hash = NULL`. The first poll that carries a key binds it (`UPDATE … WHERE device_key_hash IS NULL`, so exactly one key wins). Until `LEGACY_DEVICE_AUTH=off`, devices without any key are still admitted — they need to reach the server to take the OTA that gives them a key. They receive no queued commands (they wouldn't understand them). **Residual risk during the transition:** someone who knows a legacy device's MAC could bind their own key first; the real device is then rejected (401) — denial of service, not takeover. The owner fixes it with `POST /api/devices/reset_key`. Switch `LEGACY_DEVICE_AUTH=off` as soon as the fleet runs the new firmware.
+- `/api/device/provision` (bound any MAC to any `ownerId`, no auth, unused by the firmware) and `POST /api/log` (attributed entries by source IP = the proxy) are removed.
+
+### 7.3 Command queue — how changes reach the device
+- Card and WiFi changes are rows in **`device_commands`** and ride back in the poll response (`"cmds":"12:A|ABCDEF12|0;13:D|11223344"`, max 5 per poll). The device executes them on core 1 (`applyPendingCommands()`), persists, and confirms with `ack=<highest id>` in the next poll; the server marks them `acked_at`.
+- Formats: `A|<uid8>|<0/1>` active, `D|<uid8>` delete, `N|<uid8>|<name hex, ≤15 B>` rename, `S|<uid8>|<en>|<days>|<start>|<end>` schedule, `W|<ssid hex>|<pass hex>` WiFi (device restarts only after the server has the ack).
+- **Cards are addressed by UID (first 4 bytes), not by slot**, and commands carry the target state (not "toggle") — re-delivery is harmless and deleting one card cannot shift the target of the next command. Unknown UIDs are ignored and still acked.
+- Replaces `syncMutationToHardware()`, which made the server open plain HTTP to `last_known_ip` (a private address in the customer's LAN) with the MAC-derived password: it only ever worked on the server's own LAN, and a spoofed `ip=` in the poll turned it into SSRF. `last_known_ip` is now informational (private IPv4 only).
+- **The remote-unlock queue is per device only.** The former `unlockQueues['00:00:00:00:00:00']` wildcard was checked by every device's poll, so one customer's remote unlock opened the first other customer's door that polled within 8 s.
+- Retention: acked commands are purged after 7 days (a `W` command contains the WiFi password in hex), orphaned ones after 30.
+
+### 7.4 Accounts and sessions
+- **Rate limiting works now.** `checkRateLimit()` had `store[ip].count;` without `++` — no limit (login, reset, invites) ever triggered. Limits are per real client IP: behind NPM the server takes `X-Real-IP`, but only from `TRUSTED_PROXIES`.
+- **One-time codes** (email verification, reset, deregistration, account deletion, invites) come from `crypto.randomInt`. **Reset and verification codes are burned after 5 wrong guesses**; code checks are also limited to 30 / 15 min per IP; reset requests to 5/h per IP and per email. Deregistration / account-deletion codes likewise die after 5 wrong attempts.
+- **`token_version`:** the JWT carries `tv`; `requireAuth` (now async) rejects tokens whose version differs from `accounts.token_version`, and tokens of deleted accounts. A password change or reset increments it → every other session is logged out. Changing the password requires the current one.
+- **`JWT_SECRET` has no default** — the server exits at startup if it is missing or shorter than 32 chars (a known default secret = anyone can forge any account's token). JWTs are verified with `algorithms: ['HS256']`.
+- Minimum password length **8** (register, reset, change, invite page). Request bodies are capped at 64 KB (413).
+- Only the **owner** may change a device's WiFi (co-admins could previously cut the device off the network).
+
+### 7.5 Signed firmware
+- **ECDSA P-256.** The private key exists only as the GitHub secret `FIRMWARE_SIGNING_KEY` (and in an offline backup). The public key is compiled into the firmware (`FIRMWARE_PUBKEY_PEM`).
+- `compile-ESP32.yml` signs `lock_<sha>.bin` → `lock_<sha>.bin.sig` and, before publishing, verifies the signature against the public key extracted from `access_control.ino`. No secret → no release.
+- `/api/ota/push` requires a JWT, arms OTA **per device** (`otaPendingDevices[mac]`) for devices the account can access, and refuses releases without `.sig`. `/api/lock/download-firmware` serves the image only to an authenticated device with armed OTA and sends the signature in `X-Firmware-Signature`.
+- The firmware hashes the image while writing it, verifies the signature before `Update.end()`, and aborts on mismatch (`[OTA PULL ERR] Podpis firmware NIEPRAWIDLOWY`). A compromised server or GitHub account can no longer push code to the locks.
+- The old UNO R4 workflow (`compile.yml`, auto-released unsigned builds on `v*` tags) is manual-only now.
+- **Rotating the signing key** needs one transitional release signed with the *old* key that contains the *new* public key; after that, sign with the new key.
+
+### 7.6 RFID cards — UID cloning (residual risk)
+Cards are matched on the 4-byte UID only. UID-only cards/fobs (MIFARE Classic, generic 125 kHz-style fobs) can be copied onto a "magic" card with a cheap reader in seconds, e.g. from a pocket. **This is not fixable in software on the current reader** — it needs cards with cryptographic authentication (MIFARE DESFire EV2/EV3) and a reader/firmware that performs it. Mitigations in place: UIDs are no longer sent to the app or exposed by the local API; blocking a card is delivered reliably (§7.3); schedules limit when a copied card works. Customers should be told about this limitation.
+
+### 7.7 Repository and deployment
+- **Make the GitHub repository private.** It is public; its history contains an old GitHub PAT and an old plain-text DB password. Both must be revoked/rotated (verify at github.com/settings/tokens and §4.4); if the old DB password was ever reused elsewhere, change it there too. Deleting files does not remove them from history.
+- **`deploy.yml`** pins the server's SSH host key (`SERVER_KNOWN_HOSTS` secret, `StrictHostKeyChecking=yes`, previously `no`) and runs in the GitHub environment **`production`** — configure *Required reviewers* there so a push no longer deploys without approval. It also refuses to finish if the `count++` fix is missing.
+- Every push to `main` touching `Server_app/server.js` deploys to production — keep that in mind before pushing.
+
+### 7.8 Rollout checklist for the 2026-09-11 changes (order matters)
+1. **GitHub secrets:** `FIRMWARE_SIGNING_KEY` (content of `firmware_signing_private.pem`, kept outside the repo) and `SERVER_KNOWN_HOSTS` (`ssh-keyscan -p 22044 <host>`, fingerprint checked against `/etc/ssh/ssh_host_ed25519_key.pub` on the server). Optionally the `production` environment with reviewers.
+2. **Server `.env`:** confirm `JWT_SECRET` (≥ 32 chars) exists — otherwise the new server will not start. Keep `LEGACY_DEVICE_AUTH` unset (= on) for now.
+3. **Deploy `server.js`**, then check `grep Migration /var/log/smartlock/smartlock_system.log | tail -3` — the new `device_key_hash`, `token_version` and `device_commands` must be created (table ownership, §3.5). Existing app sessions keep working (tokens issued before the change carry no `tv` and count as version 0).
+4. **Push the firmware** → signed release → trigger OTA per device from the app. After the update each device binds its key on the first poll (`Przypięto klucz urządzenia` in the log). Pending card commands queued meanwhile are delivered right after.
+5. **Offline-standalone devices** can only be updated over USB, and after the update their old local password and the (now WPA2) AP password are unknown to the app: do a **factory reset and set them up again** (the OLED then shows the AP password).
+6. When every device shows a bound key (`SELECT mac_address FROM devices WHERE device_key_hash IS NULL;` returns nothing), set `LEGACY_DEVICE_AUTH=off` and restart.
+7. Make the repository private and revoke the old PAT (§7.7). Ship the app build (SecureStore, password change, dev-only installer menu, service screen, self-test).
+8. Set `SERVICE_ACCOUNTS` in `.env` (default `ctrlablenode@gmail.com`), enable **2FA on that Gmail** and give it a strong app password — it is the only account that can open service mode (§7.15).
+
+### 7.9 Firewall (UFW on smartlock-backend)
 ```bash
 ufw status
 # 3000 ALLOW from 192.168.0.102   # NPM proxy ONLY
 # 8081 ALLOW from 192.168.0.102   # NPM app proxy
 # 22   ALLOW from 192.168.0.0/24  # SSH from LAN
 ```
-**Tightened Aug 13 2026 (hardening step #2):** 3000 now accepts **only** from NPM (192.168.0.102). The old `3000 ALLOW from 192.168.0.76 (ESP32)` and `192.168.0.1 (hairpin NAT)` rules were removed, and the router's port-3000 forward was deleted (§2.3) — because the ESP32 now reaches the server over TLS via 443 → NPM → 3000, so nothing needs raw 3000 except NPM itself. The old unencrypted-transport internet exposure is closed.
+**Tightened Aug 13 2026 (hardening step #2):** 3000 now accepts **only** from NPM (192.168.0.102). The old `3000 ALLOW from 192.168.0.76 (ESP32)` and `192.168.0.1 (hairpin NAT)` rules were removed, and the router's port-3000 forward was deleted (§2.3) — because the ESP32 now reaches the server over TLS via 443 → NPM → 3000, so nothing needs raw 3000 except NPM itself. The old unencrypted-transport internet exposure is closed. (The deploy workflow reaches SSH on port 22044 — keep it key-only and covered by fail2ban.)
 
-### 7.2 Fail2ban (on Proxy, 192.168.0.102)
+### 7.10 Fail2ban (on Proxy, 192.168.0.102)
 ```bash
 fail2ban-client status nginx-4xx
 ```
 Jail config must point at `/opt/npm/data/logs/*_access.log` (the real bind-mount path), not a Docker volume UUID.
 
-### 7.3 Tailscale
+### 7.11 Tailscale
 ```bash
 tailscale status
 ```
 See §6.2 for the LXC host-side TUN config needed to run it inside this privileged container.
 
-### 7.4 Rate limiting
-120 req/min per IP (NPM). See §2.4.
+### 7.12 Rate limiting
+Two layers: NPM (`limit_req`, §2.4) and, since 2026-09-11, a **working** application layer (§7.4). NPM's zone can silently disappear when the proxy host is recreated — the app layer no longer depends on it.
 
-### 7.5 Credential rotation
-All in `.env`. Edit, `pm2 restart ctrlable-server` — `override: true` means no other steps needed for the server to pick it up.
+### 7.13 Credential rotation
+All in `.env`. Edit, `pm2 restart ctrlable-server` — `override: true` means no other steps needed for the server to pick it up. Rotating `JWT_SECRET` logs everyone out.
 
-### 7.6 Two kinds of "keys" — how each is produced
+### 7.14 Keys and secrets — what exists and where it comes from
+| Secret | Generated by | Stored | Purpose |
+|---|---|---|---|
+| License codes | `licensekey.js` on the server | `license_codes` | Redeemed in the app — procedure in `LICENSING.md` §6.1 |
+| Device key | firmware, first boot (HW RNG) | device NVS `dkey`; server keeps SHA-256 only | Device → server authentication (§7.2) |
+| `CTRLABLE_SETUP` password | firmware, first boot | device NVS `appw` | WPA2 of the setup/offline AP (§7.1) |
+| Local admin password | firmware, each offline setup | device EEPROM @400; app SecureStore | Offline-mode local API (§7.1) |
+| Firmware signing key | `openssl ecparam -name prime256v1` (once) | GitHub secret + offline backup; **never in the repo** | Signs releases (§7.5) |
+| `JWT_SECRET` | `openssl rand -hex 32` | server `.env` | Signs app sessions (§7.4) |
 
-Easy to confuse, so worth stating plainly: **license codes come from a script, device admin passwords do not exist as stored secrets at all.**
+### 7.15 Service access — no standing backdoor, no service role in the DB
 
-**License codes → `licensekey.js`, run on the server.** Registered in the `license_codes` table before being handed to a customer; redeemed in the app. Full operational procedure (periods, format, one-time-use guarantee, manual tier override) is in **`LICENSING.md` §6.1** — not duplicated here.
+**Design (2026-09-11).** Service is an ordinary account listed in `SERVICE_ACCOUNTS` (default `ctrlablenode@gmail.com`). It has **no standing access to anything**: a customer invites it like any co-admin ("🛠️ Zaproś serwis" in *Zespół*), and only that device, only until the share expires. There is no service password in firmware, nothing computable from a MAC, and nothing reachable without the customer's grant — a leaked service login exposes at most the devices that share to it *at that moment*, and even those only for co-admin actions (see the two levels below). Only the owner can invite, so a leaked account cannot grant itself access anywhere.
 
-**Device admin password → computed, never stored.** `getFactoryAdminPassword(mac)` exists **twice**, identically, in `server.js` and in `access_control.ino`: take the device MAC, append the fixed salt `CTRLABLE_KEY_2026`, accumulate `char * (i+1)` over the string, return `"CN"` + the first 5 digits (e.g. `CN39468`). Both sides derive the same value independently, so it is never transmitted or persisted. The device also returns it once in the offline-provisioning JSON so the app can talk to it locally.
+**What makes a service share different**
+- **Outside the admin limit.** `POST /api/devices/invite` skips `max_admins` when the invitee is a service address, and neither service shares nor service invites are counted for anyone else — a customer at the free tier's 2 admins never has to remove a co-admin to let service in. `enforceLicenseLimits()` never revokes a service share either.
+- **It expires by itself** — `device_shares.expires_at = now + SERVICE_SHARE_HOURS` (48 h). `SHARE_ACTIVE` is part of every access query, so an expired share is dead immediately, not only after the daily purge. Re-inviting refreshes the expiry.
+- **It can be ended by either side:** owner → *Odbierz*; service → `POST /api/devices/leave` ("Zakończ dostęp serwisowy"). Both are logged as `system_events`.
 
-It authorises the device's own local endpoints (`?pass=` on `/api/rename_user`, `/api/delete_user`, `/api/toggle_user_active`, `/api/set_schedule`, `/api/save_settings`) — the ones the server calls over LAN via `syncMutationToHardware`.
+**Two levels inside a service share**
+1. *Co-admin level* — what the share itself grants (unlock, cards, PINs, logs): available as soon as the invite is accepted.
+2. *Service level* — diagnostics with the card list, relay test, restart, device-key reset: only in a **confirmed service session**, which requires being physically at the device:
+   - `POST /api/service/start {mac}` → the server draws a 6-digit code (`crypto.randomInt`), queues `V|<code>` and the device shows it on the OLED for 15 min (`TRYB SERWISOWY / Kod do aplikacji`). The code is never returned to the app and never logged. The owner gets a push: *"Serwisant rozpoczął sesję…"*.
+   - `POST /api/service/confirm {mac, code}` → session confirmed for 60 min; 5 wrong codes burn it.
+   - `POST /api/service/command {mac, action}` → `diagnostics` (`G|1`), `relay_test` (`G|2`, **opens the door for 0.4 s** — the app asks for confirmation), `restart` (`R`, executed after the ack like a WiFi change). `POST /api/devices/reset_key` also accepts a confirmed session.
+   - `GET /api/service/report?mac=` → the latest report (`device_reports`): raw values (RFID chip version register, OLED, LittleFS mount/self-test/usage, keypad rows at rest, tamper, RSSI, NTP, heap free/min, uptime, `esp_reset_reason`), the same plain-language checks the customer sees, and the **device↔DB card comparison** (only-on-device / only-in-DB / active mismatch, by full UID server-side; the app shows only the last 4 hex chars). This replaces the local `/api/data` inspection that was removed in §7.1 and is what §5.8 drift diagnosis now runs on.
+   Only accounts in `SERVICE_ACCOUNTS` see the *Serwis* screen — and the server enforces the same list, so a customer cannot enter service mode by accident or on purpose.
 
-> ⚠️ **Known weakness — this is obfuscation, not authentication.** The salt is embedded in the firmware and the "hash" is a simple weighted sum. Anyone who owns one unit can extract the salt, and the MAC of any other unit is visible on its own AP — so the password of *any* device is derivable. It is adequate to stop casual poking at the local panel; it is **not** a defence against a motivated attacker on the same LAN. Any future hardening (per-device random secret provisioned at first boot, HMAC challenge-response) is a firmware+server change and would need a migration path for already-deployed units.
->
-> Also note both copies must stay **byte-for-byte identical** — any drift silently breaks every server→device mutation (§8).
+**Customer self-test** — `POST /api/devices/selftest {mac}` (owner or co-admin, 1/min) queues `G|0`; the device answers with the same report **minus the card list and minus the relay test**. `GET /api/devices/selftest?mac=` returns `checks[]`, a one-line `summary` and `serviceRecommended` when any check fails ("Wykryto problem: Klawiatura. Zalecany kontakt z serwisem."). Reports are data from the device, so the server whitelists fields and types (`sanitizeDeviceReport`) and keeps the last 5 per device (30-day retention).
+
+**Firmware side.** Commands `V|<code>` (show code), `G|<mode>` (build report on core 1 → `buildDiagnosticReport()`, sent by `networkTask` via `POST /api/hardware/diag` with the device key), `R` (restart after ack). The report includes `WiFi.RSSI()`, `ESP.getFreeHeap()/getMinFreeHeap()`, `esp_reset_reason()` and reads the MFRC522 `VersionReg` (0x91/0x92 = reader present; 0x00/0xFF = no SPI answer).
+
+**Residual points.** One shared service login means no per-technician attribution — fine for a one-person service; when there are several technicians, list one address per person in `SERVICE_ACCOUNTS` (the same design, better audit). Protect the Gmail with 2FA and rotate the app password when someone leaves. The service account is deliberately **not** stored as a role in the database — adding or removing one is a `.env` edit plus restart, never a per-visit change.
 
 ---
 
@@ -622,7 +729,7 @@ Check in order: (a) nginx rate limit (§2.4), (b) ESP32 WiFi (`ping -c3 192.168.
 Means the ESP32 can't reach `PROXMOX_SERVER:PROXMOX_PORT`. Checklist:
 1. Is port 3000 actually forwarded on the router to `192.168.0.199:3000`? (§2.3) — this specific failure mode cost an entire debugging session because the forward wasn't in place while `PROXMOX_SERVER` correctly pointed at the domain.
 2. Is `pm2` running `ctrlable-server`? `pm2 list`
-3. Test from the server itself: `curl -s http://192.168.0.199:3000/api/hardware/poll?mac=test`
+3. Test from the server itself: `curl -s http://192.168.0.199:3000/api/hardware/poll?mac=test` — **400 is the healthy answer now** (invalid MAC); a device-level `401` in the log means a key problem (§7.2), not connectivity.
 4. **Do not** "fix" this by hardcoding a local LAN IP into `PROXMOX_SERVER` — that breaks every field-deployed device that isn't on this specific LAN. The domain name is correct; the router port-forward is what was missing.
 
 Symptom cascade when this is broken: button/keypad/RFID all appear non-functional, because (a) the button-check loop is nested inside the poll's connection-wait block and never executes if `httpCheck.connect()` fails immediately, (b) keypad PIN verification requires a live server round-trip, (c) any server-side unlock queueing (remote unlock from app) never reaches the device.
@@ -666,9 +773,12 @@ curl -s -H "Authorization: token <PAT>" https://api.github.com/repos/pepiuspl/Ar
 # "Bad credentials" → regenerate PAT (repo scope), update .env, pm2 restart
 ```
 
-### 8.9 WiFi change from app does nothing
-1. `handleProvisioningServer()` must run every `loop()` iteration, not only in provisioning-mode branch.
-2. Server's `getFactoryAdminPassword(mac)` must byte-for-byte match firmware's algorithm — any drift silently rejects the request.
+### 8.9 WiFi change / card change from the app "does nothing"
+Since 2026-09-11 both go through the command queue (§7.3). Check in order:
+1. `SELECT id, cmd, delivered_at, acked_at FROM device_commands WHERE mac_address='<MAC>' ORDER BY id DESC LIMIT 10;` — `delivered_at` NULL = the device isn't polling (offline) or is on old firmware (legacy devices get no commands — update them).
+2. Delivered but never acked → the device received the batch but is not confirming; check the serial log for `[CMD]` / `Serwer odrzucil klucz`.
+3. WiFi change: only the owner may do it (403 for co-admins); SSID and password max. 31 characters; the device restarts only after its ack reached the server.
+4. **Do not** reintroduce a server → device HTTP call or run the setup server while online — both were security holes (§7.1).
 
 ### 8.10 Relay stuck open / doesn't respond / flaky
 Re-read §5.6 in full before touching code — this was an extensive, multi-session diagnosis. Do not assume the old logic (floating-based) is still correct if the physical relay module has been swapped again; re-run the multimeter test sequence from scratch on real hardware rather than reasoning about it in the abstract, since this module's behavior turned out to be genuinely counter-intuitive (both driven HIGH *and* driven LOW initially appeared to "lock" in one round of testing, but a later, more careful test — wire fully connected through the GPIO the whole time, not manually touched — gave different, and ultimately correct, results). Trust freshly-measured data over remembered conclusions from earlier in the same debugging session.
@@ -696,15 +806,20 @@ tail -c 400 /tmp/bundle.txt   # only needed if not 200
 ```
 Going forward, deploy the app entry directly as `App.js`. Also ensure the pm2 process runs `--lan` (never `--tunnel` — ngrok fails; see §6.2/§8.5).
 
+### 8.14 Device gets 401 on every poll
+The server rejects its key (`Auth Rejection … bad_key` in the log). Causes: the board was replaced or its NVS was erased (new key), or during the migration window another party bound a key to that MAC first. Fix: the owner calls **`POST /api/devices/reset_key {mac}`** (or in SQL: `UPDATE devices SET device_key_hash = NULL WHERE mac_address='<MAC>';`) — the device binds its current key on the next poll.
 ---
 
 ## 9. Known Open Items (not yet built — see also the standalone roadmap PDF)
+
+- **Service access + self-test — DONE (2026-09-11, §7.15):** invite-based, outside the admin limit, expiring, OLED code for on-site confirmation. Not yet on hardware: relay test timing (0.4 s) and OLED layout of the service code should be checked on one unit.
+- **Security audit 2026-09-11 — code fixes DONE (§7); operational steps OPEN (§7.8):** GitHub secrets, repository private, old PAT revoked, `LEGACY_DEVICE_AUTH=off` after the fleet update, `production` environment reviewers. **Residual risks by design:** UID-only RFID cards can be cloned (§7.6, needs DESFire hardware); legacy-device key binding is trust-on-first-use during the transition (§7.2).
 
 - **RFID schedule enforcement — DONE (Aug 18 2026, §5.7).** Schedules sync to the device and are checked locally before unlocking. Remaining gap: they are pushed only when changed in the app, so pre-existing schedules (or a factory-reset device) need one re-save; there is no reconciliation sweep yet.
 - ~~**ESP32 firmware transport is unencrypted HTTP**~~ — **migrated to TLS in firmware (Aug 13 2026, §5.2):** `WiFiClientSecure` on 443 through NPM, root-CA pinned. ISRG Root X1 PEM is embedded in `ROOT_CA_LE`. Remaining to fully close this out: (a) bench-test all cloud paths over TLS, (b) then remove the router's port-3000 forward (hardening step #2).
 - **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
 - **LittleFS card storage — DONE (Aug 17 2026), verified on hardware** (`[FS] LittleFS OK … selftest=PASS`). Cards live in `/cards.db`, cap raised 10 → **200**, with EEPROM fallback if the mount fails (§5.4). It deployed over normal OTA as predicted — the default `esp32:esp32:esp32` partition scheme already has a `spiffs` partition, so no partition change / USB / re-provision was needed; `partitions.csv` remains an unused fallback.
-- **Local (offline) PIN verification — STILL OPEN** (stage 2). PINs are verified server-side, so they don't work offline and the check is one of the last blocking TLS calls left in `loop()` (§5.2b). Plan: PBKDF2-HMAC-SHA256 hashes in `/pins.db` (struct already defined and sized). Full model in `LICENSING.md`.
+- **Local (offline) PIN verification — STILL OPEN** (stage 2). PINs are verified server-side, so they don't work offline and the check is one of the last blocking TLS calls left in `loop()` (§5.2b). *(Its security aspect — anyone knowing the MAC could brute-force PINs remotely through `/api/auth/keypad` — is closed by the device key, §7.2; what remains is the availability/latency feature.)* Plan: PBKDF2-HMAC-SHA256 hashes in `/pins.db` (struct already defined and sized). Full model in `LICENSING.md`.
 - **Offline license key (future idea)** — for the "many users, zero cloud, willing to pay" niche: a one-time **signed** license key entered at provisioning that raises the offline-standalone cap **without a server** (firmware validates the signature). Lets the no-cloud brand serve >2-user private clients. Not built; recorded so it isn't lost (`LICENSING.md`).
 - ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
 - Other roadmap items (2FA, data export/deletion, activity-log-triggered features beyond current search, etc.) — see the separate features PDF generated earlier.
@@ -733,15 +848,18 @@ psql -h localhost -U admin smartlock_db -c "SELECT mac_address, owner_email, dev
 # Recent events by category
 tail -50 /var/log/smartlock/entries/$(date +%F).log
 
-# Test server health
-curl -s https://node.ctrlable.pl/api/hardware/poll?mac=test
+# Test server health (401 = healthy: proxy + backend answer, no token given)
+curl -s -o /dev/null -w "%{http_code}\n" https://node.ctrlable.pl/api/data
+
+# Devices still without a bound device key (must be empty before LEGACY_DEVICE_AUTH=off, §7.2)
+psql -h localhost -U admin smartlock_db -c "SELECT mac_address, firmware_version, last_heartbeat FROM devices WHERE device_key_hash IS NULL;"
+
+# Commands waiting for devices (§7.3)
+psql -h localhost -U admin smartlock_db -c "SELECT mac_address, COUNT(*) FROM device_commands WHERE acked_at IS NULL GROUP BY mac_address;"
 
 # Test with auth
 TOKEN=$(curl -s -X POST https://node.ctrlable.pl/api/auth/login -H "Content-Type: application/json" -d '{"email":"ctrlablenode@gmail.com","password":"YOUR_PASSWORD"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('token','MISSING'))")
 curl -s https://node.ctrlable.pl/api/data -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
-
-# Inspect ESP32's own EEPROM directly (bypasses cloud/DB — see §5.8)
-curl -s 'http://192.168.0.76/api/data?pass=<factory-admin-password>'
 
 # Push OTA update
 rm -f /opt/smartlock-server/updates/lock_*.bin && pm2 restart ctrlable-server

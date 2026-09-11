@@ -1,9 +1,11 @@
 name: Automated Firmware Compiler & Release
 
+# WYŁĄCZONY z automatu (audyt 2026-09-11): budował dla Arduino UNO R4 i publikował
+# NIEPODPISANE wydanie, które serwer mógłby wziąć za najnowszy firmware centralki ESP32.
+# Firmware centralki buduje i PODPISUJE compile-ESP32.yml. Zostawiony tylko do ręcznego
+# uruchomienia (Actions → Run workflow), gdyby płytka R4 wróciła do użytku.
 on:
-  push:
-    tags:
-      - 'v*' # Triggers automatically whenever you push a version tag (e.g., v2.9.5)
+  workflow_dispatch:
 
 jobs:
   build-and-release:
