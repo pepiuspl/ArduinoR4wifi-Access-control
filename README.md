@@ -143,6 +143,8 @@ grep "bodyStr += chunk" server.js               # request body must be appended,
 grep "00:00:00:00:00:00'\] = true" server.js     # must be EMPTY — a wildcard unlock queue opens other customers' doors (§7.3)
 grep -c "await requireAuth(req, res)" server.js # requireAuth is async (token_version check) — every call must be awaited
 grep "getFactoryAdminPassword\|syncMutationToHardware" server.js  # must be EMPTY — both removed for good (§7.1–7.3)
+grep -c "INSERT INTO devices" server.js         # every one MUST include last_known_ip — the column is NOT NULL (created out-of-band);
+                                                # an INSERT without it throws, the poll answers 500 and the device never registers (bit us 2026-09-11)
 grep "githubRes.on('data'" server.js            # must show data += chunk
 grep "override" server.js                       # must show override: true
 grep "ORDER BY d\.id\|ORDER BY id ASC" server.js  # must be EMPTY — devices table has no 'id' column, only mac_address. card_credentials DOES have 'id', so hits there are fine.
@@ -236,7 +238,7 @@ SELECT * FROM accounts;
 
 -- Devices (multi-device: one account can own many; device_shares grants co-admin access)
 SELECT * FROM devices;
--- mac_address (PK, no 'id' column!), account_id, device_name, last_known_ip (informational only,
+-- mac_address (PK, no 'id' column!), account_id, device_name, last_known_ip (NOT NULL! informational only,
 -- private IPv4 — the server never connects to it), operational_mode, firmware_version,
 -- last_heartbeat, auto_lock_delay_ms, device_key_hash (SHA-256 of the device key, §7.2)
 
