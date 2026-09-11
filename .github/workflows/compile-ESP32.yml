@@ -69,6 +69,28 @@ jobs:
         mkdir -p build
         arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir ./build "$COMPILE_TARGET"
 
+    # 5b. WERSJA Z FIRMWARE — jedyne źródło prawdy to `app_version` w access_control.ino.
+    #     Tag wydania = ta wersja (np. v3.1.0). Kolejny push BEZ podbicia wersji dostaje
+    #     tag v3.1.0-build.<nr>, żeby OTA (porównanie release.id) nadal widziało nowe wydanie,
+    #     a czysty tag zostawał dla pierwszego builda danej wersji.
+    - name: Read Firmware Version
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        FW_VERSION=$(tr -d '\r' < access_control.ino | sed -n 's/^const char\* app_version = "\(v[0-9][0-9.]*\)".*/\1/p' | head -n 1)
+        if [ -z "$FW_VERSION" ]; then
+          echo "❌ Nie znaleziono app_version w access_control.ino (oczekiwany format: const char* app_version = \"v3.1.0\";)"
+          exit 1
+        fi
+        TAG="$FW_VERSION"
+        if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+          TAG="${FW_VERSION}-build.${{ github.run_number }}"
+          echo "ℹ️ Wydanie $FW_VERSION już istnieje — to wydanie dostanie tag $TAG (podbij app_version, jeśli to nowa wersja)."
+        fi
+        echo "FW_VERSION=$FW_VERSION" >> "$GITHUB_ENV"
+        echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+        echo "🎯 Firmware $FW_VERSION → wydanie $TAG"
+
     # 6. Filtrowanie i izolacja czystego pliku aplikacji (Odrzucamy 4-megabajtowy merged.bin)
     - name: Package Update Asset
       run: |
@@ -77,7 +99,7 @@ jobs:
           BIN_FILE=$(find ./build -name "*.bin" ! -name "*merged*" ! -name "*bootloader*" ! -name "*partitions*" | head -n 1)
         fi
         echo "💡 Wybrany właściwy, lekki plik binarny aplikacji: $BIN_FILE"
-        cp "$BIN_FILE" "./lock_${{ github.sha }}.bin"
+        cp "$BIN_FILE" "./lock_${FW_VERSION}.bin"
 
     # 6b. PODPIS OBRAZU (ECDSA P-256) — README §7.5. Centralka instaluje aktualizację
     #     tylko z poprawnym podpisem, a serwer nie rozsyła wydań bez pliku .sig.
@@ -92,21 +114,24 @@ jobs:
         fi
         umask 077
         printf '%s\n' "$FIRMWARE_SIGNING_KEY" > "$RUNNER_TEMP/fw_key.pem"
-        openssl dgst -sha256 -sign "$RUNNER_TEMP/fw_key.pem" -out "lock_${{ github.sha }}.bin.sig" "lock_${{ github.sha }}.bin"
+        openssl dgst -sha256 -sign "$RUNNER_TEMP/fw_key.pem" -out "lock_${FW_VERSION}.bin.sig" "lock_${FW_VERSION}.bin"
         rm -f "$RUNNER_TEMP/fw_key.pem"
         # Kontrola spójności: podpis musi przejść kluczem publicznym WSZYTYM w firmware —
         # inaczej zbudowalibyśmy wydanie, którego żadna centralka nie przyjmie.
         tr -d '\r' < access_control.ino | awk '/FIRMWARE_PUBKEY_PEM = R"EOF\(/{f=1;next} /^\)EOF";/{f=0} f' > "$RUNNER_TEMP/fw_pub.pem"
-        openssl dgst -sha256 -verify "$RUNNER_TEMP/fw_pub.pem" -signature "lock_${{ github.sha }}.bin.sig" "lock_${{ github.sha }}.bin"
+        openssl dgst -sha256 -verify "$RUNNER_TEMP/fw_pub.pem" -signature "lock_${FW_VERSION}.bin.sig" "lock_${FW_VERSION}.bin"
 
     # 7. Automatyczne stworzenie wydania i podpięcie odchudzonego pliku aktualizacji + podpisu
     - name: Create Release and Upload Firmware
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: build-${{ github.sha }}
-        name: Build ${{ github.run_number }} (${{ github.sha }})
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: Firmware ${{ env.FW_VERSION }} (build ${{ github.run_number }})
+        body: |
+          Firmware CTRLABLE Node **${{ env.FW_VERSION }}** — build ${{ github.run_number }}, commit ${{ github.sha }}.
+          Obraz podpisany ECDSA P-256 (`.sig`); centralka instaluje wyłącznie podpisane wydania (README §7.5).
         files: |
-          lock_${{ github.sha }}.bin
-          lock_${{ github.sha }}.bin.sig
+          lock_${{ env.FW_VERSION }}.bin
+          lock_${{ env.FW_VERSION }}.bin.sig
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

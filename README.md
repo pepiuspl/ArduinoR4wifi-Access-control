@@ -335,7 +335,9 @@ Layout now:
 ### 5.3 OTA update workflow
 **Only signed images are installed (§7.5).** `compile-ESP32.yml` signs every build with the `FIRMWARE_SIGNING_KEY` secret and attaches `lock_<sha>.bin.sig`; the server refuses to arm OTA for a release without it, and the firmware rejects an image whose signature doesn't match the public key compiled into it. A manual Arduino-IDE build must be signed the same way (`openssl dgst -sha256 -sign <key> -out lock_x.bin.sig lock_x.bin`) before it is attached to a release.
 
-1. Build `.bin` (Arduino IDE or GitHub Actions auto-build on push)
+**Version = `app_version` in `access_control.ino` (e.g. `v3.1.0`) — the only place to bump it.** `compile-ESP32.yml` reads it and names the release from it: tag `v3.1.0`, title *Firmware v3.1.0 (build N)*, assets `lock_v3.1.0.bin` + `.sig`. A further push to `main` without bumping the version gets the tag `v3.1.0-build.<N>` so OTA (which compares `release.id`) still sees a newer release; the clean tag stays with the first build of that version. Bump `app_version` for anything you want customers to see as a new version. (Releases before 2026-09-11 were tagged `build-<sha>`.)
+
+1. Bump `app_version` if this is a new version; build `.bin` (Arduino IDE or GitHub Actions auto-build on push)
 2. **Don't edit an existing release's assets** — delete the release (keep the tag), draft a new one on the same tag, attach the new `.bin`. Keeps version string stable while giving OTA logic a fresh `release.id`.
 3. `rm /opt/smartlock-server/updates/lock_*.bin` to clear cache
 4. Trigger from app: Firmware screen → Check for updates → Update

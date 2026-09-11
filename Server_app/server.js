@@ -643,7 +643,7 @@ function getLatestFirmwareContext() {
 
     // Wyciąganie cyfr wersji niezależnie od tego, czy jest kropka po 'v' czy nie
     const getVerArray = (filename) => {
-      const match = filename.match(/lock_v\.?([\d.])\.bin/);
+      const match = filename.match(/lock_v\.?(\d+(?:\.\d+)*)\.bin/);   // lock_v3.1.0.bin (dawny wzorzec łapał tylko 1 znak)
       if (!match) return [0];
       return match[1].split('.').map(Number);
     };
@@ -660,7 +660,7 @@ function getLatestFirmwareContext() {
     });
 
     const latestFile = binFiles[0];
-    const match = latestFile.match(/lock_v\.?([\d.])\.bin/);
+    const match = latestFile.match(/lock_v\.?(\d+(?:\.\d+)*)\.bin/);
     const extractedVersion = match ? match[1] : "0.0.0";
     return { version: extractedVersion, filename: latestFile };
   } catch (e) {
