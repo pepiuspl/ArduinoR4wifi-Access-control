@@ -310,12 +310,12 @@ async function enforceLicenseLimits(accountId) {
         // Stan karty trafia na centralkę przez kolejkę komend (odbiera ją przy pollu),
         // a nie przez HTTP na jej prywatne IP — tamto działało tylko w sieci serwera.
         if (!withinLimit && c.is_active) {
-          await dbPool.query('UPDATE card_credentials SET is_active = false, license_locked = true WHERE id = $1', [c.id]);
+          await dbPool.query('UPDATE card_credentials SET is_active = false, license_locked = true, license_locked_at = COALESCE(license_locked_at, NOW()), license_delete_notice_sent = false WHERE id = $1', [c.id]);
           await queueCardCommand(mac, c.card_uid, 'A', '0');
           writeToLocalLogFile('License', `[Node: ${mac}] Karta id=${c.id} wyłączona — limit pakietu ${ent.license_tier} (${ent.max_cards}).`);
         } else if (withinLimit && c.license_locked && !c.is_active) {
           // Wróciliśmy w limit — przywracamy to, co zablokował system.
-          await dbPool.query('UPDATE card_credentials SET is_active = true, license_locked = false WHERE id = $1', [c.id]);
+          await dbPool.query('UPDATE card_credentials SET is_active = true, license_locked = false, license_locked_at = NULL, license_delete_notice_sent = false WHERE id = $1', [c.id]);
           await queueCardCommand(mac, c.card_uid, 'A', '1');
           writeToLocalLogFile('License', `[Node: ${mac}] Karta id=${c.id} przywrócona po zwiększeniu pakietu.`);
         }
@@ -330,10 +330,10 @@ async function enforceLicenseLimits(accountId) {
         const p = pins.rows[i];
         const withinLimit = i < ent.max_pins;
         if (!withinLimit && p.active) {
-          await dbPool.query('UPDATE keypad_pins SET active = false, license_locked = true WHERE id = $1', [p.id]);
+          await dbPool.query('UPDATE keypad_pins SET active = false, license_locked = true, license_locked_at = COALESCE(license_locked_at, NOW()), license_delete_notice_sent = false WHERE id = $1', [p.id]);
           writeToLocalLogFile('License', `[Node: ${mac}] PIN id=${p.id} wyłączony — limit pakietu ${ent.license_tier} (${ent.max_pins}).`);
         } else if (withinLimit && p.license_locked && !p.active) {
-          await dbPool.query('UPDATE keypad_pins SET active = true, license_locked = false WHERE id = $1', [p.id]);
+          await dbPool.query('UPDATE keypad_pins SET active = true, license_locked = false, license_locked_at = NULL, license_delete_notice_sent = false WHERE id = $1', [p.id]);
           writeToLocalLogFile('License', `[Node: ${mac}] PIN id=${p.id} przywrócony po zwiększeniu pakietu.`);
         }
       }
@@ -3636,6 +3636,15 @@ async function runSchemaMigrations() {
     // Karta właściciela (is_owner_card) to tylko FALLBACK, gdy nikt nic nie wybrał.
     `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS keep_on_downgrade BOOLEAN DEFAULT false`,
     `ALTER TABLE keypad_pins      ADD COLUMN IF NOT EXISTS keep_on_downgrade BOOLEAN DEFAULT false`,
+    // Cykl życia zablokowanych przepustek (LICENSING §3.4, 14.09.2026): kiedy zablokowano,
+    // czy wysłano ostrzeżenie o kasowaniu; po LOCKED_CREDENTIAL_DAYS wiersz jest usuwany.
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS license_locked_at TIMESTAMP`,
+    `ALTER TABLE keypad_pins      ADD COLUMN IF NOT EXISTS license_locked_at TIMESTAMP`,
+    `ALTER TABLE card_credentials ADD COLUMN IF NOT EXISTS license_delete_notice_sent BOOLEAN DEFAULT false`,
+    `ALTER TABLE keypad_pins      ADD COLUMN IF NOT EXISTS license_delete_notice_sent BOOLEAN DEFAULT false`,
+    // Przypomnienia o końcu pakietu: dla jakiego terminu i który etap (1 = 7 dni, 2 = 1 dzień) wysłano.
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_notice_valid_until TIMESTAMP`,
+    `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_notice_stage SMALLINT DEFAULT 0`,
     // Podniesienie darmowego limitu administratorów z 1 na 2 (decyzja 2026-09-09,
     // LICENSING.md §3.1). Kolumna powstała z DEFAULT 1, więc konta założone wcześniej
     // miałyby stare ograniczenie. Idempotentne: po pierwszym przebiegu żaden wiersz
@@ -3825,6 +3834,167 @@ async function enforceLimitsForAllAccounts() {
 }
 enforceLimitsForAllAccounts();
 setInterval(enforceLimitsForAllAccounts, 6 * 60 * 60 * 1000);
+
+// =========================================================================
+// CYKL ŻYCIA PAKIETU (LICENSING §3.4, decyzja 14.09.2026), raz na dobę:
+//  1. przypomnienie e-mail + push na 7 dni i na 1 dzień przed license_valid_until,
+//  2. ostrzeżenie LOCKED_DELETE_NOTICE_DAYS dni przed skasowaniem przepustek
+//     zablokowanych przez enforceLicenseLimits(),
+//  3. skasowanie przepustek zablokowanych dłużej niż LOCKED_CREDENTIAL_DAYS
+//     (karta dodatkowo komendą D|uid do centralki, żeby zniknęła z jej pamięci).
+// Przepustka właściciela nigdy nie jest blokowana, więc nigdy tu nie trafia.
+// =========================================================================
+const LOCKED_CREDENTIAL_DAYS   = Math.max(1, parseInt(process.env.LOCKED_CREDENTIAL_DAYS || '90', 10) || 90);
+const LOCKED_DELETE_NOTICE_DAYS = 10;
+const LICENSE_REMINDER_STAGES  = [{ stage: 1, days: 7 }, { stage: 2, days: 1 }];
+
+function sendSystemMail(to, subject, text) {
+  return new Promise((resolve) => {
+    if (!to) return resolve(false);
+    try {
+      mailTransport.sendMail({ from: '"CTRLABLE Node System" <node@ctrlable.pl>', to, subject, text }, (err) => {
+        if (err) writeToLocalLogFile('Mail', `[License] Błąd wysyłki do ${to}: ${err.message}`);
+        resolve(!err);
+      });
+    } catch (e) { writeToLocalLogFile('Mail', `[License] Wyjątek wysyłki do ${to}: ${e.message}`); resolve(false); }
+  });
+}
+const plDate = (d) => new Date(d).toLocaleDateString('pl-PL', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+async function licenseExpiryReminders() {
+  const r = await dbPool.query(
+    `SELECT id, email, push_token, license_tier, license_valid_until, license_notice_valid_until, license_notice_stage
+       FROM accounts
+      WHERE license_valid_until IS NOT NULL
+        AND license_valid_until > NOW()
+        AND license_valid_until <= NOW() + INTERVAL '7 days'`);
+  for (const a of r.rows) {
+    // Nowy termin (odnowienie/kod) = zaczynamy etapy od zera.
+    const sameTerm = a.license_notice_valid_until && new Date(a.license_notice_valid_until).getTime() === new Date(a.license_valid_until).getTime();
+    let stage = sameTerm ? (a.license_notice_stage || 0) : 0;
+    const daysLeft = Math.ceil((new Date(a.license_valid_until) - Date.now()) / 86400000);
+    // Docelowy etap dla dzisiejszego dystansu: <=1 dzień = etap 2, <=7 dni = etap 1.
+    // Jeden e-mail na przebieg — jeśli serwer stał tydzień, klient dostaje tylko „jutro".
+    const targetStage = daysLeft <= 1 ? 2 : 1;
+    for (const st of LICENSE_REMINDER_STAGES) {
+      if (st.stage !== targetStage || stage >= st.stage) continue;
+      const tier = (a.license_tier || 'pakiet').toString();
+      const subject = daysLeft <= 1 ? `Pakiet ${tier} wygasa jutro — CTRLABLE Node` : `Pakiet ${tier} wygasa za ${daysLeft} dni — CTRLABLE Node`;
+      const text =
+`Twój pakiet ${tier} w CTRLABLE Node wygasa ${plDate(a.license_valid_until)}.
+
+Jeśli go nie odnowisz, konto przejdzie na poziom darmowy: 2 karty i 2 kody PIN na centralkę oraz 2 administratorów. Twoja własna karta/PIN właściciela zostanie aktywna zawsze. Pozostałe karty i PIN-y ponad limit zostaną WYŁĄCZONE (nie skasowane) i będą czekać ${LOCKED_CREDENTIAL_DAYS} dni na odnowienie pakietu — po tym czasie zostaną usunięte, a historia wejść skróci się do 15 dni.
+
+Co możesz zrobić już teraz w aplikacji Ctrlable Access → „Pakiet i licencja”:
+- wskazać, które karty i PIN-y mają zostać aktywne po zmianie pakietu,
+- wpisać nowy kod pakietu (odnowienie).
+
+Kod pakietu otrzymasz, pisząc na node@ctrlable.pl lub dzwoniąc pod 696 088 602.
+
+— CTRLABLE Node`;
+      await sendSystemMail(a.email, subject, text);
+      sendPushNotification(a.push_token, subject, `Bez odnowienia część kart i PIN-ów zostanie wyłączona. Sprawdź „Pakiet i licencja”.`);
+      stage = st.stage;
+      await dbPool.query('UPDATE accounts SET license_notice_valid_until = license_valid_until, license_notice_stage = $2 WHERE id = $1', [a.id, stage]);
+      writeToLocalLogFile('License', `[Konto ${a.id}] Przypomnienie o końcu pakietu (etap ${stage}, zostało ${daysLeft} dni).`);
+    }
+  }
+}
+
+async function lockedCredentialLifecycle() {
+  const noticeAfter = LOCKED_CREDENTIAL_DAYS - LOCKED_DELETE_NOTICE_DAYS;
+  // --- ostrzeżenie: zablokowane ≥ (90-10) dni, jeszcze nie ostrzeżone — jeden e-mail na konto ---
+  const warn = await dbPool.query(
+    `SELECT a.id AS account_id, a.email, a.push_token, d.device_name, d.mac_address,
+            x.kind, x.id, x.label, x.license_locked_at
+       FROM (
+         SELECT 'card' AS kind, id, mac_address, holder_name AS label, license_locked_at, license_delete_notice_sent
+           FROM card_credentials WHERE license_locked = true AND is_active = false AND license_locked_at IS NOT NULL
+         UNION ALL
+         SELECT 'pin'  AS kind, id, mac_address, name AS label, license_locked_at, license_delete_notice_sent
+           FROM keypad_pins WHERE license_locked = true AND active = false AND license_locked_at IS NOT NULL
+       ) x
+       JOIN devices d ON d.mac_address = x.mac_address
+       JOIN accounts a ON a.id = d.account_id
+      WHERE x.license_delete_notice_sent = false
+        AND x.license_locked_at <= NOW() - ($1::int * INTERVAL '1 day')
+      ORDER BY a.id, x.license_locked_at`, [noticeAfter]);
+  const byAccount = new Map();
+  for (const row of warn.rows) {
+    if (!byAccount.has(row.account_id)) byAccount.set(row.account_id, { email: row.email, push_token: row.push_token, items: [] });
+    byAccount.get(row.account_id).items.push(row);
+  }
+  for (const [accountId, info] of byAccount) {
+    const earliest = info.items.reduce((m, i) => (new Date(i.license_locked_at) < m ? new Date(i.license_locked_at) : m), new Date());
+    const deleteOn = new Date(earliest.getTime() + LOCKED_CREDENTIAL_DAYS * 86400000);
+    const lines = info.items.map(i => `- ${i.kind === 'card' ? 'karta' : 'PIN'} „${i.label || '(bez nazwy)'}” (${i.device_name || i.mac_address})`).join('\n');
+    const text =
+`Po zmianie pakietu następujące przepustki są wyłączone i zostaną USUNIĘTE ${plDate(deleteOn)}:
+
+${lines}
+
+Jeśli chcesz je zachować, odnów pakiet przed tą datą — wrócą automatycznie. Po usunięciu kartę trzeba będzie ponownie nauczyć przy czytniku, a PIN nadać od nowa.
+
+Kod pakietu: node@ctrlable.pl, 696 088 602.
+
+— CTRLABLE Node`;
+    await sendSystemMail(info.email, `Za ${LOCKED_DELETE_NOTICE_DAYS} dni usuniemy wyłączone przepustki — CTRLABLE Node`, text);
+    sendPushNotification(info.push_token, 'Wyłączone przepustki zostaną usunięte', `${info.items.length} kart/PIN-ów zniknie ${plDate(deleteOn)}. Odnów pakiet, żeby je zachować.`);
+    const cardIds = info.items.filter(i => i.kind === 'card').map(i => i.id);
+    const pinIds  = info.items.filter(i => i.kind === 'pin').map(i => i.id);
+    if (cardIds.length) await dbPool.query('UPDATE card_credentials SET license_delete_notice_sent = true WHERE id = ANY($1)', [cardIds]);
+    if (pinIds.length)  await dbPool.query('UPDATE keypad_pins SET license_delete_notice_sent = true WHERE id = ANY($1)', [pinIds]);
+    writeToLocalLogFile('License', `[Konto ${accountId}] Ostrzeżenie o kasowaniu ${info.items.length} przepustek (${plDate(deleteOn)}).`);
+  }
+
+  // --- kasowanie: zablokowane ≥ 90 dni ---
+  const cards = await dbPool.query(
+    `SELECT c.id, c.mac_address, c.card_uid, c.holder_name, d.account_id
+       FROM card_credentials c JOIN devices d ON d.mac_address = c.mac_address
+      WHERE c.license_locked = true AND c.is_active = false AND c.is_owner_card = false
+        AND c.license_locked_at IS NOT NULL AND c.license_locked_at <= NOW() - ($1::int * INTERVAL '1 day')`, [LOCKED_CREDENTIAL_DAYS]);
+  for (const c of cards.rows) {
+    await queueCardCommand(c.mac_address, c.card_uid, 'D');   // centralka zapomina kartę (D|uid, bez argumentu)
+    await dbPool.query('DELETE FROM card_credentials WHERE id = $1', [c.id]);
+    writeToLocalLogFile('License', `[Node: ${c.mac_address}] Karta „${c.holder_name}” (id=${c.id}) usunięta po ${LOCKED_CREDENTIAL_DAYS} dniach blokady pakietu.`);
+  }
+  const pins = await dbPool.query(
+    `DELETE FROM keypad_pins
+      WHERE license_locked = true AND active = false AND is_owner_pin = false
+        AND license_locked_at IS NOT NULL AND license_locked_at <= NOW() - ($1::int * INTERVAL '1 day')
+      RETURNING id, mac_address, name`, [LOCKED_CREDENTIAL_DAYS]);
+  for (const p of pins.rows)
+    writeToLocalLogFile('License', `[Node: ${p.mac_address}] PIN „${p.name}” (id=${p.id}) usunięty po ${LOCKED_CREDENTIAL_DAYS} dniach blokady pakietu.`);
+  if (cards.rows.length || pins.rows.length) {
+    // Jedno powiadomienie na konto — właściciel wie, że to nie awaria.
+    const accs = new Set(cards.rows.map(c => c.account_id));
+    const pinAccount = new Map();
+    for (const p of pins.rows) {
+      const d = await dbPool.query('SELECT account_id FROM devices WHERE mac_address = $1', [p.mac_address]).catch(() => ({ rows: [] }));
+      if (d.rows[0]) { accs.add(d.rows[0].account_id); pinAccount.set(p.id, d.rows[0].account_id); }
+    }
+    for (const accountId of accs) {
+      const a = await dbPool.query('SELECT email, push_token FROM accounts WHERE id = $1', [accountId]).catch(() => ({ rows: [] }));
+      if (!a.rows[0]) continue;
+      const n = cards.rows.filter(c => c.account_id === accountId).length + pins.rows.filter(p => pinAccount.get(p.id) === accountId).length;
+      await sendSystemMail(a.rows[0].email, 'Usunięto wyłączone przepustki — CTRLABLE Node',
+`Minęło ${LOCKED_CREDENTIAL_DAYS} dni od wyłączenia przepustek po zmianie pakietu. Zgodnie z regulaminem zostały usunięte (${n}). Karta właściciela i przepustki w ramach pakietu działają bez zmian.
+
+Aby dodać nowe przepustki ponad darmowy limit, aktywuj pakiet w aplikacji (Pakiet i licencja).
+
+— CTRLABLE Node`);
+      sendPushNotification(a.rows[0].push_token, 'Usunięto wyłączone przepustki', `${n} kart/PIN-ów usunięto po ${LOCKED_CREDENTIAL_DAYS} dniach blokady pakietu.`);
+    }
+  }
+}
+
+async function runLicenseLifecycle() {
+  try { await licenseExpiryReminders(); } catch (e) { writeToLocalLogFile('Core Daemon', `[License] BŁĄD przypomnień: ${e.message}`); }
+  try { await lockedCredentialLifecycle(); } catch (e) { writeToLocalLogFile('Core Daemon', `[License] BŁĄD cyklu blokad: ${e.message}`); }
+}
+// Start z opóźnieniem, żeby migracje i pierwszy przegląd limitów zdążyły się wykonać.
+setTimeout(runLicenseLifecycle, 90 * 1000);
+setInterval(runLicenseLifecycle, 24 * 60 * 60 * 1000);
 
 server.listen(3000, () => {
   console.log('⚡ Multi-Tenant SmartLock Engine live on port 3000. Writing local filesystem archives at /var/log/smartlock/');
