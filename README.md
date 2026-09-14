@@ -518,6 +518,14 @@ Offline-standalone devices are capped at **`OFFLINE_FREE_CARDS = 2`** cards with
 - **Generating:** `LICENSE_SIGNING_KEY_FILE=... node tools/licensekey.js offline D4:E9:F4:78:08:60 gold` (or `individual:120,120`); check without a device: `node tools/licensekey.js offline-verify <token> license_signing_public.pem`.
 - PINs: the token carries `max PINs`, but offline PIN verification is still open (§9) — an offline licence is cards-only until then.
 
+### 5.13 Crash diagnostics — reset reason and core dump in the boot log (v3.2.1)
+
+Every boot sends the `[FS] LittleFS …` line; since v3.2.1 it ends with ` reset=<code>/<name> heap_min=<bytes>` and, when the previous run died in a panic or watchdog, ` CRASH task=<name> pc=0x… cause=<n> bt=0x…,0x…`. The ESP32 core writes an ELF core dump to the `coredump` partition (default 4 MB partition table; `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` in the Arduino core) — the firmware reads `esp_core_dump_get_summary()`, sends it once and erases the dump. Reset codes: 1 POWERON, 3 SW (OTA/ESP.restart), 4 PANIC, 5 INT_WDT (interrupts blocked > 300 ms), 6 TASK_WDT, 9 BROWNOUT.
+
+Decoding: the release now also carries `lock_<version>.elf`. Run `bash tools/decode_backtrace.sh lock_v3.2.1.elf 0x400d1234,0x400d5678` (uses `xtensa-esp32-elf-addr2line` from the installed Arduino ESP32 toolchain) to get file:line for every frame. The `.elf` matches only the exact build — decode a v3.2.1 trace with the v3.2.1 `.elf`.
+
+Also since v3.2.1: `WiFi.setSleep(false)` (modem-sleep off — a frequent cause of dropped associations with some routers; irrelevant on mains power).
+
 ---
 
 ## 6. Mobile App (React Native / Expo)

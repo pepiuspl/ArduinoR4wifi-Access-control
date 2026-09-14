@@ -101,6 +101,9 @@ jobs:
         fi
         echo "💡 Wybrany właściwy, lekki plik binarny aplikacji: $BIN_FILE"
         cp "$BIN_FILE" "./lock_${FW_VERSION}.bin"
+        # .elf do dekodowania śladów stosu z logu bootu (README §5.13) — nie jest wgrywany na centralkę
+        ELF_FILE=$(find ./build -name "*.ino.elf" | head -n 1)
+        if [ -n "$ELF_FILE" ]; then cp "$ELF_FILE" "./lock_${FW_VERSION}.elf"; else echo "⚠️ brak pliku .elf w build/"; fi
 
     # 6b. PODPIS OBRAZU (ECDSA P-256) — README §7.5. Centralka instaluje aktualizację
     #     tylko z poprawnym podpisem, a serwer nie rozsyła wydań bez pliku .sig.
@@ -134,5 +137,6 @@ jobs:
         files: |
           lock_${{ env.FW_VERSION }}.bin
           lock_${{ env.FW_VERSION }}.bin.sig
+          lock_${{ env.FW_VERSION }}.elf
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

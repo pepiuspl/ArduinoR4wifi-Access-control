@@ -11,6 +11,7 @@
 #include <EEPROM.h>
 #include <Update.h>
 #include <Preferences.h>       // NVS — klucz urządzenia i hasło sieci konfiguracyjnej
+#include "esp_core_dump.h"      // zrzut po panice/WDT z partycji coredump -> podsumowanie w logu bootu (README §5.13)
 #include <esp_random.h>
 #include "mbedtls/sha256.h"    // weryfikacja podpisu aktualizacji OTA
 #include "mbedtls/pk.h"
@@ -192,7 +193,7 @@ const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
 volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
-const char* app_version = "v3.2.0";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
+const char* app_version = "v3.2.1";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
 
 struct User { 
   byte uid[4]; 
@@ -1951,6 +1952,7 @@ void setup() {
   // Radio włączone PRZED losowaniem sekretów: dopiero wtedy esp_random() korzysta ze
   // sprzętowego źródła entropii (bez RF to generator pseudolosowy).
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);   // bez modem-sleep: najczęstsza przyczyna rwących się połączeń ESP32 z częścią routerów; na zasilaniu sieciowym bez kosztu
   loadOrCreateDeviceSecrets();
   loadLocalAdminPass();
   loadLicense();
@@ -2141,6 +2143,41 @@ void setup() {
 // Task SIECIOWY — rdzeń 0. Poll (blokujący TLS) + logi zdarzeń, NIE dotyka sprzętu.
 // Handshake TLS nigdy nie zamraża pętli (rdzeń 1) → karta czyta się natychmiast
 // (lokalny match), niezależnie od stanu sieci. Pauzuje na czas OTA/deregister.
+// --- Diagnostyka bootu (README §5.13) ---------------------------------------------
+// Do linii "[FS] ..." wysyłanej po każdym starcie dokładamy powód resetu, minimum
+// wolnej pamięci i — jeśli poprzedni start skończył się paniką/WDT — podsumowanie
+// zrzutu z partycji coredump (zadanie, PC, ślad stosu). Adresy dekoduje się z pliku
+// lock_<wersja>.elf z wydania (tools/decode_backtrace.sh). Zrzut jest kasowany po
+// wysłaniu, żeby nie raportować go w kółko.
+static const char* resetReasonName(int r) {
+  switch (r) {
+    case ESP_RST_POWERON:  return "POWERON";  case ESP_RST_EXT:     return "EXT";
+    case ESP_RST_SW:       return "SW";       case ESP_RST_PANIC:   return "PANIC";
+    case ESP_RST_INT_WDT:  return "INT_WDT";  case ESP_RST_TASK_WDT: return "TASK_WDT";
+    case ESP_RST_WDT:      return "WDT";      case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP"; default: return "OTHER";
+  }
+}
+String bootDiagnostics() {
+  int rr = (int)esp_reset_reason();
+  String s = " reset=" + String(rr) + "/" + resetReasonName(rr) + " heap_min=" + String(ESP.getMinFreeHeap());
+  if (esp_core_dump_image_check() == ESP_OK) {
+    esp_core_dump_summary_t* sum = (esp_core_dump_summary_t*)malloc(sizeof(esp_core_dump_summary_t));
+    if (sum && esp_core_dump_get_summary(sum) == ESP_OK) {
+      s += " CRASH task=" + String(sum->exc_task) + " pc=0x" + String(sum->exc_pc, HEX) +
+           " cause=" + String(sum->ex_info.exc_cause) + " bt=";
+      uint32_t n = sum->exc_bt_info.depth; if (n > 12) n = 12;
+      for (uint32_t i = 0; i < n; i++) { if (i) s += ","; s += "0x" + String(sum->exc_bt_info.bt[i], HEX); }
+      if (sum->exc_bt_info.corrupted) s += "(corrupt)";
+    } else {
+      s += " CRASH (zrzut nieczytelny)";
+    }
+    if (sum) free(sum);
+    esp_core_dump_image_erase();
+  }
+  return s;
+}
+
 void networkTask(void *param) {
   for (;;) {
     if (WiFi.status() == WL_CONNECTED && !isOfflineStandby && !req_ota && !req_deregister) {
@@ -2149,7 +2186,7 @@ void networkTask(void *param) {
         sendRemoteLog("[FS] LittleFS " + String(fsMounted ? "OK" : "BLAD MONTAZU") +
                       " total=" + String(fsTotalBytes) + "B used=" + String(fsUsedBytes) +
                       "B FsCard=" + String(sizeof(FsCard)) + "B FsPin=" + String(sizeof(FsPin)) +
-                      "B selftest=" + String(fsSelfTestPass ? "PASS" : "FAIL"));
+                      "B selftest=" + String(fsSelfTestPass ? "PASS" : "FAIL") + bootDiagnostics());
       }
       // KOLEJNOŚĆ MA ZNACZENIE: najpierw POLL (niesie stan rygla „opened"), dopiero
       // potem zgłoszenia „nice to have". Każde z nich to osobny handshake TLS (~2 s),
