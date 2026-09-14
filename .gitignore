@@ -8,3 +8,5 @@ license_private.pem
 firmware_signing_private*
 klucze_podpisu_firmware/
 *.key
+
+license_signing_private*

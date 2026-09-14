@@ -227,6 +227,12 @@ void serveLocalApi(WiFiClient& client, const String& reqHeader);
 void applyPendingCommands();
 void buildDiagnosticReport(int mode);
 void sendDiagnosticReport();
+bool parseLicenseToken(const String& token, int& cards, int& pins, int& tier);
+bool applyLicenseToken(const String& token);
+void loadLicense();
+bool isOfflineStandalone();
+int offlineCardCap();
+String licenseJson();
 void executeCloudSynchronization();
 void performLocalFirmwareUpdate(); 
 void transmitCardPayloadToCloud(String uidStr, String nameStr, int slot, bool runRegister);
@@ -297,7 +303,18 @@ char owner_email[64] = "";
 //  Pin 7 → IO34 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
 #define KP_COL1  16
 #define KP_COL2  17
-#define KP_COL3  12   // connector pin 5 — col right (3 6 9 #)  [was IO2 = LED pin!]
+// Własna PCB rev 0.2 (folder CTRLABLE-Node-PCB): kolumna 3 klawiatury jest na IO2, bo IO12 (strap
+// MTDI, wysoki przy starcie = brak bootu) poszło na LED przycisku wyjścia. Dev kit zostaje na IO12
+// (IO2 ma tam wbudowaną diodę). Kompilacja pod nową płytkę: -DBOARD_PCB_REV02=1 (CI buduje dev kit,
+// dopóki flota nie przejdzie na PCB). Reszta pinów jest identyczna na obu płytkach.
+#ifndef BOARD_PCB_REV02
+#define BOARD_PCB_REV02 0
+#endif
+#if BOARD_PCB_REV02
+#define KP_COL3  2    // PCB rev 0.2: connector pin 5 — col right (3 6 9 #)
+#else
+#define KP_COL3  12   // dev kit: connector pin 5 — col right (3 6 9 #)  [was IO2 = LED pin!]
+#endif
 #define KP_ROW1  14   // connector pin 2 — row 1 (1 2 3)  ← MOVE WIRE from IO2 to IO14
                       // IO2 has the onboard blue LED; its LED circuit pulls IO2 to ~2V
                       // which is below ESP32's HIGH threshold → always reads LOW → constant beeping
@@ -630,6 +647,96 @@ bool fsLoadCards() {
   return true;
 }
 
+// =========================================================================
+// LICENCJA OFFLINE — README §5.12, LICENSING.md §3.5
+// Centralka bez konta ma bez licencji OFFLINE_FREE_CARDS kart. Token podpisany osobnym
+// kluczem licencyjnym producenta (klucz prywatny NIGDY nie jest w firmware ani w repo),
+// związany z MAC-iem TEJ centralki, bezterminowy (offline nie ma zaufanego zegara),
+// trzymany w NVS (przeżywa reset fabryczny — licencja jest własnością sprzętu).
+//   "OFL1." + base64url( payload[12] || ECDSA P-256 DER )
+//   payload: [0]=1 [1..6]=MAC [7]=karty [8]=PIN-y [9]=tier(1 silver/2 gold/3 indiv.) [10..11]=dni od 1970
+// Online (konto) limitów pilnuje serwer wg pakietu — ten token dotyczy wyłącznie trybu offline.
+// =========================================================================
+static const char* LICENSE_PUBKEY_PEM = R"EOF(
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/d2fTsxI2KfboveHyyHvOgR7+06q
+lYXDiZlweD5QQGMjbfwqLdsJz1fy8uY06n4Oob7+JczqE9PclU0SpuvPMQ==
+-----END PUBLIC KEY-----
+)EOF";
+#define OFFLINE_FREE_CARDS 2
+int licCards = 0, licPins = 0, licTier = 0;   // 0 = brak licencji offline
+String licToken = "";
+
+static int b64urlVal(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '-' || c == '+') return 62;
+  if (c == '_' || c == '/') return 63;
+  return -1;
+}
+static int base64urlDecode(const String& in, uint8_t* out, int maxLen) {
+  int n = 0, bits = 0; uint32_t acc = 0;
+  for (unsigned int i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '=') break;
+    int v = b64urlVal(c);
+    if (v < 0) return -1;
+    acc = (acc << 6) | v; bits += 6;
+    if (bits >= 8) { bits -= 8; if (n >= maxLen) return -1; out[n++] = (acc >> bits) & 0xFF; }
+  }
+  return n;
+}
+static bool verifyEcdsaSha256(const char* pubPem, const uint8_t* data, size_t len, const uint8_t* sig, size_t sigLen) {
+  uint8_t hash[32];
+  mbedtls_sha256(data, len, hash, 0);
+  mbedtls_pk_context pk; mbedtls_pk_init(&pk);
+  int rc = mbedtls_pk_parse_public_key(&pk, (const unsigned char*)pubPem, strlen(pubPem) + 1);
+  if (rc == 0) rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, 32, sig, sigLen);
+  mbedtls_pk_free(&pk);
+  return rc == 0;
+}
+// true = token poprawny i wystawiony dla TEJ centralki.
+bool parseLicenseToken(const String& token, int& cards, int& pins, int& tier) {
+  if (!token.startsWith("OFL1.") || token.length() > 200) return false;
+  uint8_t buf[160];
+  int n = base64urlDecode(token.substring(5), buf, sizeof(buf));
+  if (n < 12 + 8 || buf[0] != 1) return false;
+  uint8_t mac[6]; WiFi.macAddress(mac);
+  if (memcmp(buf + 1, mac, 6) != 0) return false;                       // inna centralka
+  if (!verifyEcdsaSha256(LICENSE_PUBKEY_PEM, buf, 12, buf + 12, n - 12)) return false;
+  cards = buf[7]; pins = buf[8]; tier = buf[9];
+  return cards >= 1 && cards <= HW_MAX_CARDS;
+}
+void loadLicense() {
+  Preferences prefs; prefs.begin("ctrlsec", true);
+  licToken = prefs.getString("oflic", "");
+  prefs.end();
+  int c, pn, t;
+  if (licToken.length() && parseLicenseToken(licToken, c, pn, t)) { licCards = c; licPins = pn; licTier = t; }
+  else { licCards = 0; licPins = 0; licTier = 0; licToken = ""; }
+  Serial.println(licCards ? "[LIC] Licencja offline: " + String(licCards) + " kart, " + String(licPins) + " PIN-ow" : "[LIC] Brak licencji offline (limit " + String(OFFLINE_FREE_CARDS) + " karty)");
+}
+bool applyLicenseToken(const String& token) {
+  int c, pn, t;
+  if (!parseLicenseToken(token, c, pn, t)) return false;
+  Preferences prefs; prefs.begin("ctrlsec", false);
+  prefs.putString("oflic", token);
+  prefs.end();
+  licToken = token; licCards = c; licPins = pn; licTier = t;
+  addLog("Licencja offline: " + String(c) + " kart");
+  return true;
+}
+const char* licTierName() { return licTier == 1 ? "silver" : licTier == 2 ? "gold" : licTier == 3 ? "individual" : "free"; }
+bool isOfflineStandalone() { return String(ssid) == "OFFLINE_MODE"; }
+int offlineCardCap() { return licCards > 0 ? licCards : OFFLINE_FREE_CARDS; }
+String licenseJson() {
+  return "\"license\":{\"tier\":\"" + String(licTierName()) + "\",\"cards\":" + String(licCards) + ",\"pins\":" + String(licPins) +
+         ",\"active\":" + String(licCards > 0 ? "true" : "false") + "},\"free_cards\":" + String(OFFLINE_FREE_CARDS) +
+         ",\"entitlements\":{\"tier\":\"" + String(licTierName()) + "\",\"maxCards\":" + String(offlineCardCap()) +
+         ",\"maxPins\":" + String(licPins) + ",\"guestCodes\":false}";
+}
+
 // --- Egzekwowanie harmonogramu karty (LOKALNIE, przed otwarciem) --------------
 // Wcześniej harmonogram istniał tylko w bazie i w UI: serwer go zapisywał, ale
 // centralka decydowała po samym UID, więc karta "tylko pn-pt 8-16" otwierała drzwi
@@ -679,6 +786,9 @@ void loadCards() {
 // przez co zmiana nazwy i harmonogram relayowane były do NIEWŁAŚCIWEGO slotu.
 int saveNewCard(byte* uid, String nameStr) {
   int cap = fsMounted ? HW_MAX_CARDS : 10;
+  // Offline-standalone: limit z licencji (bez niej OFFLINE_FREE_CARDS). Karty już zapisane
+  // ponad limit działają dalej (deduplikacja wyżej) — blokujemy tylko DODAWANIE nowych.
+  if (isOfflineStandalone()) cap = min(cap, offlineCardCap());
   // DEDUPLIKACJA: ta sama karta zbliżona ponownie w trybie uczenia NIE tworzy
   // kolejnego slotu — aktualizujemy istniejący wpis. Bez tego jeden brelok
   // lądował w bazie po kilka razy (widoczne jako 7 „użytkowników" przy 2 kartach).
@@ -1139,6 +1249,24 @@ void handleLocalHttp() {
 }
 
 void serveProvisioning(WiFiClient& client, const String& reqHeader) {
+  // Fabryczne wgranie licencji offline PRZED sprzedażą: tylko w trybie pierwszej konfiguracji
+  // (świeża/zresetowana płytka, AP za hasłem z ekranu). Po konfiguracji offline ta sama
+  // operacja wymaga hasła lokalnego — /api/set_license w serveLocalApi().
+  if (reqHeader.indexOf("GET /set_license") != -1) {
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n");
+    if (!provisioningMode) {
+      client.println("{\"status\":\"error\",\"error\":\"use_api_set_license_with_pass\"}");
+    } else if (applyLicenseToken(queryParam(reqHeader, "token"))) {
+      client.println("{\"status\":\"ok\",\"cards\":" + String(licCards) + ",\"pins\":" + String(licPins) + ",\"tier\":\"" + String(licTierName()) + "\"}");
+      globalDisplayInfo = "LICENCJA: " + String(licCards) + " kart\nSSID: CTRLABLE_SETUP\nHaslo: " + apPassword;
+      renderSystemUI();
+    } else {
+      client.println("{\"status\":\"error\",\"error\":\"invalid_token\"}");
+    }
+    delay(10); client.stop();
+    return;
+  }
+
   // UWAGA: pełnej linii żądania NIE logujemy — zawiera hasło Wi-Fi (p=), a dziennik
   // lokalny jest widoczny w aplikacji (dawniej: addLog("REQ=" + reqHeader)).
   if (reqHeader.indexOf("GET /save_setup") != -1 || reqHeader.indexOf("POST /save_setup") != -1) {
@@ -1230,6 +1358,7 @@ void serveLocalApi(WiFiClient& client, const String& reqHeader) {
       client.print(doorOpen ? "true" : "false");
       client.print(",\"total\":"); client.print(totalCards);
       client.print(",\"version\":\""); client.print(app_version); client.print("\"");
+      client.print(","); client.print(licenseJson());
       client.print(",\"users\":[");
       for (int i = 0; i < totalCards; i++) {
         client.print("{\"idx\":"); client.print(i);
@@ -1255,6 +1384,15 @@ void serveLocalApi(WiFiClient& client, const String& reqHeader) {
     delay(1); client.stop(); blockTelemetry = false; return;
   }
 
+  if (reqHeader.indexOf("/api/set_license") != -1) {
+    bool ok = applyLicenseToken(queryParam(reqHeader, "token"));
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n");
+    client.println(ok
+      ? "{\"status\":\"ok\",\"cards\":" + String(licCards) + ",\"pins\":" + String(licPins) + ",\"tier\":\"" + String(licTierName()) + "\"}"
+      : String("{\"status\":\"error\",\"error\":\"invalid_token\"}"));
+    if (ok) { globalDisplayInfo = "OFFLINE: " + String(licCards) + " kart\nSiec: CTRLABLE_SETUP\n(haslo z instalacji)"; playSound(SND_CARD_ENROLLED); }
+    delay(1); client.stop(); blockTelemetry = false; return;
+  }
   if (reqHeader.indexOf("/api/unlock") != -1) {
     if (!doorOpen) openDoor("Panel API");
   }
@@ -1814,6 +1952,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   loadOrCreateDeviceSecrets();
   loadLocalAdminPass();
+  loadLicense();
   EEPROM.get(480, installedReleaseId);  // restore flashed release ID
   // Sanityzacja: świeży/wyczyszczony EEPROM to same 0xFF → 4294967295, czyli numer
   // większy od każdego realnego release'u z GitHuba. Traktujemy to jako "nieznany" (0),
@@ -1925,7 +2064,7 @@ void setup() {
     // od razu do trybu lokalnego (RFID + przycisk + panel lokalny na AP).
     isOfflineStandby = true;
     forceHardwareRFIDReset();
-    displayProvisioningInstructions("TRYB OFFLINE AKTYWNY");
+    displayProvisioningInstructions(licCards > 0 ? "OFFLINE: " + String(licCards) + " kart" : "OFFLINE: " + String(OFFLINE_FREE_CARDS) + " karty (free)");
     startSetupAP();
     server.begin();
     playSound(SND_PROVISION_START);
@@ -2181,19 +2320,30 @@ void loop() {
       // handshake TLS wykona networkTask na rdzeniu 0. Kolejkujemy PO ewentualnym
       // zapisie karty (niżej), żeby wysłać właściwy numer slotu.
       bool wasLearning = learningMode;
+      bool skipUpload = false;
       int savedSlot = -1;
       if (learningMode) {
         savedSlot = saveNewCard(rfid.uid.uidByte, pendingUsername);
+        if (savedSlot < 0) {
+          // Limit magazynu / licencji offline — wcześniej -1 był ignorowany i ekran mówił „DODANO".
+          int cap = isOfflineStandalone() ? offlineCardCap() : (fsMounted ? HW_MAX_CARDS : 10);
+          addLog("Odmowa: limit kart (" + String(cap) + ")" + (isOfflineStandalone() && licCards == 0 ? " - brak licencji" : ""));
+          globalAnimFrame = 0;
+          globalDisplayInfo = "LIMIT KART: " + String(cap);
+          playSound(SND_ACCESS_DENIED);
+          skipUpload = true;
+        } else {
         addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]");
-        globalAnimFrame = 0; 
-        globalDisplayInfo = "DODANO KARTE"; 
+        globalAnimFrame = 0;
+        globalDisplayInfo = "DODANO KARTE";
         digitalWrite(LED_RED, LOW);
-        digitalWrite(LED_GREEN, HIGH); 
+        digitalWrite(LED_GREEN, HIGH);
         playSound(SND_CARD_ENROLLED);
-        if (autoExitLearn) { 
-          learningMode = false; 
+        }
+        if (autoExitLearn) {
+          learningMode = false;
           autoExitLearn = false;
-        } 
+        }
       } else { 
         bool valid = false;
         int matchedIndex = -1; 
@@ -2226,7 +2376,7 @@ void loop() {
       } 
       // Kolejkujemy zgłoszenie do chmury (rdzeń 0 wyśle je w tle). Pętla leci dalej
       // natychmiast — dioda miga, OLED żyje, potwierdzenie jest od razu.
-      if (WiFi.status() == WL_CONNECTED && !req_cardUpload) {
+      if (WiFi.status() == WL_CONNECTED && !req_cardUpload && !skipUpload) {
         uidStr.toCharArray(up_uid, sizeof(up_uid));
         pendingUsername.toCharArray(up_name, sizeof(up_name));
         // Slot RZECZYWIŚCIE użyty przez saveNewCard (przy deduplikacji to stary indeks

@@ -4,7 +4,7 @@
 # Bezpieczne: używa Twojego istniejącego SSH po sieci lokalnej, NIC nie wystawia
 # na internet. Ścieżki docelowe RÓŻNE:
 #   server.js     -> /opt/smartlock-server/server.js      (backend, pm2 ctrlable-server)
-#   licensekey.js -> /opt/smartlock-server/licensekey.js  (generator kodów, odpalany na serwerze)
+#   tools/licensekey.js -> /opt/smartlock-server/licensekey.js  (generator kodów online, odpalany na serwerze)
 #   app.js        -> /opt/smartlock-server/app/App.js     (Metro/Expo, pm2 ctrlable-app)
 # Metro ładuje App.js (wielka litera!) z podkatalogu app/.
 #
@@ -27,7 +27,7 @@ DEST="${DEPLOY_DEST:-/opt/smartlock-server}"
 
 cd "$(dirname "$0")"
 
-for f in Server_app/server.js Server_app/licensekey.js Server_app/app.js; do
+for f in Server_app/server.js tools/licensekey.js Server_app/app.js; do
   [ -f "$f" ] || { echo "❌ Brak pliku $f"; exit 1; }
 done
 
@@ -64,7 +64,7 @@ echo "→ Wysyłanie server.js, licensekey.js, app.js do ${SERVER}:${DEST} (jedn
 # tar idzie stdin-em, więc skrypt zdalny nie może iść tym samym kanałem: przekazujemy
 # go w base64 w linii poleceń (same [A-Za-z0-9+/=] — niezależnie od powłoki roota).
 REMOTE_B64=$(printf '%s' "$REMOTE_SCRIPT" | base64 | tr -d '\n')
-tar czf - -C Server_app server.js licensekey.js app.js \
+tar czf - -C Server_app server.js app.js -C ../tools licensekey.js \
   | ssh "${SERVER}" "bash -c \"\$(echo ${REMOTE_B64} | base64 -d)\" -- '${DEST}'"
 
 echo "✅ Deploy zakończony."
