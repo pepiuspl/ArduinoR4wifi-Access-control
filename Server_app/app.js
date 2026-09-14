@@ -413,6 +413,25 @@ export default function App() {
   const [settingsWifiPass, setSettingsWifiPass] = useState('');
   const [settingsAppPass, setSettingsAppPass] = useState('');
   const [settingsCurrentPass, setSettingsCurrentPass] = useState('');
+  // Licencja offline (tryb lokalny) — token wklejany i wysyłany do centralki po jej AP (README §5.12).
+  const [licenseTokenInput, setLicenseTokenInput] = useState('');
+  const [oflLicenseBusy, setOflLicenseBusy] = useState(false);
+  const activateOfflineLicense = async () => {
+    const tok = licenseTokenInput.trim();
+    if (!tok.startsWith('OFL1.')) return Alert.alert('Licencja', 'Token licencji offline zaczyna się od „OFL1." — wklej cały ciąg z wiadomości od sprzedawcy.');
+    setOflLicenseBusy(true);
+    try {
+      const res = await fetch(buildLocalRequestUrl('/api/set_license', { token: tok }, localAdminPass));
+      const data = await res.json().catch(() => ({}));
+      if (data.status !== 'ok') throw new Error(data.error === 'invalid_token'
+        ? 'Token nieprawidłowy albo wystawiony dla innej centralki.'
+        : (data.error || 'Centralka odrzuciła token.'));
+      setLicenseTokenInput('');
+      Alert.alert('Licencja aktywna', `Centralka przyjęła licencję ${data.tier}: ${data.cards} kart.`);
+      fetchStatus();
+    } catch (e) { Alert.alert('Licencja', e.message); }
+    finally { setOflLicenseBusy(false); }
+  };
 
   const resetUiToDefault = useCallback(() => {
     setCurrentScreen('dashboard');
@@ -2753,12 +2772,32 @@ export default function App() {
 
               {/* FORMULARZ: ZMIANA HASŁA WI-FI ZAMKA (niedostępne w Trybie Lokalnym) */}
               {isLocalMode ? (
+                <>
                 <View style={styles.card}>
                   <Text style={styles.sectionHeader}>📶 Sieć Wi-Fi Centralki</Text>
                   <Text style={styles.inputLabelText}>
                     Centralka działa w Trybie Lokalnym i nie łączy się z żadną siecią domową - aplikacja rozmawia z nią przez jej własny punkt dostępu CTRLABLE_SETUP. Aby przejść do trybu online z kontem w chmurze, przywróć ustawienia fabryczne centralki i skonfiguruj ją ponownie.
                   </Text>
                 </View>
+                {/* LICENCJA OFFLINE — bez konta i serwera: podpisany token związany z tą centralką (README §5.12) */}
+                <View style={styles.card}>
+                  <Text style={styles.sectionHeader}>💳 Licencja offline</Text>
+                  {lockState.license?.active ? (
+                    <Text style={[styles.inputLabelText, { color: '#81c784', fontWeight: '600' }]}>
+                      ✓ Pakiet {lockState.license.tier}: {lockState.license.cards} kart{lockState.license.pins ? `, ${lockState.license.pins} PIN-ów (PIN-y offline wkrótce)` : ''} · bezterminowo, przypisana do tej centralki
+                    </Text>
+                  ) : (
+                    <Text style={styles.inputLabelText}>
+                      Bez licencji centralka offline obsługuje {lockState.free_cards ?? 2} karty. Pakiet Silver (10) lub Gold (50) to jednorazowy zakup — token przypisany do tej centralki, bez konta i bez abonamentu.
+                    </Text>
+                  )}
+                  <Text style={styles.inputLabelText}>Token licencji (OFL1.…):</Text>
+                  <TextInput style={styles.inputField} placeholder="Wklej token od sprzedawcy" placeholderTextColor="#555" autoCapitalize="none" autoCorrect={false} value={licenseTokenInput} onChangeText={setLicenseTokenInput} />
+                  <TouchableOpacity style={[styles.secondaryBtn, { backgroundColor: '#5c33cf', width: '100%', marginTop: 10, opacity: oflLicenseBusy || !licenseTokenInput ? 0.5 : 1 }]} disabled={oflLicenseBusy || !licenseTokenInput} onPress={activateOfflineLicense}>
+                    <Text style={styles.btnText}>{oflLicenseBusy ? 'Wysyłanie…' : '🔑 Aktywuj licencję'}</Text>
+                  </TouchableOpacity>
+                </View>
+                </>
               ) : (
                 <View style={styles.card}>
                   <Text style={styles.sectionHeader}>📶 Zmiana Konfiguracji Sieci Wi-Fi Zamka</Text>

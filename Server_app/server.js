@@ -3503,8 +3503,10 @@ const TIER_PRESETS = {
 };
 
 // Odczyt efektywnych uprawnień konta. Wygasła licencja (license_valid_until w
-// przeszłości) schodzi do limitów darmowych — ale bez kasowania danych: sama
-// logika egzekwowania blokuje tylko NOWE dodania ponad limit.
+// przeszłości) schodzi do limitów darmowych. Nadmiarowe poświadczenia są potem
+// DEZAKTYWOWANE (nie kasowane) przez enforceLicenseLimits() wg wyboru klienta
+// (keep_on_downgrade → karta właściciela → najstarsze) — LICENSING.md §3.4,
+// README §3.7. Tu tylko odczyt.
 async function getEntitlements(accountId) {
   const FREE = { license_tier: 'free', ...TIER_PRESETS.free, license_valid_until: null };
   try {
@@ -3593,9 +3595,10 @@ async function runSchemaMigrations() {
     // tiery to presety tych liczb, "Indywidualna" = po prostu inne wartości bez
     // zmiany kodu. Ustawiane albo automatycznie (webhook P24 po zakupie), albo
     // przez podpisany klucz licencyjny. DEFAULT = tier darmowy, więc każde NOWE
-    // konto startuje jako 'free' bez żadnej ingerencji. Egzekwowanie blokuje tylko
-    // NOWE dodania ponad limit — istniejące karty/PIN-y są zachowane (grandfathering),
-    // więc obniżenie/wygaśnięcie licencji nigdy nie "zamurowuje" zamka.
+    // konto startuje jako 'free' bez żadnej ingerencji. Przy spadku pakietu
+    // enforceLicenseLimits() dezaktywuje (license_locked) karty/PIN-y ponad limit
+    // wg wyboru klienta; karta właściciela nigdy nie jest blokowana, więc
+    // obniżenie/wygaśnięcie licencji nigdy nie "zamurowuje" zamka (LICENSING §3.4).
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_tier VARCHAR(20) DEFAULT 'free'`,
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_cards INT DEFAULT 2`,          // per centralka
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_pins INT DEFAULT 2`,           // per centralka
