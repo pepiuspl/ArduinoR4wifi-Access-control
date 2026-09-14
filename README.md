@@ -1,6 +1,6 @@
 # CTRLABLE Node — Full System Documentation
 
-**Last updated:** September 11, 2026 — security hardening after the 2026-09-11 audit (§7)
+**Last updated:** September 14, 2026 — documentation audit (limits enforcement §3.7, env §3.2, endpoints §3.6, custom PCB rev 0.2 §5.1b, offline licence dormant §5.12); security hardening of 2026-09-11 (§7)
 
 ---
 
@@ -100,6 +100,10 @@ docker exec nginx-proxy-manager grep -rl "node.ctrlable" /data/nginx/
 | Master log | `/var/log/smartlock/smartlock_system.log` |
 | Categorized logs | `/var/log/smartlock/{entries,connections,updates,security,provisioning,mail}/YYYY-MM-DD.log` |
 
+### 3.1b Deploying from the laptop — `deploy.sh`
+
+`bash deploy.sh` (Windows: Git Bash) ships `Server_app/server.js`, `tools/licensekey.js` and `Server_app/app.js` to the LXC over LAN SSH in **one session** (files as a tar stream on stdin, the remote script base64-inlined — the earlier ControlMaster approach does not work in Git Bash, and this asks for the password once). Before the production `server.js` is replaced the remote side runs `node --check` and greps for the `store[ip].count++` rate-limit fix (§7.4); any failure aborts without touching the running copy. Then it restarts **both** pm2 processes (`ctrlable-server`, `ctrlable-app`) and prints the last `Migration` line from the log. Targets: `server.js` → `/opt/smartlock-server/server.js`, `licensekey.js` → `/opt/smartlock-server/licensekey.js`, `app.js` → `/opt/smartlock-server/app/App.js` (capital A, §8). Override with `DEPLOY_SERVER=` / `DEPLOY_DEST=`. Pushing `Server_app/server.js` to `main` also triggers the GitHub `deploy.yml` (§7.7) — pick one path per change.
+
 ### 3.2 Environment file (.env)
 ```
 JWT_SECRET=<random 64-char hex>   # REQUIRED, min. 32 chars — server refuses to start without it (§7.4)
@@ -107,16 +111,25 @@ GITHUB_PAT=<GitHub PAT with repo scope>
 DB_PASSWORD=<PostgreSQL password for admin user>
 DB_USER=admin
 DB_NAME=smartlock_db
-EXPO_TOKEN=<Expo access token for EAS CLI>
+EXPO_TOKEN=<Expo access token>        # used only by eas-cli on the box — server.js does not read it
+PUBLIC_BASE_URL=https://node.ctrlable.pl   # base of the invite link in e-mails (§6.4)
+TERMS_URL=https://ctrlable.pl/regulamin.html          # linked from the web invite page
+PRIVACY_URL=https://ctrlable.pl/polityka-prywatnosci.html
+JWT_EXPIRES=7d               # optional; JWT lifetime (default 7d) — token_version still kills old tokens
+CORS_ORIGINS=                # optional; comma-separated allowed origins (empty = same-origin only)
+GITHUB_USER=pepiuspl         # optional; release source for OTA (defaults in server.js)
+GITHUB_REPO=ArduinoR4wifi-Access-control
+DB_HOST=127.0.0.1            # optional (default localhost)
+DB_PORT=5432                 # optional
 LOG_RETENTION_DAYS=90        # optional; auto-purge system_events older than N days (0 = keep forever)
 LEGACY_DEVICE_AUTH=on        # optional; 'off' = reject devices without a device key (§7.2) — set once the fleet is updated
 TRUSTED_PROXIES=192.168.0.102  # optional; only these peers may supply X-Real-IP (§7.4)
 SERVICE_ACCOUNTS=ctrlablenode@gmail.com  # service account(s), comma-separated — outside the admin limit, expiring share (§7.15)
 SERVICE_SHARE_HOURS=48       # optional; how long a service share lives
 ```
-Loaded with `override: true` — essential, or pm2's cached env wins over `.env`.
+Loaded with `override: true` — essential, or pm2's cached env wins over `.env`. **Mail has no env at all:** nodemailer talks to the local Postfix on `127.0.0.1:25` (sender `node@ctrlable.pl`); Postfix relays through OVH (`ssl0.ovh.net:587`, SASL password in `/etc/postfix/sasl_passwd`) — see §8.
 
-**Data retention (hardening #4, Aug 13 2026):** `purgeExpiredData()` runs on startup and every 24 h — deletes `system_events` older than `LOG_RETENTION_DAYS` (default **90**; set `0` to disable) and stale `device_invites` (>30 days, they hold emails). GDPR data-minimization (Art. 5) + smaller breach blast radius. The **file** logs under `/var/log/smartlock/` are separate — rotate/expire those with OS-level `logrotate` if desired.
+**Data retention (hardening #4, Aug 13 2026; per-package since Aug 18):** `purgeExpiredData()` runs on startup and every 24 h — deletes `system_events` per device owner according to `accounts.log_retention_days` (COALESCE 15: 15 free / 45 Silver / 90 Gold, `LICENSING.md` §6.0); the global `LOG_RETENTION_DAYS` (default **90**; `0` = disable) only prunes *orphaned* events with no device and stale `device_invites` (>30 days, they hold emails). GDPR data-minimization (Art. 5) + smaller breach blast radius. The **file** logs under `/var/log/smartlock/` are separate — rotate/expire those with OS-level `logrotate` if desired.
 
 ### 3.3 pm2 processes
 | Name | Command | Working dir |
@@ -186,17 +199,25 @@ Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `sys
 | POST | /api/hardware/diag | Device key | Device posts a self-test/diagnostic report (JSON); last 5 kept per device |
 | POST | /api/devices/auto_lock | JWT | **Owner-only.** Set that device's auto-lock delay, `{mac, seconds}` (1–60). Stored in `devices.auto_lock_delay_ms`, pushed to the ESP32 in the poll response as `auto_lock_delay` (ms). *(An earlier draft of this doc listed `/api/settings/auto_lock` — that endpoint never existed; see §6.7.)* |
 | GET | /api/firmware/version | — | Latest GitHub release check — **cached 5 min** (it used to hit GitHub with the PAT on every call) |
-| POST | /api/ota/push | JWT | Arm OTA for `{mac}` (or all devices the account can access). Downloads the release `.bin` **and its `.bin.sig`**; refuses unsigned releases (§7.5) |
-| GET | /api/hardware/poll | Device key | Heartbeat/command poll. Registers a new MAC to `?email=` (verified accounts only) and binds its key. `?ack=<id>` confirms executed commands; response carries `unlock`, `learn`, `ota`, `deregister`, `auto_lock_delay`, `cmds` (§7.3). No MAC = 400 (no more guessing by IP) |
+| POST (GET tolerated) | /api/ota/push | JWT | Arm OTA for `{mac}` (or all devices the account can access). Downloads the release `.bin` **and its `.bin.sig`**; refuses unsigned releases (§7.5) |
+| GET | /api/hardware/poll (aliases `/api/poll`, `/poll`) | Device key | Heartbeat/command poll. Registers a new MAC to `?email=` (verified accounts only) and binds its key. `?ack=<id>` confirms executed commands; response carries `unlock`, `learn`, `ota`, `deregister`, `auto_lock_delay`, `cmds` (§7.3). No MAC = 400 (no more guessing by IP) |
 | GET | /api/hardware/log | Device key | Remote log (max 500 chars) — **filters/simplifies OTA messages** before storing (raw detail stays in the file log) |
 | GET | /api/hardware/log_button | Device key | Physical button press log (`?mac=`) |
-| POST | /api/hardware/scan | Device key | RFID scan report (log + push) — the unlock decision is LOCAL on the ESP32 (§5.7) |
-| POST | /api/hardware/register | Device key | Card learned in learning mode → `card_credentials` |
+| POST | /api/hardware/scan (aliases `/api/scan`, `/scan`) | Device key | RFID scan report (log + push) — the unlock decision is LOCAL on the ESP32 (§5.7) |
+| POST | /api/hardware/register (aliases `/api/register`, `/register`) | Device key | Card learned in learning mode → `card_credentials` |
 | POST | /api/tamper | Device key | Tamper alert |
 | GET | /api/lock/download-firmware | Device key | Firmware image, only if OTA is armed for that device; sends `X-Firmware-Signature` |
 | POST | /api/auth/keypad | Device key | Keypad PIN verification — **fully server-side**, enforces schedule/expiry/max-uses; 5 attempts / 15 min per device |
-| — | /api/device/provision, POST /api/log | — | **Removed (410).** Unauthenticated, unused by the firmware (§7.2) |
+| — | /api/device/provision, POST /api/log (and `/log`) | — | **Removed (410).** Unauthenticated, unused by the firmware (§7.2) |
 | POST | /api/auth/save_push_token | JWT | Save Expo push token |
+| GET | /api/license | JWT | Current entitlements of the account (tier, limits, `license_valid_until`, `expired` flag) — drives the app's "Pakiet i licencja" screen |
+| POST | /api/license/redeem | JWT | Redeem an online licence code from `tools/licensekey.js` (`SLVR/GOLD/INDV` + 12 chars); atomic, single-use, extends or sets `license_valid_until` |
+| POST | /api/license/keep_selection | JWT | Owner marks which cards/PINs survive a downgrade (`keep_on_downgrade`, §3.7) |
+| POST | /api/user/set_owner_card | JWT | Owner designates the owner card/PIN (`is_owner_card` / `is_owner_pin`) — never locked by limit enforcement (§3.7) |
+| POST | /api/account/delete_request | JWT | Account deletion step 1: e-mails a 6-digit code (15 min) |
+| POST | /api/account/delete_confirm | JWT | Step 2: deletes the account and all its data, factory-resets every owned device (§7.3 wipe), removes co-admin shares, writes an `erasure_requests` tombstone (SHA-256 of the e-mail) |
+| GET | /api/account/export | JWT | GDPR export — JSON with account, devices, credentials, shares and events |
+| POST | /api/settings/push_preferences | JWT | `{pushEntries, pushAlarms}` — per-category push switches |
 | POST | /api/keypad/add | JWT | Add PIN to a device (`mac`, defaults to the account's first device; supports `isGuestCode`, `expiresAt`, `maxUses`). Per-device scoping — see §4.1/§6.5 |
 | POST | /api/keypad/delete / toggle_active / rename | JWT | Manage PINs (authorized by device access — owner or co-admin) |
 | POST | /api/keypad/update_schedule | JWT | Set day/time window for a PIN |
@@ -248,6 +269,10 @@ SELECT * FROM accounts;
 -- verification: email_verified (DEFAULT true → existing accounts are grandfathered;
 --               registration sets it false explicitly), email_verify_code, email_verify_expires
 -- sessions:     token_version (bumped on password change/reset → old JWTs die, §7.4)
+-- licence codes and GDPR (Aug 18 / Sep 11 2026):
+SELECT * FROM license_codes;      -- code (PK, 16 chars, prefix SLVR/GOLD/INDV), tier, days, used_by, used_at, created_at
+SELECT * FROM pin_change_events;  -- id, account_id, mac_address, action, created_at — counts PIN additions per device per month (pin_changes_per_month limit)
+SELECT * FROM erasure_requests;   -- id, email_hash (SHA-256, never the address), account_id, requested_at — tombstone re-applied after a backup restore
 
 -- Devices (multi-device: one account can own many; device_shares grants co-admin access)
 SELECT * FROM devices;
@@ -276,12 +301,14 @@ SELECT * FROM keypad_pins;
 -- id, account_id (creator), mac_address (device the PIN belongs to — per-centralka scoping),
 -- name, pin_hash, active, created_at,
 -- schedule_enabled, schedule_days (bitmask, bit0=Sun..bit6=Sat), schedule_start_minutes, schedule_end_minutes,
--- expires_at, max_uses, use_count, is_guest_code
+-- expires_at, max_uses, use_count, is_guest_code,
+-- is_owner_pin, license_locked, keep_on_downgrade   (limit enforcement, §3.7)
 
 -- RFID cards (server-side record — see §5.7/5.8 for sync caveats with the ESP32's own card store)
 SELECT * FROM card_credentials;
 -- id, mac_address, holder_name, card_uid, is_active, hardware_slot_idx,
--- schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes
+-- schedule_enabled, schedule_days, schedule_start_minutes, schedule_end_minutes,
+-- is_owner_card, license_locked, keep_on_downgrade   (limit enforcement, §3.7)
 
 -- Event log (category-tagged: entries/security/provisioning/connections)
 SELECT * FROM system_events ORDER BY event_time DESC LIMIT 20;
@@ -309,11 +336,23 @@ psql -h localhost -U admin smartlock_db -c "UPDATE devices SET last_known_ip = '
 | BUZZER_PIN | 27 | |
 | RST_PIN (RFID) | 4 | |
 | SS_PIN (RFID) | 5 | |
-| TAMPER_PIN | 32 | INPUT_PULLUP, `TAMPER_INSTALLED = true` |
+| TAMPER_PIN | 32 | INPUT_PULLUP, `TAMPER_INSTALLED = true` (NC switch to GND; older notes about IO36 are obsolete) |
 | KP_ROW1–4 | 14, 15, 34, 35 | INPUT_PULLUP; 34/35 lack true internal pull-up (input-only pins) |
-| KP_COL1–3 | 16, 17, 12 | OUTPUT |
+| KP_COL1–3 | 16, 17, 12 | OUTPUT. Custom PCB rev 0.2: COL3 = **2** (`BOARD_PCB_REV02`, §5.1b) |
 | I2C SDA/SCL (OLED) | 21, 22 | `Wire.begin()` default |
 | RFID SPI (SCK/MOSI/MISO) | 18, 23, 19 | Default VSPI |
+
+### 5.1b Custom PCB rev 0.2 (`../CTRLABLE-Node-PCB`) and the `BOARD_PCB_REV02` build flag
+
+The production board (KiCad 9 project one folder above the repo, ordered from JLCPCB on 2026-09-14) replaces the 30-pin dev kit with a bare **ESP32-WROOM-32E-N4** module, a 12 V → 3.3 V buck, the relay, USB-C + CH340C auto-reset and screw terminals for everything external. **All pins are identical to the table above except one:** `KP_COL3` moves from **IO12 to IO2** (IO12 is the MTDI strapping pin — a keypad key held at power-up would stop the module from booting; on the custom board IO12 only drives the exit-button LED through an NPN and IO2 has no on-board LED). The firmware selects this with a compile-time flag:
+
+```cpp
+#ifndef BOARD_PCB_REV02
+#define BOARD_PCB_REV02 0     // 0 = dev kit (KP_COL3 = IO12), 1 = custom PCB rev 0.2 (KP_COL3 = IO2)
+#endif
+```
+
+CI (`compile-ESP32.yml`) builds the dev-kit variant until the fleet moves to the PCB; build the PCB variant locally with `--build-property "build.extra_flags=-DBOARD_PCB_REV02=1"` (arduino-cli) or by flipping the default. Everything else on the PCB works with the unchanged firmware: exit button on J8 pin 1 (NO → R18 pull-up → IO33, COM = GND), relay via Q1 on IO13 (HIGH = energised), buzzer via Q2 on IO27, tamper on IO32, factory reset SW3 on IO39. Reserved for later firmware work: `BTN_NC` (IO36, NC contact of the exit button, R31 pull-up) and `BTN_LED` (IO12, open-collector LED drive). Board-level details, BOM and JLCPCB ordering pitfalls: `../CTRLABLE-Node-PCB/README.md`.
 
 ### 5.2 Server connection — architecture note (important)
 ```cpp
@@ -346,9 +385,9 @@ Layout now:
 **Read the response until the JSON is complete, not until the socket closes.** With TLS, `connected()` stays true well after the body arrives, so a "wait for close" loop burns the whole deadline. A 6 s read window made each poll take ~6 s → remote unlock timed out, the device flapped offline for 15–20 s. The loop now counts braces and exits on the closing `}`; the deadline is only a backstop.
 
 ### 5.3 OTA update workflow
-**Only signed images are installed (§7.5).** `compile-ESP32.yml` signs every build with the `FIRMWARE_SIGNING_KEY` secret and attaches `lock_<sha>.bin.sig`; the server refuses to arm OTA for a release without it, and the firmware rejects an image whose signature doesn't match the public key compiled into it. A manual Arduino-IDE build must be signed the same way (`openssl dgst -sha256 -sign <key> -out lock_x.bin.sig lock_x.bin`) before it is attached to a release.
+**Only signed images are installed (§7.5).** `compile-ESP32.yml` signs every build with the `FIRMWARE_SIGNING_KEY` secret and attaches `lock_<version>.bin.sig` (e.g. `lock_v3.1.0.bin.sig`); the server refuses to arm OTA for a release without it, and the firmware rejects an image whose signature doesn't match the public key compiled into it. A manual Arduino-IDE build must be signed the same way (`openssl dgst -sha256 -sign <key> -out lock_x.bin.sig lock_x.bin`) before it is attached to a release.
 
-**Version = `app_version` in `access_control.ino` (e.g. `v3.1.0`) — the only place to bump it.** `compile-ESP32.yml` reads it and names the release from it: tag `v3.1.0`, title *Firmware v3.1.0 (build N)*, assets `lock_v3.1.0.bin` + `.sig`. A further push to `main` without bumping the version gets the tag `v3.1.0-build.<N>` so OTA (which compares `release.id`) still sees a newer release; the clean tag stays with the first build of that version. Bump `app_version` for anything you want customers to see as a new version. (Releases before 2026-09-11 were tagged `build-<sha>`.)
+**Version = `app_version` in `access_control.ino` (e.g. `v3.1.0`) — the only place to bump it.** `compile-ESP32.yml` reads it and names the release from it: tag `v3.1.0`, title *Firmware v3.1.0 (build N)*, assets `lock_v3.1.0.bin` + `.sig`. A further push to `main` without bumping the version gets the tag `v3.1.0-build.<N>` so OTA (which compares `release.id`) still sees a newer release; the clean tag stays with the first build of that version. Bump `app_version` for anything you want customers to see as a new version. (Releases before 2026-09-11 were tagged `build-<version>`.)
 
 1. Bump `app_version` if this is a new version; build `.bin` (Arduino IDE or GitHub Actions auto-build on push)
 2. **Don't edit an existing release's assets** — delete the release (keep the tag), draft a new one on the same tag, attach the new `.bin`. Keeps version string stable while giving OTA logic a fresh `release.id`.
@@ -421,7 +460,7 @@ void relayDeactivate() { // lock (idle)
 
 How it works now:
 - Schedules live on the device in `FsCard` (LittleFS) — the fields already existed and were written as zeros. In RAM they are kept in **parallel arrays** (`cardSchEnabled/Days/Start/End`), deliberately *not* inside `struct User`: `User` is what the EEPROM fallback writes at offset 10 (10 × 20 B), so widening it would overrun the `isCardActive` flags at offset 220.
-- The server **relays** every schedule change to the device via `/api/set_schedule?idx=&en=&days=&start=&end=&pass=` (same `syncMutationToHardware` pattern as rename/toggle/delete). `idx` is the **hardware slot**, not the DB id (§5.8).
+- The server **queues** every schedule change for the device as an `S|<uid8>|<en>|<days>|<start>|<end>` command (`queueCardCommand`, delivered in the next poll and acked, §7.3) — addressed by card UID, not by hardware slot. (`/api/set_schedule?idx=` survives only in the offline local API of the firmware.)
 - `cardAllowedNow(idx)` is checked before `openDoor()`. Denial logs `Odmowa: Poza harmonogramem` and shows `POZA HARMONOGRAMEM` on the OLED.
 - **Unknown clock = deny, for scheduled cards only.** If NTP hasn't set the time (`now < 100000000`), a card with a schedule is refused (`Odmowa: brak czasu`). Fail-closed is safe here precisely because it touches *only* time-restricted cards — an owner card without a schedule always works, so nobody gets locked out by a failed NTP sync.
 - `deleteUser()` shifts the schedule arrays along with the cards; without that, deleting one card would hand its neighbours the wrong time windows.
@@ -432,7 +471,7 @@ How it works now:
 ### 5.8 Device ↔ database sync — known fragility
 Because RFID matching is local (§5.7), the ESP32's own card store (LittleFS `/cards.db`, §5.4) and the server's `card_credentials` table are **two independent copies** that can drift out of sync — confirmed to happen in practice (a card named "Tomasz 2" existed on the device, fully functional for physical unlock, while completely absent from the server database and invisible in the app).
 
-Causes: learning a card while the server connection is down (the local write succeeds, cloud registration silently fails); deleting/renaming via the app updates the database and *attempts* to relay to the ESP32's local endpoints, but if that relay fails the two can end up different.
+Causes: learning a card while the server connection is down (the local write succeeds, cloud registration silently fails); deleting/renaming via the app updates the database and **queues** the change for the device (`N`/`A`/`D` by UID, §7.3); until the device polls and acks, the app shows the pending-commands banner and the two stores differ. (Historical: before Sep 2026 the server tried to reach the ESP32's local HTTP endpoints, which only worked on the server's own LAN.)
 
 **The `idx` ambiguity is fixed (Aug 17 2026) — it used to corrupt data, not just drift.** `/api/data` returned `idx = hardware_slot_idx` (the EEPROM/LittleFS slot), while every mutation endpoint did `cards.rows[idx]`, treating it as an **array position** in an `ORDER BY id ASC` list. Those agree only by coincidence: after resets or re-enrollment several cards shared the same (or NULL) slot, so **rename / toggle-active / delete could hit the wrong card**, and the app rendered duplicate React keys (two inline editors opening at once).
 Now `card_credentials.id` is the single identity: `/api/data` returns both `id` (stable, used for keys and mutations) and `idx` (hardware slot, used **only** when relaying to the device). Server-side `resolveCardRow(mac, body)` prefers `body.id` and falls back to `body.idx` for older app builds; `cardHwSlot()` picks the slot to send to the firmware (computed *before* the row is deleted). Applied to rename, update_schedule, toggle_active and delete.
@@ -471,7 +510,7 @@ Every poll response is parsed for `"deregister":true` (alongside `unlock`/`ota`/
 
 Offline-standalone devices are capped at **`OFFLINE_FREE_CARDS = 2`** cards without a licence (this cap did not exist in firmware before 2026-09-11 — it was documentation only). More cards need an **offline licence token**: `OFL1.` + base64url(`payload[12]` + ECDSA-P256 signature, DER). Payload: `[0]=1` version, `[1..6]` MAC, `[7]` max cards, `[8]` max PINs, `[9]` tier (1 silver / 2 gold / 3 individual), `[10..11]` issue day. Tiers mirror the online ones (`LICENSING.md` §3.5).
 
-- **Signed by the producer's licence key** (`license_signing_private.pem`, separate from the firmware signing key). The firmware embeds only the public key (`LICENSE_PUBKEY_PEM`), verifies the signature and that the MAC is its own — no secret in the device, a copied token is useless on another unit.
+- **Signed by the producer's licence key** (`license_signing_private.pem` kept off-server; `tools/licensekey.js` defaults to `/opt/smartlock-server/license_private.pem` unless `LICENSE_SIGNING_KEY_FILE` points elsewhere — separate from the firmware signing key). The firmware embeds only the public key (`LICENSE_PUBKEY_PEM`), verifies the signature and that the MAC is its own — no secret in the device, a copied token is useless on another unit.
 - **Stored in NVS `ctrlsec/oflic` and kept across factory reset** (the licence belongs to the hardware). Perpetual: an offline device has no trusted clock.
 - **Enforced in `saveNewCard()`** only in offline-standalone mode (`ssid == "OFFLINE_MODE"`): cap = licence cards, else 2. Existing cards above the cap keep working (only adding is blocked); the learning flow now handles the refusal ("LIMIT KART: N" on the OLED, denied sound, no cloud upload) — previously a failed save was still reported as "DODANO KARTE".
 - **Installing:** at the factory, in first-setup mode on the AP: `GET http://192.168.4.1/set_license?token=...` (no local password exists yet; the AP is WPA2-gated). Later, in offline mode: `GET /api/set_license?token=...&pass=<local password>` — the app does this from *Ustawienia → Licencja offline*. The local `/api/data` reports `license {tier, cards, pins, active}`, `free_cards` and an `entitlements` object shaped like the server's, so the app's limit UI works unchanged.
@@ -486,7 +525,7 @@ Offline-standalone devices are capped at **`OFFLINE_FREE_CARDS = 2`** cards with
 | Setting | Value |
 |---|---|
 | backendUrl | `https://node.ctrlable.pl` (always — verify after every regeneration) |
-| SDK | Expo 54 |
+| SDK | Expo SDK 57 (`expo ^57`, React Native 0.86) |
 | Project ID | `f64190e7-e6e5-425c-8767-5638bddde8d7` |
 | Bundle ID | `com.pepiuspl.ctrlablelock` |
 
@@ -565,7 +604,7 @@ Web-rendered (not a deep link) because the app runs on Expo Go, where custom-sch
 - **PINs are per-device** (scoped by `mac_address`, since Aug 13 2026 — §4.1/§9): the list shows the selected centralka's PINs, the 20-PIN limit is per device, and verify checks only that device's PINs. Any account with access to the device (owner **or** co-admin) can add/manage its PINs. Unlike RFID-card schedules, keypad PIN schedules/expiry **are** enforced (server-side).
 - Day picker displays Monday-first (Pn/Wt/Śr/Cz/Pt/So/Nd) but the underlying bitmask stays JS `getDay()`-compatible (bit0=Sunday) — display order and storage order are intentionally decoupled via a `DAY_DISPLAY_ORDER` mapping array.
 - Card rename now uses the same inline-edit pattern as PIN rename (was previously an `Alert.prompt` popup, inconsistent — fixed).
-- **Card scheduling exists in the UI and server, but does not actually gate physical access** — see §5.7. Flagged here so this isn't rediscovered as a "bug" later.
+- **Card scheduling is enforced locally by the ESP32** (`cardAllowedNow()`, "Poza harmonogramem" denial) since Aug 18 2026 — see §5.7. Limitation: the schedule reaches the device only when it is changed (queued `S` command), so a device that was offline during the change applies it after its next poll.
 
 ### 6.6 Log filtering/search
 - Dashboard log screen has a **⏱ Na żywo / 🔍 Szukaj** toggle.
@@ -657,7 +696,7 @@ Owner-only, per selected device, two-step with an emailed 6-digit code (the sect
 
 ### 7.5 Signed firmware
 - **ECDSA P-256.** The private key exists only as the GitHub secret `FIRMWARE_SIGNING_KEY` (and in an offline backup). The public key is compiled into the firmware (`FIRMWARE_PUBKEY_PEM`).
-- `compile-ESP32.yml` signs `lock_<sha>.bin` → `lock_<sha>.bin.sig` and, before publishing, verifies the signature against the public key extracted from `access_control.ino`. No secret → no release.
+- `compile-ESP32.yml` signs `lock_<version>.bin` → `lock_<version>.bin.sig` and, before publishing, verifies the signature against the public key extracted from `access_control.ino`. No secret → no release.
 - `/api/ota/push` requires a JWT, arms OTA **per device** (`otaPendingDevices[mac]`) for devices the account can access, and refuses releases without `.sig`. `/api/lock/download-firmware` serves the image only to an authenticated device with armed OTA and sends the signature in `X-Firmware-Signature`.
 - The firmware hashes the image while writing it, verifies the signature before `Update.end()`, and aborts on mismatch (`[OTA PULL ERR] Podpis firmware NIEPRAWIDLOWY`). A compromised server or GitHub account can no longer push code to the locks.
 - The old UNO R4 workflow (`compile.yml`, auto-released unsigned builds on `v*` tags) is manual-only now.
@@ -758,7 +797,7 @@ Check in order: (a) nginx rate limit (§2.4), (b) ESP32 WiFi (`ping -c3 192.168.
 
 ### 8.3 "[NET] Serwer Proxmox nie odpowiada" in Serial Monitor
 Means the ESP32 can't reach `PROXMOX_SERVER:PROXMOX_PORT`. Checklist:
-1. Is port 3000 actually forwarded on the router to `192.168.0.199:3000`? (§2.3) — this specific failure mode cost an entire debugging session because the forward wasn't in place while `PROXMOX_SERVER` correctly pointed at the domain.
+1. Does `https://node.ctrlable.pl` answer from outside (NPM up, Let's Encrypt cert valid — the firmware pins ISRG Root X1, §5.2)? Port 3000 is **not** forwarded any more (§2.3); only 80/443 → NPM. (Historically a missing 3000 forward cost a whole debugging session — that path no longer exists.)
 2. Is `pm2` running `ctrlable-server`? `pm2 list`
    Is the device polling at all? The poll is **not** logged per request (the old 60 s trace was removed 2026-09-11 — noise + the owner's e-mail in every line). Check `devices.last_heartbeat`, or `grep Heartbeat /var/log/smartlock/smartlock_system.log | tail`, which logs only state changes: first poll after a server start, *wróciła online po N s*, *Zmiana firmware: a → b*, and *przestała odpytywać* (one line per outage, from a 30 s watchdog).
 3. Test from the server itself: `curl -s http://192.168.0.199:3000/api/hardware/poll?mac=test` — **400 is the healthy answer now** (invalid MAC); a device-level `401` in the log means a key problem (§7.2), not connectivity.
@@ -848,13 +887,13 @@ The server rejects its key (`Auth Rejection … bad_key` in the log). Causes: th
 - **Security audit 2026-09-11 — code fixes DONE (§7); operational steps OPEN (§7.8):** GitHub secrets, repository private, old PAT revoked, `LEGACY_DEVICE_AUTH=off` after the fleet update, `production` environment reviewers. **Residual risks by design:** UID-only RFID cards can be cloned (§7.6, needs DESFire hardware); legacy-device key binding is trust-on-first-use during the transition (§7.2).
 
 - **RFID schedule enforcement — DONE (Aug 18 2026, §5.7).** Schedules sync to the device and are checked locally before unlocking. Remaining gap: they are pushed only when changed in the app, so pre-existing schedules (or a factory-reset device) need one re-save; there is no reconciliation sweep yet.
-- ~~**ESP32 firmware transport is unencrypted HTTP**~~ — **migrated to TLS in firmware (Aug 13 2026, §5.2):** `WiFiClientSecure` on 443 through NPM, root-CA pinned. ISRG Root X1 PEM is embedded in `ROOT_CA_LE`. Remaining to fully close this out: (a) bench-test all cloud paths over TLS, (b) then remove the router's port-3000 forward (hardening step #2).
+- ~~**ESP32 firmware transport is unencrypted HTTP**~~ — **migrated to TLS in firmware (Aug 13 2026, §5.2):** `WiFiClientSecure` on 443 through NPM, root-CA pinned. ISRG Root X1 PEM is embedded in `ROOT_CA_LE`. Fully closed: TLS bench-tested and verified in the field (§5.2), router port-3000 forward removed (§2.3).
 - **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
 - **LittleFS card storage — DONE (Aug 17 2026), verified on hardware** (`[FS] LittleFS OK … selftest=PASS`). Cards live in `/cards.db`, cap raised 10 → **200**, with EEPROM fallback if the mount fails (§5.4). It deployed over normal OTA as predicted — the default `esp32:esp32:esp32` partition scheme already has a `spiffs` partition, so no partition change / USB / re-provision was needed; `partitions.csv` remains an unused fallback.
 - **Local (offline) PIN verification — STILL OPEN** (stage 2). PINs are verified server-side, so they don't work offline and the check is one of the last blocking TLS calls left in `loop()` (§5.2b). *(Its security aspect — anyone knowing the MAC could brute-force PINs remotely through `/api/auth/keypad` — is closed by the device key, §7.2; what remains is the availability/latency feature.)* Plan: PBKDF2-HMAC-SHA256 hashes in `/pins.db` (struct already defined and sized). Full model in `LICENSING.md`.
 - ~~**Offline license key (future idea)**~~ — **BUILT 2026-09-11, WITHDRAWN FROM SALE 2026-09-14 (§5.12, dormant):** signed per-device token, perpetual, same tiers as online; the free offline cap of 2 cards is now enforced in firmware. Not yet tested on hardware. Remaining: offline PIN verification (below), prices.
 - ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
-- Other roadmap items (2FA, data export/deletion, activity-log-triggered features beyond current search, etc.) — see the separate features PDF generated earlier.
+- ~~Data export / account deletion~~ — **DONE (Sep 2026):** `GET /api/account/export`, `POST /api/account/delete_request|confirm` with device factory reset and an `erasure_requests` tombstone (§3.6, `LICENSING.md` §6.0). Still open: 2FA for the app login; licence-expiry reminders (T-7/T-1 days) and the 90-day deletion sweep for deactivated credentials (§3.7, decided 2026-09-14); firmware `BTN_NC`/`BTN_LED` for the custom PCB (§5.1b); PN532 reader with DESFire for clone-resistant cards (evaluation). The old "features PDF" is superseded by this list.
 
 ---
 

@@ -322,7 +322,7 @@ footer .wrap{position:relative;z-index:2}
 .campanel:hover,.alarm-panel:hover{transform:translateY(-3px)}
 .campanel,.alarm-panel{transition:transform .3s var(--ease),border-color .3s,box-shadow .3s}
 
-</style>
+.prelaunch{background:linear-gradient(90deg,#0f2a4a,#0a131f);border-bottom:1px solid var(--line-2);color:var(--dim);font-size:13px;text-align:center;padding:9px 16px;letter-spacing:.02em}.prelaunch b{color:var(--accent-2);font-weight:600}</style>
 </head>
 <body>
 <div id="bar"></div>
@@ -359,6 +359,7 @@ footer .wrap{position:relative;z-index:2}
     </div>
   </div>
 </nav>
+<div class="prelaunch"><b>Produkt w przygotowaniu — premiera wkrótce.</b> Ctrlable Node i aplikacja Ctrlable Access są w fazie testów; strona ma charakter informacyjny. Zapytania o wdrożenie przyjmuję już teraz.</div>
 <main id="main"><span id="top"></span>
 <header class="wrap phero">
   <div>
@@ -370,7 +371,7 @@ footer .wrap{position:relative;z-index:2}
       <a class="btn btn-ghost" href="#spec">Specyfikacja</a>
     </div>
     <div class="hero-meta">
-      <span class="chip">BEZ ABONAMENTU</span><span class="chip">BEZ CHMURY</span><span class="chip">AKTUALIZACJE ZDALNE</span>
+      <span class="chip">POLSKI PRODUKT</span><span class="chip">OFFLINE LUB ONLINE</span><span class="chip">BEZ OBOWIĄZKOWEGO ABONAMENTU</span>
     </div>
   </div>
   <div class="pmark">
@@ -382,10 +383,10 @@ footer .wrap{position:relative;z-index:2}
 <section style="padding-top:40px">
   <div class="wrap">
     <div class="metrics rv">
-      <div class="metric"><b data-count="1">0</b><span>przejście na moduł</span></div>
+      <div class="metric"><b data-count="1">0</b><span>kontroler — całe przejście</span></div>
       <div class="metric"><b data-count="3">0</b><span>metody wejścia</span></div>
-      <div class="metric"><b data-count="0" data-suffix=" ms">0</b><span>zależności od chmury</span></div>
-      <div class="metric"><b data-count="12" data-suffix=" V">0</b><span>zasilania</span></div>
+      <div class="metric"><b data-count="0" data-suffix=" ms">0</b><span>zwłoki — karta sprawdzana w urządzeniu</span></div>
+      <div class="metric"><b data-count="24" data-suffix=" mies.">0</b><span>gwarancji na urządzenie</span></div>
     </div>
   </div>
 </section>
@@ -395,8 +396,8 @@ footer .wrap{position:relative;z-index:2}
     <div class="sec-head"><span class="eyebrow">Dlaczego własny sprzęt</span><h2>Trzecia droga między katalogiem a bazarem</h2>
     <p>Dotąd wybór wyglądał tak: renomowani producenci, u których jedno przejście potrafi kosztować tysiące, albo tanie zamki na baterie z azjatyckich platform — bez serwisu i o nieznanej żywotności. Node to gotowe urządzenie polskiej produkcji: z montażem, serwisem i stale rozwijanym oprogramowaniem.</p></div>
     <div class="grid g3">
-      <article class="card rv"><span class="ch">01</span><h3>Polskie wykonanie</h3><p>Zaprojektowany i składany w Polsce — od płytki po firmware. Zasilanie sieciowe 12 V zamiast baterii, które padają w najgorszym momencie.</p></article>
-      <article class="card rv"><span class="ch">02</span><h3>Zero opłat cyklicznych</h3><p>Bez abonamentu i konta w chmurze. Płacisz raz — za sprzęt i montaż — ułamek ceny rozwiązań integratorskich.</p></article>
+      <article class="card rv"><span class="ch">01</span><h3>Polski produkt</h3><p>Zaprojektowany i wykonany w Polsce — sprzęt, obudowa i oprogramowanie. Zasilanie z sieci zamiast baterii, które padają w najgorszym momencie, i serwis, do którego dzwonisz bezpośrednio.</p></article>
+      <article class="card rv"><span class="ch">02</span><h3>Bez obowiązkowego abonamentu</h3><p>Płacisz raz — za sprzęt i montaż, ułamek ceny rozwiązań integratorskich. Tryb offline i darmowy poziom online są bezterminowe. Pakiet Silver lub Gold dokupujesz tylko wtedy, gdy potrzebujesz więcej użytkowników, dłuższej historii wejść lub kodów gościnnych.</p></article>
       <article class="card rv"><span class="ch">03</span><h3>Serwis i aktualizacje</h3><p>Oprogramowanie rozwijam stale, poprawki wgrywam zdalnie (tryb online). Rejestr wejść trafia na serwer CTRLABLE i jest przechowywany tak długo, jak przewiduje Twój pakiet. W trybie offline centralka nie prowadzi rejestru — żadne dane nie opuszczają urządzenia.</p></article>
     </div>
   </div>
@@ -434,7 +435,7 @@ footer .wrap{position:relative;z-index:2}
         <span class="eyebrow">Utrzymanie</span>
         <h2 style="margin:16px 0 14px;font-size:1.7rem">Aktualizacje bez wizyty serwisu</h2>
         <p>Nowe wersje firmware'u wgrywają się zdalnie (OTA) — bez wizyty i bez demontażu urządzenia. Wystarczy jedno dotknięcie w aplikacji.</p>
-        <p style="margin-top:14px">Karty i konfiguracja Wi-Fi zapisane są w pamięci nieulotnej urządzenia i przeżywają zanik zasilania. PIN-y i harmonogramy przechowuje serwer.</p>
+        <p style="margin-top:14px">Karty i konfiguracja Wi-Fi zapisane są w pamięci nieulotnej urządzenia i przeżywają zanik zasilania. PIN-y i ich harmonogramy przechowuje serwer, harmonogramy kart — samo urządzenie.</p>
       </div>
       <div class="fart">
         <div class="term" style="width:100%;box-shadow:none;border-color:var(--line)">
@@ -453,30 +454,43 @@ footer .wrap{position:relative;z-index:2}
 
 <section id="spec" style="padding-top:20px">
   <div class="wrap">
-    <div class="sec-head"><span class="eyebrow">Dane techniczne</span><h2>Specyfikacja</h2></div>
-    <div class="grid g2">
+    <div class="sec-head"><span class="eyebrow">Dane techniczne</span><h2>Wszystko w jednym kontrolerze</h2>
+      <p>Zamek, przycisk wyjścia, czujnik sabotażu i panel przy drzwiach podłączasz do jednej płytki na złączach śrubowych. Bez dodatkowych modułów, zasilaczy pomocniczych i przewodów, których nie da się później znaleźć.</p></div>
+    <div class="grid g3">
       <article class="card rv">
-        <h3 style="margin-bottom:6px">Sprzęt</h3>
+        <h3 style="margin-bottom:6px">Jedno urządzenie, całe przejście</h3>
         <dl class="spec">
-          <div><dt>Przejścia na moduł</dt><dd>1</dd></div>
-          <div><dt>Zasilanie</dt><dd>12 V DC</dd></div>
-          <div><dt>Wyjścia</dt><dd>przekaźnikowe, bezpotencjałowe</dd></div>
-          <div><dt>Wejścia</dt><dd>przycisk wyjścia</dd></div>
-          <div><dt>Peryferia</dt><dd>czytnik RFID, klawiatura, OLED</dd></div>
-          <div><dt>Montaż</dt><dd>puszka podtynkowa lub szafka</dd></div>
+          <div><dt>Zamek</dt><dd>wbudowany przekaźnik steruje elektrozaczepem lub zworą i zasila je z tej samej płytki</dd></div>
+          <div><dt>Przycisk wyjścia</dt><dd>dowolny (NO lub NC), także z podświetleniem</dd></div>
+          <div><dt>Czujnik sabotażu</dt><dd>alarm na telefon przy otwarciu obudowy</dd></div>
+          <div><dt>Panel przy drzwiach</dt><dd>czytnik kart, klawiatura, wyświetlacz, sygnalizacja dźwiękowa — jeden przewód do kontrolera</dd></div>
+          <div><dt>Podłączenie</dt><dd>złącza śrubowe, bez lutowania, bez adapterów</dd></div>
+          <div><dt>Zasilanie</dt><dd>jeden zasilacz sieciowy dla kontrolera i zamka; karty i ustawienia przeżywają brak prądu</dd></div>
+          <div><dt>Serwis</dt><dd>port USB-C i przycisk resetu fabrycznego w obudowie</dd></div>
         </dl>
       </article>
       <article class="card rv">
         <h3 style="margin-bottom:6px">System</h3>
         <dl class="spec">
-          <div><dt>Identyfikacja</dt><dd>PIN, karta, aplikacja</dd></div>
-          <div><dt>Użytkownicy</dt><dd>karty RFID i PIN-y imienne</dd></div>
+          <div><dt>Identyfikacja</dt><dd>PIN, karta lub brelok, aplikacja</dd></div>
+          <div><dt>Użytkownicy</dt><dd>karty i PIN-y imienne, harmonogramy dni i godzin</dd></div>
           <div><dt>Administratorzy</dt><dd>wielu, na zaproszenie</dd></div>
-          <div><dt>Auto-blokada</dt><dd>opóźnienie 1–60 s</dd></div>
-          <div><dt>Sabotaż</dt><dd>czujnik tamper + alert</dd></div>
-          <div><dt>Powiadomienia</dt><dd>push na telefon</dd></div>
-          <div><dt>Chmura</dt><dd>brak — serwer lokalny</dd></div>
-          <div><dt>Aktualizacje</dt><dd>zdalne (OTA)</dd></div>
+          <div><dt>Auto-blokada</dt><dd>3–30 s, ustawiana z aplikacji</dd></div>
+          <div><dt>Powiadomienia</dt><dd>push na telefon — wejścia i alarmy osobno</dd></div>
+          <div><dt>Tryb pracy</dt><dd>offline (bez konta) lub online (rejestr, zdalne otwieranie, zespół)</dd></div>
+          <div><dt>Aktualizacje</dt><dd>zdalne z aplikacji, podpisane cyfrowo</dd></div>
+          <div><dt>Self-test</dt><dd>raport stanu urządzenia w aplikacji, zrozumiałym językiem</dd></div>
+        </dl>
+      </article>
+      <article class="card rv">
+        <h3 style="margin-bottom:6px">Bezpieczeństwo</h3>
+        <dl class="spec">
+          <div><dt>Tożsamość urządzenia</dt><dd>każda centralka ma własny klucz — serwer nie przyjmie podszywającego się sprzętu</dd></div>
+          <div><dt>Oprogramowanie</dt><dd>aktualizacje podpisane cyfrowo; centralka odrzuca obce pliki</dd></div>
+          <div><dt>Sieć</dt><dd>w trybie online centralka nie wystawia żadnych portów; sieć konfiguracyjna zabezpieczona WPA2 z losowym hasłem</dd></div>
+          <div><dt>Hasła i PIN-y</dt><dd>na serwerze tylko w postaci skrótów, nigdy jawnie</dd></div>
+          <div><dt>Serwis zdalny</dt><dd>wyłącznie na Twoje zaproszenie, na 48 godzin, z potwierdzeniem kodem z ekranu centralki</dd></div>
+          <div><dt>Karty</dt><dd>standard MIFARE (identyfikator UID); dla wyższych wymagań karty z kryptografią na zamówienie</dd></div>
         </dl>
       </article>
     </div>
