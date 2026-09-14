@@ -147,7 +147,7 @@ footer .wrap{position:relative;z-index:2}
     <div class="doc">
       <span class="eyebrow">Dokument</span>
       <h1>Polityka Prywatności</h1>
-      <p class="updated">Ostatnia aktualizacja: 13 sierpnia 2026</p>
+      <p class="updated">Ostatnia aktualizacja: 14 września 2026 · wersja przedpremierowa — obowiązuje od dnia uruchomienia usługi</p>
       <p class="lead">Niniejsza Polityka wyjaśnia, jakie dane osobowe przetwarzamy w związku z korzystaniem z aplikacji <strong>Ctrlable Access</strong> oraz systemu kontroli dostępu <strong>Ctrlable Node</strong>, w jakim celu, na jakiej podstawie prawnej i jakie prawa Ci przysługują — zgodnie z RODO (rozporządzenie UE 2016/679).</p>
 
       <div class="toc">
@@ -174,49 +174,74 @@ footer .wrap{position:relative;z-index:2}
         <li>telefon: <a class="ln" href="tel:+48696088602">696 088 602</a></li>
       </ul>
       <p>Nie wyznaczyliśmy Inspektora Ochrony Danych — we wszystkich sprawach dotyczących przetwarzania danych możesz kontaktować się bezpośrednio pod powyższymi danymi.</p>
+      <h3 id="role">Role: administrator i podmiot przetwarzający</h3>
+      <p>W odniesieniu do <strong>danych Konta</strong> (adres e-mail, hasło, ustawienia, pakiet) jesteśmy administratorem. W odniesieniu do <strong>danych użytkowników przepustek i rejestru wejść</strong> (nazwy nadane kartom i PIN-om, historia wejść) administratorem jest <strong>Właściciel obiektu</strong>, który te dane wprowadza i decyduje o celu ich przetwarzania (np. kontrola dostępu do domu, biura, wynajmowanego lokalu), a my przetwarzamy je na jego zlecenie jako podmiot przetwarzający (art. 28 RODO), w zakresie opisanym w Regulaminie. Jeżeli Właściciel wykorzystuje rejestr wejść wobec pracowników, obowiązki informacyjne wobec nich spoczywają na Właścicielu.</p>
 
       <h2 id="zakres">2. Jakie dane zbieramy</h2>
       <p>Zakres danych zależy od tego, jak korzystasz z systemu. Przetwarzamy wyłącznie dane niezbędne do świadczenia usługi kontroli dostępu:</p>
       <table class="ltab">
         <thead><tr><th>Kategoria</th><th>Dane</th></tr></thead>
         <tbody>
-          <tr><td>Konto</td><td>Adres e-mail, hasło (przechowywane wyłącznie w postaci zaszyfrowanego skrótu — bcrypt, nigdy jawnie), data i fakt akceptacji Regulaminu i Polityki Prywatności.</td></tr>
-          <tr><td>Urządzenia (centralki)</td><td>Nazwa urządzenia, adres sprzętowy (MAC), lokalny adres IP, wersja oprogramowania, status i czas ostatniej łączności, ustawienia (np. czas auto-blokady).</td></tr>
+          <tr><td>Konto</td><td>Adres e-mail, hasło (przechowywane wyłącznie w postaci zaszyfrowanego skrótu — bcrypt, nigdy jawnie), status weryfikacji adresu e-mail, data i fakt akceptacji Regulaminu i Polityki Prywatności, dane pakietu usługi (poziom, data ważności, historia aktywowanych kodów).</td></tr>
+          <tr><td>Urządzenia (centralki)</td><td>Nazwa urządzenia, adres sprzętowy (MAC), lokalny adres IP, wersja oprogramowania, status i czas ostatniej łączności, ustawienia (np. czas auto-blokady), skrót indywidualnego klucza urządzenia. Przy zmianie sieci Wi-Fi z Aplikacji: nazwa i hasło sieci przekazywane centralce przez serwer (przechowywane do 7 dni po potwierdzeniu odbioru).</td></tr>
+          <tr><td>Diagnostyka centralki</td><td>Raporty self-testu i serwisowe: wersja oprogramowania, siła sygnału Wi-Fi, czas pracy, stan pamięci, powód ostatniego restartu, liczba zapisanych kart, wyniki testów podzespołów; w raporcie serwisowym także lista kart z nadanymi nazwami.</td></tr>
           <tr><td>Uprawnienia dostępu</td><td>Kody PIN (przechowywane wyłącznie jako skrót bcrypt), identyfikatory kart/breloków RFID (UID), nazwy nadane użytkownikom przepustek, harmonogramy i daty ważności.</td></tr>
           <tr><td>Rejestr zdarzeń</td><td>Historia wejść i prób dostępu (data, godzina, metoda, wynik, nazwa użytkownika/przepustki), zdarzenia bezpieczeństwa i serwisowe.</td></tr>
           <tr><td>Współadministrowanie</td><td>Adresy e-mail osób zapraszanych do zarządzania urządzeniem oraz relacje udostępnień między kontami.</td></tr>
-          <tr><td>Powiadomienia</td><td>Token powiadomień push (identyfikator urządzenia mobilnego w usłudze Expo) oraz Twoje preferencje powiadomień.</td></tr>
-          <tr><td>Dane techniczne</td><td>Adres IP łączącego się urządzenia oraz zapisy w logach serwera, tworzone m.in. w celu zapewnienia bezpieczeństwa i ograniczenia nadużyć.</td></tr>
+          <tr><td>Powiadomienia</td><td>Token powiadomień push (identyfikator urządzenia mobilnego w usłudze Expo), Twoje preferencje powiadomień oraz treść wysyłanych powiadomień (np. nazwa użytkownika przepustki, nazwa centralki, adres IP nieudanej próby logowania).</td></tr>
+          <tr><td>Dane techniczne</td><td>Adres IP łączącego się urządzenia oraz zapisy w logach serwera (adres IP każdego żądania, adres e-mail przy rejestracji i próbach logowania), tworzone w celu zapewnienia bezpieczeństwa i ograniczenia nadużyć.</td></tr>
         </tbody>
       </table>
       <p>Nie zbieramy danych szczególnych kategorii (np. danych biometrycznych) — karta RFID i PIN są traktowane jako identyfikatory dostępu, nie jako dane biometryczne.</p>
+      <h3 id="offline">Tryb offline</h3>
+      <p>Centralka może pracować <strong>bez Konta i bez połączenia z serwerem</strong> („tryb offline"). W tym trybie nie łączy się z siecią Wi-Fi ani z serwerem Administratora, nie prowadzi rejestru wejść, a dane kart przechowuje wyłącznie we własnej pamięci; konfiguracja odbywa się przez lokalną sieć centralki zabezpieczoną WPA2 i hasłem lokalnym. W trybie offline żadne dane nie opuszczają Urządzenia, a niniejsza Polityka ma zastosowanie wyłącznie do trybu online i do strony internetowej.</p>
 
       <h2 id="cele">3. Cele i podstawy prawne przetwarzania</h2>
       <ul>
         <li><strong>Świadczenie usługi</strong> (założenie konta, zarządzanie urządzeniami, nadawanie dostępu, otwieranie drzwi) — art. 6 ust. 1 lit. b RODO (wykonanie umowy).</li>
         <li><strong>Rejestr wejść i zdarzeń oraz bezpieczeństwo systemu</strong> (wykrywanie nadużyć, ograniczanie liczby prób, ochrona przed nieautoryzowanym dostępem) — art. 6 ust. 1 lit. f RODO (prawnie uzasadniony interes Administratora oraz właściciela obiektu polegający na zapewnieniu bezpieczeństwa).</li>
         <li><strong>Powiadomienia push</strong> o zdarzeniach — art. 6 ust. 1 lit. a RODO (zgoda, którą możesz w każdej chwili wycofać w ustawieniach aplikacji).</li>
+        <li><strong>Wiadomości o usłudze</strong> (weryfikacja adresu e-mail, kody jednorazowe, zaproszenia, przypomnienia o zbliżającym się końcu pakietu i o zaplanowanym usunięciu nieaktywnych przepustek) — art. 6 ust. 1 lit. b RODO.</li>
         <li><strong>Kontakt i obsługa zgłoszeń</strong> — art. 6 ust. 1 lit. f RODO (uzasadniony interes w postaci komunikacji z użytkownikiem).</li>
         <li><strong>Obowiązki prawne</strong> (np. podatkowe, rozpatrywanie reklamacji) — art. 6 ust. 1 lit. c RODO.</li>
       </ul>
 
       <h2 id="odbiorcy">4. Odbiorcy danych i podmioty przetwarzające</h2>
-      <p>Dane rejestru dostępu (użytkownicy, PIN-y, karty, historia wejść) przechowywane są na <strong>serwerze lokalnym</strong> powiązanym z systemem — nie są udostępniane publicznej chmurze w celach marketingowych. Wiadomości systemowe (rejestracja, reset hasła, zaproszenia do współadministrowania) wysyłane są z <strong>własnego serwera pocztowego</strong> Administratora, bez pośrednictwa zewnętrznego dostawcy poczty. Korzystamy z następujących podmiotów przetwarzających, wyłącznie w zakresie niezbędnym do działania usługi:</p>
+      <p>Dane Konta, Urządzeń, uprawnień i rejestru wejść przechowywane są na <strong>własnym serwerze Administratora zlokalizowanym w Polsce</strong> (nie w obiekcie klienta), z którym Aplikacja i centralki łączą się wyłącznie szyfrowanym połączeniem. Nie są udostępniane w celach marketingowych. Wiadomości systemowe (weryfikacja e-mail, reset hasła, zaproszenia, przypomnienia) wysyłane są z adresu node@ctrlable.pl przez serwer pocztowy Administratora, z wykorzystaniem serwera przekaźnikowego OVH.</p>
       <ul>
-        <li><strong>Dostawca usługi powiadomień push</strong> (Expo oraz odpowiednio Apple APNs i Google FCM) — w celu dostarczenia powiadomień na Twój telefon.</li>
-        <li><strong>Dostawca infrastruktury internetowej</strong> (OVH) — w zakresie utrzymania domeny i strony internetowej.</li>
+        <li><strong>Dostawca usługi powiadomień push i aktualizacji aplikacji</strong> (Expo, w tym Expo Application Services, oraz odpowiednio Apple APNs i Google FCM) — w celu dostarczenia powiadomień (wraz z ich treścią) na Twój telefon oraz dostarczania aktualizacji Aplikacji; przy sprawdzaniu aktualizacji przekazywane są dane techniczne Aplikacji i urządzenia mobilnego.</li>
+        <li><strong>OVH</strong> — utrzymanie domeny i strony internetowej oraz <strong>przekaźnik poczty wychodzącej</strong> (treść wiadomości systemowych przechodzi przez serwery OVH w UE).</li>
+        <li><strong>Publiczne serwery czasu (pool.ntp.org)</strong> — centralka w trybie online synchronizuje zegar; przekazywany jest wyłącznie publiczny adres IP sieci, w której pracuje.</li>
+        <li><strong>GitHub</strong> — serwer Administratora pobiera stamtąd pliki aktualizacji oprogramowania centralek; nie są przy tym przekazywane żadne dane użytkowników.</li>
+        <li><strong>Google Ireland Ltd. (Gmail)</strong> — wyłącznie jako dostawca skrzynki serwisowej Administratora, na którą trafiają zaproszenia serwisowe (zob. „Dostęp serwisowy" poniżej).</li>
       </ul>
       <p>Poza powyższymi, niezbędnymi do działania usługi, nie korzystamy z innych podmiotów przetwarzających ani nie udostępniamy danych podmiotom trzecim.</p>
       <p>Nie sprzedajemy Twoich danych. Możemy je udostępnić uprawnionym organom, jeżeli wynika to z obowiązujących przepisów.</p>
 
+      <h3 id="serwis">Dostęp serwisowy Administratora</h3>
+      <p>W ramach wsparcia technicznego i serwisu gwarancyjnego Właściciel Urządzenia może zaprosić <strong>konto serwisowe Administratora</strong> (ctrlablenode@gmail.com) jako współadministratora swojego Urządzenia. Dostęp ten:</p>
+      <ul>
+        <li>powstaje <strong>wyłącznie na zaproszenie Właściciela</strong>, nigdy automatycznie, i <strong>wygasa samoczynnie po 48 godzinach</strong>; Właściciel może odebrać go wcześniej w każdej chwili;</li>
+        <li>obejmuje, w zakresie danego Urządzenia: rejestr zdarzeń, listę użytkowników (nazwy przypisane do kart i PIN-ów), stan i ustawienia Urządzenia oraz możliwość zdalnego otwarcia przejścia — w takim samym zakresie, jak każdy współadministrator;</li>
+        <li>czynności rozszerzone (test przekaźnika, restart Urządzenia, raport diagnostyczny zawierający pełną listę kart) wymagają dodatkowo wpisania kodu wyświetlanego na ekranie Urządzenia, czyli obecności osoby na miejscu;</li>
+        <li>każda sesja serwisowa i każde działanie w jej trakcie są zapisywane w rejestrze Urządzenia, a Właściciel otrzymuje powiadomienie o jej rozpoczęciu i zakończeniu.</li>
+      </ul>
+      <p>Podstawa prawna: art. 6 ust. 1 lit. b RODO (wykonanie umowy serwisowej lub gwarancyjnej). W odniesieniu do danych użytkowników przepustek (osób, którym Właściciel nadał karty lub PIN-y) Administrator działa na zlecenie Właściciela obiektu i w zakresie przez niego określonym. Wiadomość z zaproszeniem serwisowym, zawierająca nazwę Urządzenia i adres e-mail Właściciela, trafia na skrzynkę serwisową prowadzoną w usłudze Gmail. Raporty diagnostyczne Urządzenia przechowywane są przez 30 dni.</p>
+
       <h2 id="eog">5. Przekazywanie danych poza EOG</h2>
-      <p>Co do zasady dane przetwarzamy w Europejskim Obszarze Gospodarczym. Korzystanie z usług powiadomień push (Apple, Google, Expo) może wiązać się z przekazaniem ograniczonego zakresu danych technicznych (token urządzenia) do podmiotów w USA — w takim przypadku odbywa się to na podstawie mechanizmów zgodnych z RODO (m.in. standardowe klauzule umowne lub program Data Privacy Framework).</p>
+      <p>Co do zasady dane przetwarzamy w Europejskim Obszarze Gospodarczym. Korzystanie z usług powiadomień push i aktualizacji aplikacji (Apple, Google, Expo) wiąże się z przekazaniem do podmiotów w USA tokenu urządzenia, danych technicznych Aplikacji oraz <strong>treści powiadomień</strong> (np. nazwa użytkownika przepustki, nazwa centralki, adres IP nieudanej próby logowania). Odbywa się to na podstawie mechanizmów zgodnych z RODO (standardowe klauzule umowne lub program Data Privacy Framework). Możesz wyłączyć powiadomienia push w ustawieniach Aplikacji — wtedy żadne treści nie są przekazywane.</p>
 
       <h2 id="okres">6. Okres przechowywania</h2>
       <ul>
         <li>Dane konta i urządzeń — przez czas korzystania z usługi; po usunięciu konta lub urządzenia dane są usuwane, z wyjątkiem tych, które musimy zachować na podstawie przepisów.</li>
-        <li>Rejestr zdarzeń (logi wejść) — domyślnie do 90 dni, po czym jest automatycznie usuwany. Okres może zostać dostosowany do potrzeb obiektu.</li>
-        <li>Kody jednorazowe (reset hasła, zaproszenia) — wygasają automatycznie (zaproszenia po 48 godzinach).</li>
+        <li>Rejestr zdarzeń (logi wejść) — zależnie od pakietu: <strong>15 dni</strong> (bez pakietu), <strong>45 dni</strong> (Silver), <strong>90 dni</strong> (Gold i Indywidualny); starsze wpisy są usuwane automatycznie. Po wygaśnięciu pakietu okres skraca się do 15 dni i starsze wpisy zostają usunięte.</li>
+        <li>Przepustki (karty, PIN-y) wyłączone po wygaśnięciu lub obniżeniu pakietu — przechowywane w stanie nieaktywnym <strong>90 dni</strong> (z możliwością przywrócenia po odnowieniu pakietu), następnie usuwane; o zbliżającym się usunięciu informujemy e-mailem.</li>
+        <li>Nazwa i hasło sieci Wi-Fi przekazywane centralce — do 7 dni po potwierdzeniu odbioru przez centralkę, najpóźniej 30 dni.</li>
+        <li>Logi serwera (adresy IP, adresy e-mail przy logowaniu) — 90 dni.</li>
+        <li>Kopie zapasowe — kopie dzienne 30 dni, kopie tygodniowe 90 dni; po ewentualnym odtworzeniu z kopii wcześniejsze żądania usunięcia są stosowane ponownie.</li>
+        <li>Rejestr żądań usunięcia konta — wyłącznie skrót (hash) adresu e-mail, bez terminu; służy ponownemu zastosowaniu usunięcia po odtworzeniu kopii zapasowej i nie pozwala odtworzyć adresu.</li>
+        <li>Kody jednorazowe (weryfikacja e-mail, reset hasła, usunięcie konta) — 15 minut; zaproszenia — ważne 48 godzin, rekord z adresem e-mail osoby zapraszanej usuwany po 30 dniach.</li>
+        <li>Dostęp serwisowy — wygasa automatycznie po 48 godzinach od zaproszenia; raporty diagnostyczne Urządzenia — 30 dni.</li>
         <li>Dane niezbędne do obowiązków prawnych (np. rozliczenia) — przez okres wymagany przepisami.</li>
       </ul>
 
@@ -232,13 +257,13 @@ footer .wrap{position:relative;z-index:2}
         <li>cofnięcia zgody w dowolnym momencie (bez wpływu na zgodność z prawem przetwarzania przed jej cofnięciem),</li>
         <li>wniesienia skargi do Prezesa Urzędu Ochrony Danych Osobowych (ul. Stawki 2, 00-193 Warszawa).</li>
       </ul>
-      <p>Aby skorzystać z powyższych praw, napisz na <a class="ln" href="mailto:node@ctrlable.pl">node@ctrlable.pl</a>. Pamiętaj, że jeżeli jesteś użytkownikiem przepustki (kartą/PIN-em) na cudzym obiekcie, część danych może być administrowana przez właściciela tego obiektu — wtedy skierujemy Cię do właściwego administratora.</p>
+      <p><strong>Eksport i usunięcie danych są dostępne bezpośrednio w Aplikacji</strong> (Ustawienia → Konto): eksport pobiera komplet danych Konta w formacie JSON, a usunięcie Konta jest dwuetapowe (potwierdzenie kodem e-mail), nieodwracalne i powoduje usunięcie wszystkich danych Konta, przywrócenie ustawień fabrycznych powiązanych centralek oraz odebranie dostępu współadministratorom. W pozostałych sprawach napisz na <a class="ln" href="mailto:node@ctrlable.pl">node@ctrlable.pl</a>. Jeżeli jesteś użytkownikiem przepustki (kartą/PIN-em) na cudzym obiekcie, administratorem Twoich danych jest właściciel tego obiektu — skierujemy Cię do niego.</p>
 
       <h2 id="cookies">8. Pliki cookies i strona internetowa</h2>
-      <p>Strona <strong>ctrlable.pl</strong> jest statyczna i nie stosuje własnych plików cookies do celów marketingowych ani profilujących. Strona ładuje czcionki z usługi Google Fonts, co może wiązać się z przekazaniem adresu IP do Google w celu dostarczenia plików czcionek. Aplikacja mobilna nie używa cookies przeglądarkowych; do działania wykorzystuje lokalną pamięć urządzenia (m.in. do zapamiętania sesji logowania).</p>
+      <p>Strona <strong>ctrlable.pl</strong> jest statyczna i nie stosuje własnych plików cookies do celów marketingowych ani profilujących. Strona ładuje czcionki z usługi Google Fonts, co może wiązać się z przekazaniem adresu IP do Google w celu dostarczenia plików czcionek. Aplikacja mobilna nie używa cookies przeglądarkowych; do działania wykorzystuje lokalną pamięć urządzenia (m.in. do zapamiętania sesji logowania). Strona akceptacji zaproszeń pod adresem node.ctrlable.pl również nie używa cookies ani skryptów śledzących.</p>
 
       <h2 id="bezpieczenstwo">9. Bezpieczeństwo danych</h2>
-      <p>Stosujemy środki techniczne i organizacyjne odpowiednie do ryzyka, w tym: przechowywanie haseł i PIN-ów wyłącznie w postaci skrótów kryptograficznych (bcrypt), uwierzytelnianie tokenami, ograniczanie liczby prób logowania oraz szyfrowanie połączenia aplikacji z serwerem (HTTPS/TLS). Dbamy o to, aby dostęp do danych miały wyłącznie osoby i systemy, które go potrzebują.</p>
+      <p>Stosujemy środki techniczne i organizacyjne odpowiednie do ryzyka, w tym: przechowywanie haseł i PIN-ów wyłącznie w postaci skrótów kryptograficznych (bcrypt), uwierzytelnianie tokenami, ograniczanie liczby prób logowania oraz szyfrowanie połączenia aplikacji z serwerem (HTTPS/TLS). Dbamy o to, aby dostęp do danych miały wyłącznie osoby i systemy, które go potrzebują. Ponadto: każda centralka uwierzytelnia się indywidualnym kluczem urządzenia (na serwerze przechowywany jest tylko jego skrót), aktualizacje oprogramowania centralek są podpisane cyfrowo i weryfikowane przed instalacją, token sesji w Aplikacji jest przechowywany w bezpiecznym magazynie systemu (Keychain / Keystore), sieć konfiguracyjna centralki jest zabezpieczona WPA2 z losowym hasłem, a zmiana lub reset hasła unieważnia wszystkie aktywne sesje.</p>
 
       <h2 id="zmiany">10. Zmiany Polityki</h2>
       <p>Polityka może być aktualizowana, np. w związku ze zmianą przepisów lub zakresu usługi. Aktualna wersja jest zawsze dostępna na tej stronie, z datą ostatniej aktualizacji na górze dokumentu. W razie istotnych zmian poinformujemy o nich w aplikacji lub e-mailem.</p>

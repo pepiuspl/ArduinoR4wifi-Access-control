@@ -95,7 +95,7 @@ docker exec nginx-proxy-manager grep -rl "node.ctrlable" /data/nginx/
 | Environment | `/opt/smartlock-server/.env` |
 | App code | `/opt/smartlock-server/app/App.js` — **capital A**, see the casing trap in §8 |
 | App config | `/opt/smartlock-server/app/{app.json,package.json,eas.json}` — versioned in `Server_app/`, **not** shipped by `deploy.sh` (changing them needs `npm install` / a Metro restart, so it stays a deliberate manual step) |
-| License-code generator | `/opt/smartlock-server/licensekey.js` — run **on the server**; procedure in `LICENSING.md` §6.1 |
+| License generator | `tools/licensekey.js` in the repo → deployed as `/opt/smartlock-server/licensekey.js`. Online codes: run **on the server** (DB). Offline tokens (`offline <MAC> <tier>`): anywhere the licence private key is — no DB needed (§5.12, `LICENSING.md` §3.5) |
 | OTA cache | `/opt/smartlock-server/updates/` |
 | Master log | `/var/log/smartlock/smartlock_system.log` |
 | Categorized logs | `/var/log/smartlock/{entries,connections,updates,security,provisioning,mail}/YYYY-MM-DD.log` |
@@ -213,6 +213,19 @@ Tables that have needed this fix so far: `keypad_pins`, `card_credentials`, `sys
 | POST | /api/user/rename / toggle_active / delete | JWT | Manage RFID cards (address by stable `id`). The change is written to the DB and **queued for the device by card UID** (`N`/`A`/`D`, §7.3) — responds `{queued:true}`; the app shows a warning until the device acks |
 
 ---
+
+### 3.7 Package limits on existing credentials (downgrade / expiry)
+
+Product decision of 2026-08-18, confirmed 2026-09-14 (`LICENSING.md` §3.4). When an account drops below its current usage (licence expired → `free`, or tier changed manually), the server does **not** grandfather the excess:
+
+- `enforceLicenseLimits(accountId)` (`server.js`, search for the function) runs for every account at startup and every 6 h (`enforceLimitsForAllAccounts`).
+- Cards above `max_cards` and PINs above `max_pins` are **deactivated** (kept for **90 days**, then deleted — decision 2026-09-14; the 90‑day deletion sweep and the T‑7/T‑1‑day expiry reminders + T‑10‑days‑before‑deletion reminder are **not implemented yet**): `is_active=false, license_locked=true`; for cards the device gets `A|<uid8>|0` through the command queue (§7.3). Order of survival: credentials the owner marked with `keep_on_downgrade` (`POST /api/license/keep_selection`, app screen "Pakiet i licencja") → the owner card/PIN (`is_owner_card` / `is_owner_pin`, `POST /api/user/set_owner_card`) → oldest first. **The owner card/PIN is never locked.**
+- Co-admin shares above `max_admins - 1` are **removed** (`device_shares` row deleted); service shares (§7.15) are exempt.
+- On upgrade within those 90 days the locked credentials are restored automatically (`license_locked=false`, `A|uid|1`).
+- Log retention falls to the new tier's `log_retention_days` (15 for free); older `system_events` are pruned by the retention sweep. Existing guest codes run to their expiry; new ones are refused (403).
+- Firmware knows nothing about online licences; it only executes `A|uid|0/1`. The offline cap (`OFFLINE_FREE_CARDS`, §5.12) is enforced separately and only blocks *adding*.
+
+Until 2026-09-14 `LICENSING.md` §3.4 described the earlier "grandfathering" model — that text was wrong since 2026-08-18.
 
 ## 4. Database (PostgreSQL)
 
@@ -452,6 +465,19 @@ Every poll response is parsed for `"deregister":true` (alongside `unlock`/`ota`/
 
 **A deregister only reaches a device that is online and polling.** A device sitting in `CTRLABLE_SETUP`, or one that can't reach the server, never receives the flag — use the physical reset button (§5.1) instead. Likewise a factory-reset, unprovisioned device blocks in the provisioning `while(true)` loop and never starts `networkTask`, so it sends **no poll and no remote log at all**: total silence server-side is expected until it is provisioned, not a fault. The server sends `deregister:true` only during the 120 s window after an owner confirms deregistration (§3.6, §6.11), and blocks auto-re-registration during that window so the wiped device can't immediately re-add itself. **The wipe command is only handed to the real device:** the hash of its key is captured before the DB row is deleted, and polls in the window without that key get 401 (§7.2). **This command handling must be present in the deployed firmware** — build + OTA after changing it.
 
+### 5.12 Offline licence — signed token bound to the device (DORMANT — not sold since 2026-09-14)
+
+> **Product decision 2026-09-14:** offline mode is **free-tier only** (2 cards, no PINs). The offline licence token is **not sold**; the mechanism below stays in the firmware, `tools/licensekey.js` and the app in a dormant state (do not remove, do not advertise). `LICENSING.md` §3.5.
+
+Offline-standalone devices are capped at **`OFFLINE_FREE_CARDS = 2`** cards without a licence (this cap did not exist in firmware before 2026-09-11 — it was documentation only). More cards need an **offline licence token**: `OFL1.` + base64url(`payload[12]` + ECDSA-P256 signature, DER). Payload: `[0]=1` version, `[1..6]` MAC, `[7]` max cards, `[8]` max PINs, `[9]` tier (1 silver / 2 gold / 3 individual), `[10..11]` issue day. Tiers mirror the online ones (`LICENSING.md` §3.5).
+
+- **Signed by the producer's licence key** (`license_signing_private.pem`, separate from the firmware signing key). The firmware embeds only the public key (`LICENSE_PUBKEY_PEM`), verifies the signature and that the MAC is its own — no secret in the device, a copied token is useless on another unit.
+- **Stored in NVS `ctrlsec/oflic` and kept across factory reset** (the licence belongs to the hardware). Perpetual: an offline device has no trusted clock.
+- **Enforced in `saveNewCard()`** only in offline-standalone mode (`ssid == "OFFLINE_MODE"`): cap = licence cards, else 2. Existing cards above the cap keep working (only adding is blocked); the learning flow now handles the refusal ("LIMIT KART: N" on the OLED, denied sound, no cloud upload) — previously a failed save was still reported as "DODANO KARTE".
+- **Installing:** at the factory, in first-setup mode on the AP: `GET http://192.168.4.1/set_license?token=...` (no local password exists yet; the AP is WPA2-gated). Later, in offline mode: `GET /api/set_license?token=...&pass=<local password>` — the app does this from *Ustawienia → Licencja offline*. The local `/api/data` reports `license {tier, cards, pins, active}`, `free_cards` and an `entitlements` object shaped like the server's, so the app's limit UI works unchanged.
+- **Generating:** `LICENSE_SIGNING_KEY_FILE=... node tools/licensekey.js offline D4:E9:F4:78:08:60 gold` (or `individual:120,120`); check without a device: `node tools/licensekey.js offline-verify <token> license_signing_public.pem`.
+- PINs: the token carries `max PINs`, but offline PIN verification is still open (§9) — an offline licence is cards-only until then.
+
 ---
 
 ## 6. Mobile App (React Native / Expo)
@@ -690,6 +716,7 @@ All in `.env`. Edit, `pm2 restart ctrlable-server` — `override: true` means no
 | `CTRLABLE_SETUP` password | firmware, first boot | device NVS `appw` | WPA2 of the setup/offline AP (§7.1) |
 | Local admin password | firmware, each offline setup | device EEPROM @400; app SecureStore | Offline-mode local API (§7.1) |
 | Firmware signing key | `openssl ecparam -name prime256v1` (once) | GitHub secret + offline backup; **never in the repo** | Signs releases (§7.5) |
+| Licence signing key | `openssl ecparam -name prime256v1` (once) | producer's machine + offline backup; **never in the repo**; public key in firmware `LICENSE_PUBKEY_PEM` | Signs offline licence tokens (§5.12) |
 | `JWT_SECRET` | `openssl rand -hex 32` | server `.env` | Signs app sessions (§7.4) |
 
 ### 7.15 Service access — no standing backdoor, no service role in the DB
@@ -825,7 +852,7 @@ The server rejects its key (`Auth Rejection … bad_key` in the log). Causes: th
 - **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
 - **LittleFS card storage — DONE (Aug 17 2026), verified on hardware** (`[FS] LittleFS OK … selftest=PASS`). Cards live in `/cards.db`, cap raised 10 → **200**, with EEPROM fallback if the mount fails (§5.4). It deployed over normal OTA as predicted — the default `esp32:esp32:esp32` partition scheme already has a `spiffs` partition, so no partition change / USB / re-provision was needed; `partitions.csv` remains an unused fallback.
 - **Local (offline) PIN verification — STILL OPEN** (stage 2). PINs are verified server-side, so they don't work offline and the check is one of the last blocking TLS calls left in `loop()` (§5.2b). *(Its security aspect — anyone knowing the MAC could brute-force PINs remotely through `/api/auth/keypad` — is closed by the device key, §7.2; what remains is the availability/latency feature.)* Plan: PBKDF2-HMAC-SHA256 hashes in `/pins.db` (struct already defined and sized). Full model in `LICENSING.md`.
-- **Offline license key (future idea)** — for the "many users, zero cloud, willing to pay" niche: a one-time **signed** license key entered at provisioning that raises the offline-standalone cap **without a server** (firmware validates the signature). Lets the no-cloud brand serve >2-user private clients. Not built; recorded so it isn't lost (`LICENSING.md`).
+- ~~**Offline license key (future idea)**~~ — **BUILT 2026-09-11, WITHDRAWN FROM SALE 2026-09-14 (§5.12, dormant):** signed per-device token, perpetual, same tiers as online; the free offline cap of 2 cards is now enforced in firmware. Not yet tested on hardware. Remaining: offline PIN verification (below), prices.
 - ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
 - Other roadmap items (2FA, data export/deletion, activity-log-triggered features beyond current search, etc.) — see the separate features PDF generated earlier.
 
