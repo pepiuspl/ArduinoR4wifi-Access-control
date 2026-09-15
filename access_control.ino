@@ -193,7 +193,7 @@ const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
 volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
-const char* app_version = "v3.2.1";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
+const char* app_version = "v3.2.2";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
 
 struct User { 
   byte uid[4]; 
@@ -928,7 +928,7 @@ void renderSystemUI() {
   }   
   else if (serviceCodeUntil > millis() && serviceCode[0]) {
     // Kod obecności dla serwisanta — przepisuje go do aplikacji, dowodząc, że stoi
-    // przy centralce. Znika po 15 min albo po restarcie.
+    // przy centralce. Znika po 15 min, po restarcie albo po komendzie "V|" z serwera.
     display.setCursor(10, 16);
     display.print("TRYB SERWISOWY");
     display.setCursor(4, 27);
@@ -2583,12 +2583,20 @@ void applyPendingCommands() {
     char type = f[0].length() ? f[0][0] : 0;
 
     if (type == 'V' && nf >= 2) {
-      // Kod obecności serwisu — tylko na ekranie, nigdy do logu ani do serwera.
-      f[1].toCharArray(serviceCode, sizeof(serviceCode));
-      serviceCodeUntil = millis() + 15UL * 60UL * 1000UL;
-      globalAnimFrame = 0;
-      playSound(SND_CLICK_CONFIRM);
-      addLog("Sesja serwisowa: kod na ekranie");
+      if (f[1].length() == 0) {
+        // "V|" bez kodu = zdejmij kod z ekranu (serwer wysyła po potwierdzeniu kodu,
+        // zakończeniu sesji, odłączeniu serwisu albo odebraniu mu dostępu).
+        serviceCode[0] = 0;
+        serviceCodeUntil = 0;
+        addLog("Sesja serwisowa: ekran przywrocony");
+      } else {
+        // Kod obecności serwisu — tylko na ekranie, nigdy do logu ani do serwera.
+        f[1].toCharArray(serviceCode, sizeof(serviceCode));
+        serviceCodeUntil = millis() + 15UL * 60UL * 1000UL;
+        globalAnimFrame = 0;
+        playSound(SND_CLICK_CONFIRM);
+        addLog("Sesja serwisowa: kod na ekranie");
+      }
     } else if (type == 'G' && nf >= 2) {
       buildDiagnosticReport(f[1].toInt());
     } else if (type == 'R') {

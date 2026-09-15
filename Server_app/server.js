@@ -165,6 +165,13 @@ const isServiceEmail = (email) => SERVICE_ACCOUNTS.has(String(email || '').trim(
 const SHARE_ACTIVE = `(expires_at IS NULL OR expires_at > NOW())`;
 // serviceSessions[mac] = { accountId, code, codeUntil, confirmedUntil, fails }
 const serviceSessions = {};
+// Zdejmuje kod serwisowy z OLED (firmware ≥ v3.2.2 rozumie "V|" jako „wróć do normalnego
+// ekranu"; v3.2.1 też chowa kod, bo pusty ciąg nie przechodzi warunku wyświetlania). Wołane przy potwierdzeniu
+// kodu, zakończeniu sesji, spaleniu kodu, odłączeniu serwisu i odebraniu mu dostępu.
+async function clearServiceCode(mac) {
+  if (!mac) return;
+  await queueDeviceCommand(mac, 'V|').catch(() => {});
+}
 
 // Aktualizacja uzbrojona per centralka (mac -> timestamp). Wcześniej jedna globalna
 // flaga: kliknięcie „Aktualizuj" przez dowolnego klienta aktualizowało WSZYSTKIE zamki.
@@ -2268,6 +2275,10 @@ const server = http.createServer(async (req, res) => {
         if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może odbierać dostęp.' });
 
         await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1 AND account_id = $2', [mac.toUpperCase(), targetAccountId]);
+        if (serviceSessions[mac.toUpperCase()] && serviceSessions[mac.toUpperCase()].accountId === parseInt(targetAccountId, 10)) {
+          delete serviceSessions[mac.toUpperCase()];
+          await clearServiceCode(mac.toUpperCase());
+        }
         writeToLocalLogFile('Provisioning', `[Node: ${mac.toUpperCase()}] Access revoked for account ${targetAccountId} by owner ${accountId}.`);
         return sendJSON(res, 200, { status: 'ok' });
       }
@@ -2283,6 +2294,7 @@ const server = http.createServer(async (req, res) => {
         const r = await dbPool.query('DELETE FROM device_shares WHERE mac_address = $1 AND account_id = $2 RETURNING is_service', [mac, accountId]);
         if (r.rows.length === 0) return sendJSON(res, 404, { error: 'Nie masz udziału w tej centralce.' });
         if (serviceSessions[mac] && serviceSessions[mac].accountId === accountId) delete serviceSessions[mac];
+        if (r.rows[0].is_service) await clearServiceCode(mac);
         writeToLocalLogFile('Provisioning', `[Node: ${mac}] Account ${accountId} left the device${r.rows[0].is_service ? ' (service)' : ''}.`);
         await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
           [mac, r.rows[0].is_service ? 'Serwis zakończył dostęp do centralki' : 'Współadministrator odłączył się od centralki', 'provisioning']).catch(() => {});
@@ -2318,6 +2330,7 @@ const server = http.createServer(async (req, res) => {
         if (code !== s.code) {
           if (++s.fails >= CODE_MAX_ATTEMPTS) {
             delete serviceSessions[svc.mac];
+            await clearServiceCode(svc.mac);
             writeToLocalLogFile('Auth RateLimit', `[Node: ${svc.mac}] Service code burned after ${CODE_MAX_ATTEMPTS} wrong attempts (account ${accountId}).`);
             return sendJSON(res, 429, { error: 'Za dużo błędnych prób — kod unieważniony. Rozpocznij sesję ponownie.' });
           }
@@ -2325,6 +2338,7 @@ const server = http.createServer(async (req, res) => {
         }
         s.confirmedUntil = Date.now() + 60 * 60 * 1000;
         s.code = null;
+        await clearServiceCode(svc.mac);
         await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
           [svc.mac, 'Sesja serwisowa potwierdzona kodem z centralki (obecność na miejscu)', 'provisioning']).catch(() => {});
         writeToLocalLogFile('Service', `[Node: ${svc.mac}] Service session CONFIRMED on-site by ${accountId}.`);
@@ -2336,6 +2350,7 @@ const server = http.createServer(async (req, res) => {
         const mac = normalizeMac(body.mac);
         if (mac && serviceSessions[mac] && serviceSessions[mac].accountId === accountId) {
           delete serviceSessions[mac];
+          await clearServiceCode(mac);
           await dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
             [mac, 'Sesja serwisowa zakończona', 'provisioning']).catch(() => {});
         }
