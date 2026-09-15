@@ -1338,6 +1338,10 @@ export default function App() {
           throw new Error(data.error || 'OTA push failed');
         }
         setOtaState('flashing_device');
+        // Koniec czekania także przy NIEPOWODZENIU: serwer zgłasza otaFailed (centralka wstała
+        // ze starą wersją po pobraniu 100 %) albo minęło 5 min bez nowej wersji (np. crash w
+        // trakcie zapisu, restart serwera). Wcześniej ekran „Pobieranie: 100 %" wisiał w nieskończoność.
+        const startedAt = Date.now();
         const checkInterval = setInterval(() => {
           fetch(`${backendUrl}/api/data`, { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} })
             .then((r) => r.json())
@@ -1348,6 +1352,17 @@ export default function App() {
                 clearInterval(checkInterval);
                 setOtaState('success');
                 setTimeout(() => setOtaState('idle'), 5000);
+                return;
+              }
+              const failed = !!data.otaFailed;
+              const timedOut = Date.now() - startedAt > 5 * 60 * 1000;
+              if (failed || timedOut) {
+                clearInterval(checkInterval);
+                setOtaState('available');
+                Alert.alert('Aktualizacja nie powiodła się',
+                  failed
+                    ? `Centralka uruchomiła się ponownie, ale nadal zgłasza poprzednią wersję (${data.firmwareVersion || '?'}). Spróbuj jeszcze raz; jeśli się powtórzy, zgłoś serwis z logiem centralki.`
+                    : 'Centralka nie zgłosiła nowej wersji w ciągu 5 minut. Sprawdź, czy jest online, i spróbuj ponownie.');
               }
             })
             .catch(() => {});

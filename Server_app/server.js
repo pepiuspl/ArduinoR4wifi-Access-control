@@ -1372,6 +1372,8 @@ const server = http.createServer(async (req, res) => {
           pushEntries: accountsRes.rows[0].push_entries !== false,
           pushAlarms: accountsRes.rows[0].push_alarms !== false,
           otaProgress: (actualLockStates[primaryMac]?.otaProgress || 0),
+          otaFailed: !!(actualLockStates[primaryMac]?.otaFailed),
+          firmwareVersion: primaryDevice.firmware_version || null,
           deviceReleaseId: (actualLockStates[primaryMac]?.deviceReleaseId || 0),
           latestReleaseId: latestFirmwareReleaseId,
           autoLockSeconds: Math.round((primaryDevice.auto_lock_delay_ms || 3000) / 1000),
@@ -2776,7 +2778,7 @@ const server = http.createServer(async (req, res) => {
 
         const readStream = fs.createReadStream(filePath);
         let transmittedBytes = 0;
-        actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, timestamp: Date.now() };
+        actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, otaFailed: false, timestamp: Date.now() };
 
         readStream.on('data', (chunk) => {
           transmittedBytes += chunk.length;
@@ -3016,7 +3018,15 @@ const server = http.createServer(async (req, res) => {
         }
 
         if ((actualLockStates[mac]?.otaProgress || 0) === 99) {
-          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100 };
+          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100, otaDoneAt: Date.now(), otaFailed: false };
+        } else if ((actualLockStates[mac]?.otaProgress || 0) === 100 && latestFirmwareReleaseId > 0 && deviceReleaseId < latestFirmwareReleaseId
+                   && Date.now() - (actualLockStates[mac].otaDoneAt || 0) > 20000) {
+          // Plik poszedł w całości, a centralka po ≥ 20 s nadal zgłasza stare wydanie —
+          // wstała ze starym firmware (crash w trakcie zapisu / odrzucony podpis).
+          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, otaFailed: true };
+          forceLog(`[OTA FAILED] Centralka [${mac}] po pobraniu całości zgłasza nadal wydanie ${deviceReleaseId} (${currentHardwareVersion}) — aktualizacja nie została zastosowana.`);
+          dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+            [mac, `Aktualizacja firmware nie powiodła się — centralka nadal ma wersję ${currentHardwareVersion}.`, 'security']).catch(() => {});
         }
 
         // Komenda otwarcia — wyłącznie dla TEJ centralki (bez kolejki „wieloznacznej").
