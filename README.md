@@ -128,7 +128,7 @@ SERVICE_ACCOUNTS=ctrlablenode@gmail.com  # service account(s), comma-separated �
 SERVICE_SHARE_HOURS=48       # optional; how long a service share lives
 LOCKED_CREDENTIAL_DAYS=90    # optional; days a package-locked card/PIN is kept before deletion (§3.7)
 ```
-Loaded with `override: true` — essential, or pm2's cached env wins over `.env`. **Mail has no env at all:** nodemailer talks to the local Postfix on `127.0.0.1:25` (sender `node@ctrlable.pl`); Postfix relays through OVH (`ssl0.ovh.net:587`, SASL password in `/etc/postfix/sasl_passwd`) — see §8.
+Loaded with `override: true` — essential, or pm2's cached env wins over `.env`. **Log files:** `ops/install-logrotate.sh` (run once on the box as root) installs `/etc/logrotate.d/smartlock` (daily rotation of `smartlock_system.log`, 90 copies, compressed) and a daily cron that deletes categorized logs older than 90 days — the retention promised in the privacy policy. **Mail has no env at all:** nodemailer talks to the local Postfix on `127.0.0.1:25` (sender `"CTRLABLE Node" <info@ctrlable.pl>`; the relay logs in as the single OVH mailbox `node@ctrlable.pl` — OVH accepts any same-domain From, replies to info@ are forwarded to that mailbox); Postfix relays through OVH (`ssl0.ovh.net:587`, SASL password in `/etc/postfix/sasl_passwd`) — see §8.
 
 **Data retention (hardening #4, Aug 13 2026; per-package since Aug 18):** `purgeExpiredData()` runs on startup and every 24 h — deletes `system_events` per device owner according to `accounts.log_retention_days` (COALESCE 15: 15 free / 45 Silver / 90 Gold, `LICENSING.md` §6.0); the global `LOG_RETENTION_DAYS` (default **90**; `0` = disable) only prunes *orphaned* events with no device and stale `device_invites` (>30 days, they hold emails). GDPR data-minimization (Art. 5) + smaller breach blast radius. The **file** logs under `/var/log/smartlock/` are separate — rotate/expire those with OS-level `logrotate` if desired.
 
@@ -523,6 +523,8 @@ Offline-standalone devices are capped at **`OFFLINE_FREE_CARDS = 2`** cards with
 Every boot sends the `[FS] LittleFS …` line; since v3.2.1 it ends with ` reset=<code>/<name> heap_min=<bytes>` and, when the previous run died in a panic or watchdog, ` CRASH task=<name> pc=0x… cause=<n> bt=0x…,0x…`. The ESP32 core writes an ELF core dump to the `coredump` partition (default 4 MB partition table; `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` in the Arduino core) — the firmware reads `esp_core_dump_get_summary()`, sends it once and erases the dump. Reset codes: 1 POWERON, 3 SW (OTA/ESP.restart), 4 PANIC, 5 INT_WDT (interrupts blocked > 300 ms), 6 TASK_WDT, 9 BROWNOUT.
 
 Decoding: the release now also carries `lock_<version>.elf`. Run `bash tools/decode_backtrace.sh lock_v3.2.1.elf 0x400d1234,0x400d5678` (uses `xtensa-esp32-elf-addr2line` from the installed Arduino ESP32 toolchain) to get file:line for every frame. The `.elf` matches only the exact build — decode a v3.2.1 trace with the v3.2.1 `.elf`.
+
+Server side (Sep 15 2026): every boot line is counted per device — an unexpected reason (PANIC / watchdog / BROWNOUT) becomes a `security` event in the app's log, and 3 or more boots within an hour push "Centralka restartuje się" to the owner (`recordDeviceBoot`, at most one alert per hour, RAM-only counter).
 
 Also since v3.2.1: `WiFi.setSleep(false)` (modem-sleep off — a frequent cause of dropped associations with some routers; irrelevant on mains power).
 

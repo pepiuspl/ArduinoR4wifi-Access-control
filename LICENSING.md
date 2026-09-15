@@ -249,7 +249,7 @@ UPDATE accounts SET license_tier='free', max_cards=2, max_pins=2, max_admins=2,
 ---
 
 ## 8. Gwarancja (skrót — pełny „Regulamin gwarancyjny" jako osobny dokument)
-- **Gwarancja pokrywa wady** produktu (materiał, wykonanie, komponenty), **nie szkody z przyczyn zewnętrznych.**
+- **Gwarancja pokrywa wady** produktu (materiał, wykonanie, komponenty), **nie szkody z przyczyn zewnętrznych.** Urządzenie i panel są przeznaczone do montażu **wewnątrz budynków** (brak klasy IP) — praca na zewnątrz, w wilgoci lub zapyleniu wyłącza gwarancję.
 - **Wykluczenia** (typowe, do potwierdzenia): **włamanie/wandalizm/celowe uszkodzenie**, zalanie ponad normę, przepięcia/piorun, błędny montaż (jeśli nie przez producenta), nieautoryzowana ingerencja/naprawa, zużycie eksploatacyjne, siła wyższa.
 - **Włamanie ≠ gwarancja** — od tego jest ubezpieczenie; oferować można **płatną naprawę/wymianę** lub opcjonalny pakiet ochronny.
 - Czujnik **tamper** to detekcja/alarm, **nie pancerz**; kontroler montować po **bezpiecznej stronie drzwi**.

@@ -924,7 +924,7 @@ const server = http.createServer(async (req, res) => {
         // przy ponownej próbie rejestracji konta jeszcze niezweryfikowanego).
         const sendVerifyCode = (code) => {
           const codeMailManifest = {
-            from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+            from: '"CTRLABLE Node" <info@ctrlable.pl>',
             to: cleanEmail,
             subject: 'Twój kod weryfikacyjny CTRLABLE',
             html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
@@ -1020,7 +1020,7 @@ const server = http.createServer(async (req, res) => {
         );
 
         const welcomeMailManifest = {
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          from: '"CTRLABLE Node" <info@ctrlable.pl>',
           to: cleanEmail,
           subject: 'Witamy w ekosystemie CTRLABLE!',
           html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
@@ -1094,7 +1094,7 @@ const server = http.createServer(async (req, res) => {
             [freshCode, result.rows[0].id]
           );
           mailTransport.sendMail({
-            from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+            from: '"CTRLABLE Node" <info@ctrlable.pl>',
             to: cleanEmail,
             subject: 'Twój kod weryfikacyjny CTRLABLE',
             html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
@@ -1158,7 +1158,7 @@ const server = http.createServer(async (req, res) => {
         );
 
         const automatedMailManifest = {
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          from: '"CTRLABLE Node" <info@ctrlable.pl>',
           to: cleanEmail,
           subject: 'Kod autoryzacyjny resetu hasła CTRLABLE',
           html: `<h3>Twój kod weryfikacyjny:</h3>
@@ -1890,7 +1890,7 @@ const server = http.createServer(async (req, res) => {
           : '<li><i>brak przypisanych centralek</i></li>';
 
         mailTransport.sendMail({
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          from: '"CTRLABLE Node" <info@ctrlable.pl>',
           to: accEmail,
           subject: 'Potwierdzenie USUNIĘCIA KONTA CTRLABLE',
           html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; color:#333;">
@@ -2039,7 +2039,7 @@ const server = http.createServer(async (req, res) => {
 
         const deviceName = owned.rows[0].device_name || mac;
         mailTransport.sendMail({
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          from: '"CTRLABLE Node" <info@ctrlable.pl>',
           to: owned.rows[0].email,
           subject: `Potwierdzenie odłączenia centralki: ${deviceName}`,
           html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; color:#333;">
@@ -2152,7 +2152,7 @@ const server = http.createServer(async (req, res) => {
         const deviceName = ownedDevice.rows[0].device_name || mac.toUpperCase();
         const inviteLink = `${PUBLIC_BASE_URL}/invite?token=${inviteToken}`;
         const inviteMailManifest = {
-          from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+          from: '"CTRLABLE Node" <info@ctrlable.pl>',
           to: cleanEmail,
           subject: `Zaproszenie do współadministrowania: ${deviceName}`,
           html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; color:#333;">
@@ -2583,6 +2583,7 @@ const server = http.createServer(async (req, res) => {
         // Pełny, techniczny komunikat (rozmiar pliku, nagłówki, transmisja blokowa
         // itd.) zawsze trafia do pliku logów na dysku — do debugowania.
         writeToLocalLogFile('Hardware Remote Log', `[Node: ${eventMac}] ${msg}`);
+        if (/^\[FS\] LittleFS/.test(msg)) recordDeviceBoot(eventMac, msg);   // linia bootu (README §5.13)
 
         // Do bazy widocznej w aplikacji klienta trafiają TYLKO uproszczone,
         // nietechniczne wersje komunikatów aktualizacji (bez słowa "OTA",
@@ -2904,7 +2905,7 @@ const server = http.createServer(async (req, res) => {
           if (ins.rows.length > 0) {
             writeToLocalLogFile('Provisioning', `[Node: ${rawMac}] Pomyślnie utworzono i przypisano centralkę do konta: ${email}${key ? '' : ' (BEZ klucza — stary firmware)'}`);
             mailTransport.sendMail({
-              from: '"CTRLABLE Node System" <node@ctrlable.pl>',
+              from: '"CTRLABLE Node" <info@ctrlable.pl>',
               to: email,
               subject: 'Nowa centralka dodana do Twojego konta CTRLABLE',
               html: `<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
@@ -3754,7 +3755,12 @@ async function runSchemaMigrations() {
   }
   writeToLocalLogFile('Core Daemon', `[Migration] Zakończono: ${successCount}/${alters.length + creates.length} instrukcji wykonanych pomyślnie.`);
 }
-runSchemaMigrations();
+// Migracje jako obietnica: przeglądy (retencja, limity, cykl życia pakietu) startują dopiero,
+// gdy nowe kolumny istnieją. Wcześniej enforceLimitsForAllAccounts() potrafił ruszyć 50 ms
+// przed końcem migracji (widoczne w logu z 14.09.2026) — na świeżej bazie skończyłoby się błędem.
+const migrationsReady = runSchemaMigrations().catch((e) => {
+  writeToLocalLogFile('Core Daemon', `[Migration] BŁĄD: ${e.message}`);
+});
 
 // =========================================================================
 // RETENCJA / MINIMALIZACJA DANYCH (RODO art. 5) — uruchamiane przy starcie i co 24 h.
@@ -3812,7 +3818,7 @@ async function purgeExpiredData() {
     writeToLocalLogFile('Core Daemon', `[Retention] BŁĄD: ${e.message}`);
   }
 }
-purgeExpiredData();
+migrationsReady.then(purgeExpiredData);
 setInterval(purgeExpiredData, 24 * 60 * 60 * 1000);
 
 // =========================================================================
@@ -3832,7 +3838,7 @@ async function enforceLimitsForAllAccounts() {
     writeToLocalLogFile('Core Daemon', `[License] BŁĄD przeglądu limitów: ${e.message}`);
   }
 }
-enforceLimitsForAllAccounts();
+migrationsReady.then(enforceLimitsForAllAccounts);
 setInterval(enforceLimitsForAllAccounts, 6 * 60 * 60 * 1000);
 
 // =========================================================================
@@ -3852,7 +3858,7 @@ function sendSystemMail(to, subject, text) {
   return new Promise((resolve) => {
     if (!to) return resolve(false);
     try {
-      mailTransport.sendMail({ from: '"CTRLABLE Node System" <node@ctrlable.pl>', to, subject, text }, (err) => {
+      mailTransport.sendMail({ from: '"CTRLABLE Node" <info@ctrlable.pl>', to, subject, text }, (err) => {
         if (err) writeToLocalLogFile('Mail', `[License] Błąd wysyłki do ${to}: ${err.message}`);
         resolve(!err);
       });
@@ -3889,7 +3895,7 @@ Co możesz zrobić już teraz w aplikacji Ctrlable Access → „Pakiet i licenc
 - wskazać, które karty i PIN-y mają zostać aktywne po zmianie pakietu,
 - wpisać nowy kod pakietu (odnowienie).
 
-Kod pakietu otrzymasz, pisząc na node@ctrlable.pl lub dzwoniąc pod 696 088 602.
+Kod pakietu otrzymasz, pisząc na info@ctrlable.pl lub dzwoniąc pod 696 088 602.
 
 — CTRLABLE Node`;
       await sendSystemMail(a.email, subject, text);
@@ -3935,7 +3941,7 @@ ${lines}
 
 Jeśli chcesz je zachować, odnów pakiet przed tą datą — wrócą automatycznie. Po usunięciu kartę trzeba będzie ponownie nauczyć przy czytniku, a PIN nadać od nowa.
 
-Kod pakietu: node@ctrlable.pl, 696 088 602.
+Kod pakietu: info@ctrlable.pl, 696 088 602.
 
 — CTRLABLE Node`;
     await sendSystemMail(info.email, `Za ${LOCKED_DELETE_NOTICE_DAYS} dni usuniemy wyłączone przepustki — CTRLABLE Node`, text);
@@ -3993,7 +3999,7 @@ async function runLicenseLifecycle() {
   try { await lockedCredentialLifecycle(); } catch (e) { writeToLocalLogFile('Core Daemon', `[License] BŁĄD cyklu blokad: ${e.message}`); }
 }
 // Start z opóźnieniem, żeby migracje i pierwszy przegląd limitów zdążyły się wykonać.
-setTimeout(runLicenseLifecycle, 90 * 1000);
+migrationsReady.then(() => setTimeout(runLicenseLifecycle, 90 * 1000));
 setInterval(runLicenseLifecycle, 24 * 60 * 60 * 1000);
 
 server.listen(3000, () => {
@@ -4173,6 +4179,44 @@ function evaluateReport(p) {
 }
 
 // Push do WŁAŚCICIELA centralki (np. początek sesji serwisowej) — respektuje push_alarms.
+// =========================================================================
+// RESTARTY CENTRALEK — z linii bootu "[FS] LittleFS …" (README §5.13). Niespodziewany
+// powód (panika, watchdog, brownout) trafia do rejestru jako zdarzenie bezpieczeństwa;
+// ≥ BOOT_ALERT_COUNT restartów w BOOT_ALERT_WINDOW_MS daje push do właściciela,
+// nie częściej niż raz na okno. Pamięć tylko w RAM — po restarcie serwera licznik startuje od zera.
+// =========================================================================
+const BOOT_ALERT_COUNT = 3;
+const BOOT_ALERT_WINDOW_MS = 60 * 60 * 1000;
+const deviceBoots = new Map();   // mac -> { times: [ms], lastAlert: ms }
+const UNEXPECTED_RESET = { 4: 'awaria oprogramowania', 5: 'zawieszenie (watchdog)', 6: 'zawieszenie (watchdog)', 7: 'zawieszenie (watchdog)', 9: 'zanik zasilania (brownout)' };
+function recordDeviceBoot(mac, msg) {
+  try {
+    const now = Date.now();
+    const st = deviceBoots.get(mac) || { times: [], lastAlert: 0 };
+    st.times = st.times.filter((t) => now - t < BOOT_ALERT_WINDOW_MS);
+    st.times.push(now);
+    deviceBoots.set(mac, st);
+    const m = /reset=(\d+)\/(\w+)/.exec(msg);
+    const code = m ? parseInt(m[1], 10) : null;
+    const why = code !== null && UNEXPECTED_RESET[code] ? UNEXPECTED_RESET[code] : null;
+    if (why) {
+      const crash = /CRASH task=(\S+)/.exec(msg);
+      dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+        [mac, `Centralka uruchomiła się ponownie po nieoczekiwanym restarcie: ${why}${crash ? ' (zadanie ' + crash[1] + ')' : ''}. Jeśli się powtarza, uruchom self-test.`, 'security']).catch(() => {});
+    }
+    if (st.times.length >= BOOT_ALERT_COUNT && now - st.lastAlert > BOOT_ALERT_WINDOW_MS) {
+      st.lastAlert = now;
+      const n = st.times.length;
+      writeToLocalLogFile('Heartbeat', `[Node: ${mac}] ${n} restartów w ciągu godziny — alert do właściciela.`);
+      notifyOwner(mac, '⚠️ Centralka restartuje się', `${n} restartów w ciągu godziny${why ? ' (' + why + ')' : ''}. Sprawdź zasilanie; jeśli się powtarza, uruchom self-test i zgłoś serwis.`);
+      dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
+        [mac, `${n} restartów centralki w ciągu godziny — sprawdź zasilanie lub zgłoś serwis.`, 'security']).catch(() => {});
+    }
+  } catch (e) {
+    writeToLocalLogFile('Heartbeat', `[Node: ${mac}] Błąd licznika restartów: ${e.message}`);
+  }
+}
+
 function notifyOwner(mac, title, body) {
   dbPool.query(
     `SELECT a.push_token, a.push_alarms FROM accounts a JOIN devices d ON d.account_id = a.id WHERE d.mac_address = $1 LIMIT 1`, [mac])
