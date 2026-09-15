@@ -2119,6 +2119,20 @@ const server = http.createServer(async (req, res) => {
         );
         if (ownedDevice.rows.length === 0) return sendJSON(res, 403, { error: 'Tylko właściciel może zapraszać administratorów.' });
 
+        // Właściciel nie jest współadministratorem: zaproszenie własnego adresu tworzyło
+        // udział „sam dla siebie” i zjadało miejsce z limitu (przypadek z 15.09.2026).
+        // To samo dla adresu, który już ma aktywny udział albo oczekujące zaproszenie.
+        const ownerRow = await dbPool.query('SELECT email FROM accounts WHERE id = $1', [accountId]);
+        if (ownerRow.rows.length && ownerRow.rows[0].email.toLowerCase() === cleanEmail)
+          return sendJSON(res, 400, { error: 'To Twój własny adres — jako właściciel masz już pełny dostęp.' });
+        const dup = await dbPool.query(
+          `SELECT 1 FROM device_shares ds JOIN accounts a ON a.id = ds.account_id
+            WHERE ds.mac_address = $1 AND LOWER(a.email) = $2 AND ${SHARE_ACTIVE}
+           UNION ALL
+           SELECT 1 FROM device_invites WHERE mac_address = $1 AND LOWER(invited_email) = $2 AND used = false AND expires_at > NOW()`,
+          [mac.toUpperCase(), cleanEmail]);
+        if (dup.rows.length) return sendJSON(res, 400, { error: 'Ten adres już jest administratorem tej centralki albo ma ważne zaproszenie.' });
+
         // Limit administratorów wg pakietu (łącznie z właścicielem). Liczymy
         // istniejących współadminów + oczekujące niewykorzystane zaproszenia + 1.
         // KONTO SERWISOWE (README §7.15) omija limit administratorów: klient z pełnym
@@ -2208,6 +2222,11 @@ const server = http.createServer(async (req, res) => {
           return sendJSON(res, 403, { error: 'To zaproszenie zostało wysłane na inny adres e-mail.' });
         }
 
+        const isOwnerOfIt = await dbPool.query('SELECT 1 FROM devices WHERE mac_address = $1 AND account_id = $2', [invite.mac_address, accountId]);
+        if (isOwnerOfIt.rows.length) {
+          await dbPool.query('UPDATE device_invites SET used = true WHERE id = $1', [invite.id]);
+          return sendJSON(res, 400, { error: 'Jesteś właścicielem tej centralki — zaproszenie nie jest potrzebne.' });
+        }
         const grant = await grantShare(invite.mac_address, accountId, invite.id, myEmail);
         await dbPool.query('UPDATE device_invites SET used = true WHERE id = $1', [invite.id]);
 
@@ -3659,6 +3678,10 @@ async function runSchemaMigrations() {
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS device_key_hash VARCHAR(64) DEFAULT NULL`,
     // Wersja tokenów konta — podbijana przy zmianie/resecie hasła, unieważnia stare JWT.
     `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_version INT DEFAULT 0`,
+    // Właściciel nigdy nie jest własnym współadministratorem (15.09.2026): sprzątamy
+    // udziały powstałe przez zaproszenie własnego adresu, bo liczyły się do limitu adminów.
+    `DELETE FROM device_shares ds USING devices d
+       WHERE d.mac_address = ds.mac_address AND d.account_id = ds.account_id`,
     // Udziały serwisowe (README §7.15): poza limitem adminów, wygasają same.
     `ALTER TABLE device_shares ADD COLUMN IF NOT EXISTS is_service BOOLEAN DEFAULT false`,
     `ALTER TABLE device_shares ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT NULL`,

@@ -131,6 +131,13 @@ export default function App() {
   const [authToken, setAuthToken]  = useState(null);    // signed JWT from server
   const [isConfigured, setIsConfigured] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  // Po zalogowaniu pole e-mail ma pokazywać konto SESJI, a nie to, co ostatnio wpisano
+  // w formularzu — ekran dodawania centralki brał stąd właściciela i potrafił zgłosić
+  // centralkę na cudze (błędnie wpisane) konto. (15.09.2026)
+  useEffect(() => {
+    if (!authToken) return;
+    AsyncStorage.getItem('@lock_account_email').then((e) => { if (e) setEmail(e); }).catch(() => {});
+  }, [authToken]);
   const [isRegisterMode, setIsRegisterMode] = useState(false);
   const [isForgotPasswordMode, setIsForgotPasswordMode] = useState(false);
 
@@ -1818,12 +1825,13 @@ export default function App() {
                     // STRAŻNIK: bez e-maila właściciela centralka nigdy się nie zarejestruje
                     // (serwer rejestruje TYLKO poll z niepustym &email=). Wcześniej pusty stan
                     // `email` (po przeładowaniu bundla) cicho psuł całą inicjalizację.
-                    const ownerEmail = (email || (await AsyncStorage.getItem('@lock_account_email')) || '').trim().toLowerCase();
+                    // Właściciel = e-mail ZALOGOWANEGO konta (zapisany przy logowaniu); pole tekstowe tylko awaryjnie.
+                    const ownerEmail = ((await AsyncStorage.getItem('@lock_account_email')) || email || '').trim().toLowerCase();
                     if (!ownerEmail) {
                       Alert.alert('Brak e-maila konta', 'Nie znam adresu e-mail Twojego konta. Zaloguj się ponownie i spróbuj dodać centralkę jeszcze raz.');
                       return;
                     }
-                    if (!email) setEmail(ownerEmail);
+                    if (email !== ownerEmail) setEmail(ownerEmail);
                     setIsAuthenticating(true);
                     setErrorMessage('');
                     try {
