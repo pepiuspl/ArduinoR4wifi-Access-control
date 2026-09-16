@@ -11,6 +11,7 @@
 #include <EEPROM.h>
 #include <Update.h>
 #include <Preferences.h>       // NVS — klucz urządzenia i hasło sieci konfiguracyjnej
+#include "esp_task_wdt.h"       // watchdog zadania loop() — restart zamiast wiecznego zawieszenia (README §5.13)
 #include "esp_core_dump.h"      // zrzut po panice/WDT z partycji coredump -> podsumowanie w logu bootu (README §5.13)
 #include <esp_random.h>
 #include "mbedtls/sha256.h"    // weryfikacja podpisu aktualizacji OTA
@@ -225,7 +226,7 @@ const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
 volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
-const char* app_version = "v3.2.4";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
+const char* app_version = "v3.2.5";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
 
 struct User { 
   byte uid[4]; 
@@ -1768,6 +1769,7 @@ void performLocalFirmwareUpdate() {
           addLog("[OTA PULL ERR] Timeout transmisji.");
           break;
         }
+        esp_task_wdt_reset();   // pobieranie może trwać dłużej niż 60 s na słabym łączu
         delay(1);
       } 
       
@@ -2183,6 +2185,15 @@ void setup() {
   // Start taska SIECIOWEGO na rdzeniu 0. Cały sprzęt (RFID/przekaźnik/dźwięk/OLED)
   // zostaje na rdzeniu 1 (loop). Stos 12 KB — TLS/mbedTLS + String są pamięciożerne.
   xTaskCreatePinnedToCore(networkTask, "netTask", 12288, NULL, 1, &networkTaskHandle, 0);
+
+  // WATCHDOG PĘTLI GŁÓWNEJ (v3.2.5). Watchdog kontaktu z serwerem (v3.2.4) siedzi w loop(), więc
+  // nie pomoże, gdy zawiesi się sama pętla (np. magistrala I2C/SPI po poluzowanym przewodzie —
+  // 16.09.2026 centralka stała 17 h, aż ruch kabli ją wybudził). Po 60 s bez esp_task_wdt_reset()
+  // następuje restart z powodem 6/TASK_WDT, z okruszkami w linii bootu. Bezpiecznik ostatniej
+  // szansy — normalny obieg pętli trwa milisekundy, OTA i rescue Wi-Fi resetują go ręcznie.
+  esp_task_wdt_config_t twdt = { .timeout_ms = 60000, .idle_core_mask = (1 << 0), .trigger_panic = true };
+  if (esp_task_wdt_reconfigure(&twdt) != ESP_OK) esp_task_wdt_init(&twdt);
+  esp_task_wdt_add(NULL);
 }
 
 // Task SIECIOWY — rdzeń 0. Poll (blokujący TLS) + logi zdarzeń, NIE dotyka sprzętu.
@@ -2288,6 +2299,7 @@ void networkTask(void *param) {
 }
 
 void loop() {
+  esp_task_wdt_reset();
   CRUMB(20);
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
   // Lokalny serwer HTTP obsługujemy wyłącznie w trybie AP (patrz koniec loop()).
@@ -2519,7 +2531,8 @@ void loop() {
           globalDisplayInfo = "";
           playSound(SND_LEARN_EXIT);
         }
-        while (digitalRead(BUTTON_PIN) == LOW); break;
+        while (digitalRead(BUTTON_PIN) == LOW) { delay(10); esp_task_wdt_reset(); }   // przytrzymany/zwarty przycisk nie ma restartować centralki
+        break;
       }
       delay(10);
     }
