@@ -526,7 +526,7 @@ Every boot sends the `[FS] LittleFS …` line; since v3.2.1 it ends with ` reset
 
 Decoding: the release now also carries `lock_<version>.elf`. Run `bash tools/decode_backtrace.sh lock_v3.2.1.elf 0x400d1234,0x400d5678` (uses `xtensa-esp32-elf-addr2line` from the installed Arduino ESP32 toolchain) to get file:line for every frame. The `.elf` matches only the exact build — decode a v3.2.1 trace with the v3.2.1 `.elf`.
 
-Server side (Sep 15 2026): every boot line is counted per device — an unexpected reason (PANIC / watchdog / BROWNOUT) becomes a `security` event in the app's log, and 3 or more boots within an hour push "Centralka restartuje się" to the owner (`recordDeviceBoot`, at most one alert per hour, RAM-only counter).
+Server side (Sep 15 2026): every boot line is inspected per device — an unexpected reason (PANIC / watchdog / BROWNOUT) becomes a `security` event in the app's log, and 3 or more *unexpected* boots within an hour (SW/POWERON resets from OTA, the app or a power cycle do not count) push "Centralka restartuje się" to the owner (`recordDeviceBoot`, at most one alert per hour, RAM-only counter).
 
 Also since v3.2.1: `WiFi.setSleep(false)` (modem-sleep off — a frequent cause of dropped associations with some routers; irrelevant on mains power).
 

@@ -2726,6 +2726,7 @@ const server = http.createServer(async (req, res) => {
         latestFirmwareVersion = release.tag_name;
         latestFirmwareReleaseId = release.id;
         for (const m of targetMacs) otaPendingDevices[m] = Date.now();
+        for (const m of targetMacs) actualLockStates[m] = { ...(actualLockStates[m] || {}), otaProgress: 0, otaFailed: false, otaSentRelease: 0 };
         forceLog(`OTA uzbrojona: ${safeName} (release ${release.id}) dla ${targetMacs.length} centralek.`);
         return sendJSON(res, 200, { success: true, devices: targetMacs.length });
       } catch (e) {
@@ -2790,7 +2791,7 @@ const server = http.createServer(async (req, res) => {
         readStream.pipe(res);
         readStream.on('end', () => {
           delete otaPendingDevices[mac];
-          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 99, timestamp: Date.now() };
+          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 99, otaSentRelease: latestFirmwareReleaseId, timestamp: Date.now() };
           forceLog(`Strumieniowanie ${latestFirmwareFile} do zamka [${mac}] zakończone.`);
         });
         readStream.on('error', (err) => {
@@ -3019,11 +3020,14 @@ const server = http.createServer(async (req, res) => {
 
         if ((actualLockStates[mac]?.otaProgress || 0) === 99) {
           actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 100, otaDoneAt: Date.now(), otaFailed: false };
-        } else if ((actualLockStates[mac]?.otaProgress || 0) === 100 && latestFirmwareReleaseId > 0 && deviceReleaseId < latestFirmwareReleaseId
+        } else if ((actualLockStates[mac]?.otaProgress || 0) === 100 && (actualLockStates[mac].otaSentRelease || 0) > 0
+                   && deviceReleaseId < actualLockStates[mac].otaSentRelease
                    && Date.now() - (actualLockStates[mac].otaDoneAt || 0) > 20000) {
-          // Plik poszedł w całości, a centralka po ≥ 20 s nadal zgłasza stare wydanie —
-          // wstała ze starym firmware (crash w trakcie zapisu / odrzucony podpis).
-          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, otaFailed: true };
+          // Plik WYSŁANEGO wydania poszedł w całości, a centralka po ≥ 20 s nadal zgłasza starsze —
+          // wstała ze starym firmware (crash w trakcie zapisu / odrzucony podpis). Porównujemy z wydaniem,
+          // które faktycznie poszło, nie z „najnowszym": 16.09 nowe wydanie na GitHubie dawało
+          // fałszywe „OTA FAILED" dla centralki, która poprzednie OTA przeszła poprawnie.
+          actualLockStates[mac] = { ...(actualLockStates[mac] || {}), otaProgress: 0, otaFailed: true, otaSentRelease: 0 };
           forceLog(`[OTA FAILED] Centralka [${mac}] po pobraniu całości zgłasza nadal wydanie ${deviceReleaseId} (${currentHardwareVersion}) — aktualizacja nie została zastosowana.`);
           dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
             [mac, `Aktualizacja firmware nie powiodła się — centralka nadal ma wersję ${currentHardwareVersion}.`, 'security']).catch(() => {});
@@ -4242,11 +4246,14 @@ function recordDeviceBoot(mac, msg) {
     const now = Date.now();
     const st = deviceBoots.get(mac) || { times: [], lastAlert: 0 };
     st.times = st.times.filter((t) => now - t < BOOT_ALERT_WINDOW_MS);
-    st.times.push(now);
-    deviceBoots.set(mac, st);
     const m = /reset=(\d+)\/(\w+)/.exec(msg);
     const code = m ? parseInt(m[1], 10) : null;
     const why = code !== null && UNEXPECTED_RESET[code] ? UNEXPECTED_RESET[code] : null;
+    // Do alertu „centralka restartuje się" liczą się tylko NIEOCZEKIWANE resety. Restart po OTA,
+    // z aplikacji czy po włączeniu zasilania (SW/POWERON) to nie awaria — 16.09 trzy aktualizacje
+    // w godzinę dały fałszywy push do właściciela.
+    if (why) st.times.push(now);
+    deviceBoots.set(mac, st);
     if (why) {
       const crash = /CRASH task=(\S+)/.exec(msg);
       dbPool.query('INSERT INTO system_events (mac_address, message, category) VALUES ($1, $2, $3)',
