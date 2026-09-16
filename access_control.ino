@@ -18,6 +18,35 @@
 #include "mbedtls/base64.h"
 #include <time.h>
 
+// --- Okruszki diagnostyczne (README §5.13, v3.2.3) ---------------------------------
+// Pamięć RTC przeżywa restart z watchdoga/paniki (nie POWERON). Każdy rdzeń zapisuje
+// tu fazę, w której właśnie jest (CRUMB), a operacje na flashu ustawiają znacznik
+// (FLASH_OP_BEGIN/END). Po niespodziewanym restarcie setup() robi zrzut i linia bootu
+// dostaje: crumbs c0=<faza>@<ms przed śmiercią> c1=<faza>@<ms> flash=<op> up=<s>.
+// Fazy rdzenia 0 (netTask): 1 pętla, 2 poll-connect, 3 poll-send, 4 poll-read, 5 poll-parse,
+//   6 upload karty, 7 raport diagnostyczny, 8 log przycisku, 9 sendRemoteLog.
+// Fazy rdzenia 1 (loop): 20 start pętli, 21 komendy, 22 tamper, 23 klawiatura, 24 OLED,
+//   25 reset RFID, 26 rescue Wi-Fi, 27 skan RFID, 28 przycisk, 29 openDoor, 30 OTA.
+// Flash: 1 EEPROM.commit, 2 zapis /cards.db, 3 NVS (Preferences), 4 OTA write, 5 selftest, 6 coredump erase.
+struct RtcCrumbs { uint32_t magic; uint8_t ph[2]; uint8_t flash; uint32_t at[2]; uint32_t upMs; };
+RTC_NOINIT_ATTR RtcCrumbs rtcCrumbs;
+static const uint32_t CRUMB_MAGIC = 0xC4A5B007UL;
+String bootCrumbs = "";   // zrzut z poprzedniego życia, doklejany do linii bootu
+#define CRUMB(p) do { int _c = xPortGetCoreID(); rtcCrumbs.ph[_c] = (p); rtcCrumbs.at[_c] = millis(); rtcCrumbs.upMs = millis(); } while (0)
+#define FLASH_OP_BEGIN(k) do { rtcCrumbs.flash = (k); rtcCrumbs.upMs = millis(); } while (0)
+#define FLASH_OP_END()    do { rtcCrumbs.flash = 0; } while (0)
+static void eepromCommitTracked() { FLASH_OP_BEGIN(1); EEPROM.commit(); FLASH_OP_END(); }
+void snapshotCrumbs() {
+  int rr = (int)esp_reset_reason();
+  if (rtcCrumbs.magic == CRUMB_MAGIC && rr != ESP_RST_POWERON && rr != ESP_RST_SW && rr != ESP_RST_UNKNOWN) {
+    bootCrumbs = " crumbs c0=" + String(rtcCrumbs.ph[0]) + "@" + String((long)(rtcCrumbs.upMs - rtcCrumbs.at[0])) +
+                 "ms c1=" + String(rtcCrumbs.ph[1]) + "@" + String((long)(rtcCrumbs.upMs - rtcCrumbs.at[1])) +
+                 "ms flash=" + String(rtcCrumbs.flash) + " up=" + String(rtcCrumbs.upMs / 1000) + "s";
+  }
+  rtcCrumbs.magic = CRUMB_MAGIC; rtcCrumbs.ph[0] = rtcCrumbs.ph[1] = 0; rtcCrumbs.at[0] = rtcCrumbs.at[1] = 0;
+  rtcCrumbs.flash = 0; rtcCrumbs.upMs = 0;
+}
+
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
 #define PROXMOX_SERVER "node.ctrlable.pl"
 #define PROXMOX_PORT   443   // TLS przez NPM (Let's Encrypt). Ruch do chmury szyfrowany.
@@ -116,13 +145,13 @@ void loadOrCreateDeviceSecrets() {
     for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", raw[i]);
     hex[64] = 0;
     deviceKeyHex = String(hex);
-    prefs.putString("dkey", deviceKeyHex);
+    FLASH_OP_BEGIN(3); prefs.putString("dkey", deviceKeyHex); FLASH_OP_END();
     Serial.println("[SEC] Wygenerowano nowy klucz urzadzenia.");
   }
   apPassword = prefs.getString("appw", "");
   if (apPassword.length() < 8) {
     apPassword = randomToken(12);
-    prefs.putString("appw", apPassword);
+    FLASH_OP_BEGIN(3); prefs.putString("appw", apPassword); FLASH_OP_END();
   }
   prefs.end();
   // Tylko port szeregowy (fizyczny dostęp do płytki) — dla instalatora.
@@ -143,7 +172,7 @@ void saveLocalAdminPass(const String& p) {
   memset(localAdminPass, 0, sizeof(localAdminPass));
   p.toCharArray(localAdminPass, sizeof(localAdminPass));
   EEPROM.put(LOCAL_PASS_ADDR, localAdminPass);
-  EEPROM.commit();
+  eepromCommitTracked();
 }
 
 // Porównanie w stałym czasie — nie zdradza długości zgodnego prefiksu.
@@ -193,7 +222,7 @@ const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
 volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
-const char* app_version = "v3.2.2";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
+const char* app_version = "v3.2.3";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
 
 struct User { 
   byte uid[4]; 
@@ -521,7 +550,7 @@ void saveConfiguration(String newSSID, String newPass, String newEmail) {
   EEPROM.put(292, pass); 
   EEPROM.put(324, owner_email); 
   EEPROM.write(250, 0x55);  
-  EEPROM.commit(); 
+  eepromCommitTracked(); 
 } 
 
 void factoryResetSettings() {
@@ -534,7 +563,7 @@ void factoryResetSettings() {
   // (latest > installed) i uznaje, że urządzenie ma NOWSZY soft niż jakikolwiek
   // release → aplikacja pokazuje „masz najnowszy" i OTA nigdy się nie proponuje.
   EEPROM.put(480, (unsigned long)0);
-  EEPROM.commit();
+  eepromCommitTracked();
   // Wyczyść też magazyn LittleFS — inaczej po deregistracji karty/PIN-y wróciłyby
   // z /cards.db przy ponownej rejestracji. WiFi/owner zostają w EEPROM (już wyżej).
   if (fsMounted) {
@@ -586,7 +615,7 @@ void eepromPersistCards() {
     EEPROM.write(220 + i, isCardActive[i] ? 0x01 : 0x00);
   }
   EEPROM.put(0, n);
-  EEPROM.commit();
+  eepromCommitTracked();
 }
 
 // Odczyt kart ze starego EEPROM do RAM (stare zachowanie, cap 10).
@@ -609,8 +638,9 @@ void eepromLoadCards() {
 // dla ≤200 rekordów; LittleFS robi wear-leveling, a operacje na kartach są rzadkie).
 void fsPersistCards() {
   if (!fsMounted) return;
+  FLASH_OP_BEGIN(2);
   File f = LittleFS.open(CARDS_DB_PATH, "w");
-  if (!f) { Serial.println("[FS] BLAD: nie moge zapisac /cards.db"); return; }
+  if (!f) { FLASH_OP_END(); Serial.println("[FS] BLAD: nie moge zapisac /cards.db"); return; }
   for (int i = 0; i < totalCards; i++) {
     FsCard c; memset(&c, 0, sizeof(c));
     c.uidLen = 4;                                   // etap 1b: UID 4-bajtowe (jak dziś)
@@ -624,6 +654,7 @@ void fsPersistCards() {
     f.write((const uint8_t*)&c, sizeof(c));
   }
   f.close();
+  FLASH_OP_END();
 }
 
 // Wczytanie /cards.db do RAM. Zwraca false, gdy pliku nie ma (→ migracja).
@@ -723,7 +754,7 @@ bool applyLicenseToken(const String& token) {
   int c, pn, t;
   if (!parseLicenseToken(token, c, pn, t)) return false;
   Preferences prefs; prefs.begin("ctrlsec", false);
-  prefs.putString("oflic", token);
+  FLASH_OP_BEGIN(3); prefs.putString("oflic", token); FLASH_OP_END();
   prefs.end();
   licToken = token; licCards = c; licPins = pn; licTier = t;
   addLog("Licencja offline: " + String(c) + " kart");
@@ -852,13 +883,15 @@ void deleteUser(int index) {
 void storageSelfTest() {
   const char* path = "/selftest.bin";
   uint32_t magic = 0xCAFE1234, back = 0;
+  FLASH_OP_BEGIN(5);
   File f = LittleFS.open(path, "w");
-  if (!f) { Serial.println("[FS] BLAD: nie moge otworzyc do zapisu"); return; }
+  if (!f) { FLASH_OP_END(); Serial.println("[FS] BLAD: nie moge otworzyc do zapisu"); return; }
   f.write((const uint8_t*)&magic, sizeof(magic));
   f.close();
   File r = LittleFS.open(path, "r");
   if (r) { r.read((uint8_t*)&back, sizeof(back)); r.close(); }
   LittleFS.remove(path);
+  FLASH_OP_END();
   fsTotalBytes = LittleFS.totalBytes();
   fsUsedBytes  = LittleFS.usedBytes();
   fsSelfTestPass = (back == magic);
@@ -1193,6 +1226,7 @@ void relayDeactivate() {
 }
 
 void openDoor(String source) { 
+  CRUMB(29);
   doorOpen = true;  
   globalAnimFrame = 0;  
   accessEndTime = millis() + autoLockDelayMs;
@@ -1498,6 +1532,7 @@ void executeCloudSynchronization() {
   // na koncie (rejestracja dzieje się WYŁĄCZNIE przez poll). sendRemoteLog działał, bo
   // korzystał z hojnych wartości z configureSecure (handshake 6 s, I/O 6000 ms).
   httpCheck.setConnectionTimeout(4000);   // ms na TCP connect
+  CRUMB(2);
   if (!httpCheck.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
     Serial.println("[NET] Serwer Proxmox nie odpowiada. Ponowna proba...");
     if (pollFailStreak < 100) pollFailStreak++;
@@ -1514,6 +1549,7 @@ void executeCloudSynchronization() {
   unsigned long ackNow = cmdAckId;
   String pollPath = "/api/hardware/poll?version=" + urlEncode(String(app_version)) + "&mac=" + urlEncode(macStr) + "&opened=" + String(doorOpen ? "1" : "0") + "&email=" + urlEncode(String(owner_email)) + "&release_id=" + String(installedReleaseId) + "&ip=" + WiFi.localIP().toString() + "&ack=" + String(ackNow);
   httpCheck.println("GET " + pollPath + " HTTP/1.1");
+  CRUMB(3);
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);
   printDeviceAuthHeader(httpCheck);
   httpCheck.println("Connection: close\r\n");  
@@ -1527,6 +1563,7 @@ void executeCloudSynchronization() {
   bool headersDone = false;
   int braceDepth = 0;
   bool bodyStarted = false;
+  CRUMB(4);
   while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {
     if (!httpCheck.available()) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
     char c = httpCheck.read();
@@ -1542,6 +1579,7 @@ void executeCloudSynchronization() {
     }
   }
   httpCheck.stop();
+  CRUMB(5);
 
   if (payloadResponse.startsWith("HTTP/1.1 401")) {
     // Serwer nie uznał klucza urządzenia (np. inna płytka pod tym MAC-iem albo klucz
@@ -1683,6 +1721,7 @@ void performLocalFirmwareUpdate() {
       return;
     }
     
+    FLASH_OP_BEGIN(4);
     if (Update.begin(contentLength, U_FLASH)) {
       addLog("[OTA PULL] Start szybkiej transmisji blokowej...");
       // SHA-256 liczony w locie z tych samych bajtów, które idą do flasha.
@@ -1729,6 +1768,7 @@ void performLocalFirmwareUpdate() {
       } 
       
       otaClient.stop();
+      FLASH_OP_END();
       uint8_t fwHash[32];
       mbedtls_sha256_finish(&shaCtx, fwHash);
       mbedtls_sha256_free(&shaCtx);
@@ -1748,7 +1788,7 @@ void performLocalFirmwareUpdate() {
           sendRemoteLog("[OTA PULL SUCCESS] Aktualizacja kompletna i zweryfikowana! Restart systemu...");
           delay(2000);
           EEPROM.put(480, latestFirmwareReleaseId);
-          EEPROM.commit();
+          eepromCommitTracked();
           ESP.restart();
         }
       } else {
@@ -1943,6 +1983,7 @@ void checkKeypad() {
 }
 
 void setup() {
+  snapshotCrumbs();   // PIERWSZE: zanim cokolwiek nadpisze okruszki z poprzedniego życia
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);  // natychmiastowy stan LOW (spoczynek/nieenergizowana) -- zablokowane od startu
   pinMode(LED_GREEN, OUTPUT); 
@@ -1964,7 +2005,7 @@ void setup() {
   if (installedReleaseId == 0xFFFFFFFFUL || installedReleaseId > 4000000000UL) {
     installedReleaseId = 0;
     EEPROM.put(480, (unsigned long)0);
-    EEPROM.commit();
+    eepromCommitTracked();
   }
   initStorage();                        // LittleFS (etap 1a) — montowanie + self-test na Serialu
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -2160,7 +2201,7 @@ static const char* resetReasonName(int r) {
 }
 String bootDiagnostics() {
   int rr = (int)esp_reset_reason();
-  String s = " reset=" + String(rr) + "/" + resetReasonName(rr) + " heap_min=" + String(ESP.getMinFreeHeap());
+  String s = " reset=" + String(rr) + "/" + resetReasonName(rr) + " heap_min=" + String(ESP.getMinFreeHeap()) + bootCrumbs;
   if (esp_core_dump_image_check() == ESP_OK) {
     esp_core_dump_summary_t* sum = (esp_core_dump_summary_t*)malloc(sizeof(esp_core_dump_summary_t));
     if (sum && esp_core_dump_get_summary(sum) == ESP_OK) {
@@ -2173,13 +2214,14 @@ String bootDiagnostics() {
       s += " CRASH (zrzut nieczytelny)";
     }
     if (sum) free(sum);
-    esp_core_dump_image_erase();
+    FLASH_OP_BEGIN(6); esp_core_dump_image_erase(); FLASH_OP_END();
   }
   return s;
 }
 
 void networkTask(void *param) {
   for (;;) {
+    CRUMB(1);
     if (WiFi.status() == WL_CONNECTED && !isOfflineStandby && !req_ota && !req_deregister) {
       if (!fsStatusReported) {
         fsStatusReported = true;
@@ -2209,7 +2251,7 @@ void networkTask(void *param) {
 
       // Zgłoszenie skanu karty (zakolejkowane przez loop) — TLS robimy TU, nie w pętli.
       if (req_cardUpload) {
-        transmitCardPayloadToCloud(String(up_uid), String(up_name), up_slot, up_register);
+        CRUMB(6); transmitCardPayloadToCloud(String(up_uid), String(up_name), up_slot, up_register);
         req_cardUpload = false;
         forceSyncNow = true;   // po rejestracji karty odśwież stan od razu
       }
@@ -2217,12 +2259,13 @@ void networkTask(void *param) {
       // Raport diagnostyczny / self-test zbudowany przez loop — wysyłamy tu (TLS).
       if (req_diagReport) {
         __sync_synchronize();
-        sendDiagnosticReport();
+        CRUMB(7); sendDiagnosticReport();
         req_diagReport = false;
       }
 
       // Log przycisku (zakolejkowany przez loop) — nieblokujący dla rdzenia 1.
       if (req_buttonLog) {
+        CRUMB(8);
         req_buttonLog = false;
         WiFiClientSecure btnLog; configureSecure(btnLog);
         btnLog.setConnectionTimeout(3000);
@@ -2241,6 +2284,7 @@ void networkTask(void *param) {
 }
 
 void loop() {
+  CRUMB(20);
   updateBuzzer(); // serwisuje aktualnie odtwarzaną melodię - zero delay(), zero blokowania
   // Lokalny serwer HTTP obsługujemy wyłącznie w trybie AP (patrz koniec loop()).
   // Dawniej działał „też gdy online" i przyjmował /save_setup bez żadnego hasła.
@@ -2252,28 +2296,29 @@ void loop() {
     updateDisplay("ODLACZANIE", "Reset ustawien...");
     factoryResetSettings(); delay(800); ESP.restart();
   }
-  if (req_ota) { req_ota = false; performLocalFirmwareUpdate(); }
+  if (req_ota) { req_ota = false; CRUMB(30); performLocalFirmwareUpdate(); }
   if (req_unlock) {
     req_unlock = false;
     if (tamperActive) { addLog("!! BLOKADA: zdalne otwarcie (alarm sabotazu)!"); sendTamperAlert(true); }
     else if (!doorOpen) openDoor("Otwarte");
   }
-  applyPendingCommands();   // zmiany kart / Wi-Fi odebrane z serwera
-  checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
-  checkKeypad();  // obsługa matrycy klawiatury PIN
+  CRUMB(21); applyPendingCommands();   // zmiany kart / Wi-Fi odebrane z serwera
+  CRUMB(22); checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
+  CRUMB(23); checkKeypad();  // obsługa matrycy klawiatury PIN
 
   if (millis() - lastFrameTick > 150) {   // było 80 ms — rzadszy render OLED = mniej dławienia pętli/skanu RFID
     lastFrameTick = millis();
     globalAnimFrame++;
-    renderSystemUI();
+    CRUMB(24); renderSystemUI();
   }
 
   if (!doorOpen && !learningMode && (millis() - lastRfidWatchdogTime > 120000)) { 
     lastRfidWatchdogTime = millis();
-    forceHardwareRFIDReset(); 
+    CRUMB(25); forceHardwareRFIDReset(); 
   } 
 
   if (isOfflineStandby) {
+    CRUMB(26);
     // Retry WiFi zawsze, gdy jest zapisana realna konfiguracja (nie tylko gdy centralka
     // BYŁA wcześniej online). Naprawia utknięcie w AP po zaniku prądu, gdy router wstaje
     // wolniej niż centralka: przy starcie WiFi nie zdąży (12 s), a bez tego warunku
@@ -2343,6 +2388,7 @@ void loop() {
     } 
   } 
 
+  CRUMB(27);
   if (!rfidResetPending && !doorOpen && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent()) { 
     delay(20);
     if (rfid.PICC_ReadCardSerial()) { 
@@ -2432,6 +2478,7 @@ void loop() {
   }
 
   if (digitalRead(BUTTON_PIN) == LOW) { 
+    CRUMB(28);
     unsigned long pressTime = millis();
     bool longPressed = false; 
     while (digitalRead(BUTTON_PIN) == LOW) {
@@ -2512,6 +2559,7 @@ void loop() {
 }
 
 void sendRemoteLog(String message) {
+  CRUMB(9);
   WiFiClientSecure logClient; configureSecure(logClient);
   logClient.setConnectionTimeout(400);
   if (logClient.connect(PROXMOX_SERVER, PROXMOX_PORT)) {
