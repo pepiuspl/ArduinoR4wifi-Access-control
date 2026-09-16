@@ -3,7 +3,14 @@ name: Compile on release ESP32
 on:
   push:
     branches:
-      - main  # Uruchamia się automatycznie po każdym pushu na branch main
+      - main
+    # Tylko gdy zmienia się firmware albo ten workflow. Wcześniej KAŻDY push (server.js, README,
+    # strona) budował i publikował nowe wydanie z tagiem <wersja>-build.<nr>, a serwer traktował
+    # je jako nowszy firmware (wyższe release.id) i wysyłał OTA identycznego kodu do centralek.
+    # 16.09.2026: push zmian serwera dał v3.2.4-build.103 i pobranie 1,2 MB bez powodu.
+    paths:
+      - 'access_control.ino'
+      - '.github/workflows/compile-ESP32.yml'
   workflow_dispatch:  # ręczne uruchomienie z zakładki Actions (np. po dodaniu sekretu FIRMWARE_SIGNING_KEY)
 
 jobs:

@@ -31,22 +31,45 @@
 // Flash: 1 EEPROM.commit, 2 zapis /cards.db, 3 NVS (Preferences), 4 OTA write, 5 selftest, 6 coredump erase.
 struct RtcCrumbs { uint32_t magic; uint8_t ph[2]; uint8_t flash; uint32_t at[2]; uint32_t upMs; uint8_t swReason; uint8_t netStalls; };
 RTC_NOINIT_ATTR RtcCrumbs rtcCrumbs;
+// Raport z ostatniego crashu czeka tu, aż linia bootu zostanie WYSŁANA (v3.2.6). Start, który
+// sam padnie zanim cokolwiek zapisze, nie kasuje raportu — tylko podbija licznik early.
+RTC_NOINIT_ATTR RtcCrumbs rtcReport;
+RTC_NOINIT_ATTR uint8_t  rtcReportPending;
+RTC_NOINIT_ATTR uint8_t  rtcReportReason;    // powód resetu, który zakończył raportowane życie
+RTC_NOINIT_ATTR uint8_t  rtcEarlyCrashes;    // ile startów padło przed pierwszym znacznikiem
 static const uint32_t CRUMB_MAGIC = 0xC4A5B007UL;
 String bootCrumbs = "";   // zrzut z poprzedniego życia, doklejany do linii bootu
+static const char* resetReasonName(int r);
 #define CRUMB(p) do { int _c = xPortGetCoreID(); rtcCrumbs.ph[_c] = (p); rtcCrumbs.at[_c] = millis(); rtcCrumbs.upMs = millis(); } while (0)
 #define FLASH_OP_BEGIN(k) do { rtcCrumbs.flash = (k); rtcCrumbs.upMs = millis(); } while (0)
 #define FLASH_OP_END()    do { rtcCrumbs.flash = 0; } while (0)
 static void eepromCommitTracked() { FLASH_OP_BEGIN(1); EEPROM.commit(); FLASH_OP_END(); }
+static String crumbsToString(const RtcCrumbs& c) {
+  String o = " crumbs c0=" + String(c.ph[0]) + "@" + String((long)(c.upMs - c.at[0])) +
+             "ms c1=" + String(c.ph[1]) + "@" + String((long)(c.upMs - c.at[1])) +
+             "ms flash=" + String(c.flash) + " up=" + String(c.upMs / 1000) + "s";
+  if (c.swReason == 1) o += " sw=NET_STALL(" + String(c.netStalls) + ")";
+  return o;
+}
 void snapshotCrumbs() {
   int rr = (int)esp_reset_reason();
+  bool valid = (rtcCrumbs.magic == CRUMB_MAGIC);
   bool unexpected = (rr != ESP_RST_POWERON && rr != ESP_RST_SW && rr != ESP_RST_UNKNOWN);
-  if (rtcCrumbs.magic == CRUMB_MAGIC && (unexpected || rtcCrumbs.swReason)) {
-    bootCrumbs = " crumbs c0=" + String(rtcCrumbs.ph[0]) + "@" + String((long)(rtcCrumbs.upMs - rtcCrumbs.at[0])) +
-                 "ms c1=" + String(rtcCrumbs.ph[1]) + "@" + String((long)(rtcCrumbs.upMs - rtcCrumbs.at[1])) +
-                 "ms flash=" + String(rtcCrumbs.flash) + " up=" + String(rtcCrumbs.upMs / 1000) + "s";
-    if (rtcCrumbs.swReason == 1) bootCrumbs += " sw=NET_STALL(" + String(rtcCrumbs.netStalls) + ")";
+  if (!valid || rr == ESP_RST_POWERON) { rtcReportPending = 0; rtcEarlyCrashes = 0; rtcReportReason = 0; }
+  if (valid && (unexpected || rtcCrumbs.swReason)) {
+    if (rtcCrumbs.upMs > 0) {
+      // Życie, które coś zapisało — to jest właściwy raport. Nadpisuje ewentualny starszy.
+      rtcReport = rtcCrumbs; rtcReportPending = 1; rtcReportReason = (uint8_t)rr; rtcEarlyCrashes = 0;
+    } else if (unexpected) {
+      // Start padł zanim cokolwiek zapisał (pierwsze ~1,5 s: init sterowników, radio) — raport zostaje.
+      if (rtcEarlyCrashes < 250) rtcEarlyCrashes++;
+    }
   }
-  uint8_t stalls = (rtcCrumbs.magic == CRUMB_MAGIC && rr != ESP_RST_POWERON) ? rtcCrumbs.netStalls : 0;
+  if (rtcReportPending) {
+    bootCrumbs = crumbsToString(rtcReport) + " crash_reset=" + String(rtcReportReason) + "/" + resetReasonName(rtcReportReason);
+  }
+  if (rtcEarlyCrashes) bootCrumbs += " early_crashes=" + String(rtcEarlyCrashes);
+  uint8_t stalls = (valid && rr != ESP_RST_POWERON) ? rtcCrumbs.netStalls : 0;
   rtcCrumbs.magic = CRUMB_MAGIC; rtcCrumbs.ph[0] = rtcCrumbs.ph[1] = 0; rtcCrumbs.at[0] = rtcCrumbs.at[1] = 0;
   rtcCrumbs.flash = 0; rtcCrumbs.upMs = 0; rtcCrumbs.swReason = 0; rtcCrumbs.netStalls = stalls;
 }
@@ -226,7 +249,7 @@ const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
 volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
-const char* app_version = "v3.2.5";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
+const char* app_version = "v3.2.6";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
 
 struct User { 
   byte uid[4]; 
@@ -2240,6 +2263,7 @@ void networkTask(void *param) {
     if (WiFi.status() == WL_CONNECTED && !isOfflineStandby && !req_ota && !req_deregister) {
       if (!fsStatusReported) {
         fsStatusReported = true;
+        rtcReportPending = 0; rtcEarlyCrashes = 0;   // raport z crashu poszedł — można go zwolnić (v3.2.6)
         sendRemoteLog("[FS] LittleFS " + String(fsMounted ? "OK" : "BLAD MONTAZU") +
                       " total=" + String(fsTotalBytes) + "B used=" + String(fsUsedBytes) +
                       "B FsCard=" + String(sizeof(FsCard)) + "B FsPin=" + String(sizeof(FsPin)) +
