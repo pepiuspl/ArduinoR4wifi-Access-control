@@ -28,7 +28,7 @@
 // Fazy rdzenia 1 (loop): 20 start pętli, 21 komendy, 22 tamper, 23 klawiatura, 24 OLED,
 //   25 reset RFID, 26 rescue Wi-Fi, 27 skan RFID, 28 przycisk, 29 openDoor, 30 OTA.
 // Flash: 1 EEPROM.commit, 2 zapis /cards.db, 3 NVS (Preferences), 4 OTA write, 5 selftest, 6 coredump erase.
-struct RtcCrumbs { uint32_t magic; uint8_t ph[2]; uint8_t flash; uint32_t at[2]; uint32_t upMs; };
+struct RtcCrumbs { uint32_t magic; uint8_t ph[2]; uint8_t flash; uint32_t at[2]; uint32_t upMs; uint8_t swReason; uint8_t netStalls; };
 RTC_NOINIT_ATTR RtcCrumbs rtcCrumbs;
 static const uint32_t CRUMB_MAGIC = 0xC4A5B007UL;
 String bootCrumbs = "";   // zrzut z poprzedniego życia, doklejany do linii bootu
@@ -38,13 +38,16 @@ String bootCrumbs = "";   // zrzut z poprzedniego życia, doklejany do linii boo
 static void eepromCommitTracked() { FLASH_OP_BEGIN(1); EEPROM.commit(); FLASH_OP_END(); }
 void snapshotCrumbs() {
   int rr = (int)esp_reset_reason();
-  if (rtcCrumbs.magic == CRUMB_MAGIC && rr != ESP_RST_POWERON && rr != ESP_RST_SW && rr != ESP_RST_UNKNOWN) {
+  bool unexpected = (rr != ESP_RST_POWERON && rr != ESP_RST_SW && rr != ESP_RST_UNKNOWN);
+  if (rtcCrumbs.magic == CRUMB_MAGIC && (unexpected || rtcCrumbs.swReason)) {
     bootCrumbs = " crumbs c0=" + String(rtcCrumbs.ph[0]) + "@" + String((long)(rtcCrumbs.upMs - rtcCrumbs.at[0])) +
                  "ms c1=" + String(rtcCrumbs.ph[1]) + "@" + String((long)(rtcCrumbs.upMs - rtcCrumbs.at[1])) +
                  "ms flash=" + String(rtcCrumbs.flash) + " up=" + String(rtcCrumbs.upMs / 1000) + "s";
+    if (rtcCrumbs.swReason == 1) bootCrumbs += " sw=NET_STALL(" + String(rtcCrumbs.netStalls) + ")";
   }
+  uint8_t stalls = (rtcCrumbs.magic == CRUMB_MAGIC && rr != ESP_RST_POWERON) ? rtcCrumbs.netStalls : 0;
   rtcCrumbs.magic = CRUMB_MAGIC; rtcCrumbs.ph[0] = rtcCrumbs.ph[1] = 0; rtcCrumbs.at[0] = rtcCrumbs.at[1] = 0;
-  rtcCrumbs.flash = 0; rtcCrumbs.upMs = 0;
+  rtcCrumbs.flash = 0; rtcCrumbs.upMs = 0; rtcCrumbs.swReason = 0; rtcCrumbs.netStalls = stalls;
 }
 
 // STRUKTURA SERWERA ZABLOKOWANA NA TWARDO
@@ -222,7 +225,7 @@ const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
 volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
-const char* app_version = "v3.2.3";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
+const char* app_version = "v3.2.4";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
 
 struct User { 
   byte uid[4]; 
@@ -1539,6 +1542,7 @@ void executeCloudSynchronization() {
     return;
   }
   pollFailStreak = 0;
+  rtcCrumbs.netStalls = 0;   // kontakt jest — watchdog sieci startuje od zera
 
   lastSuccessfulPollTime = millis();
   String macStr = getMacAddressString();
@@ -2305,6 +2309,25 @@ void loop() {
   CRUMB(21); applyPendingCommands();   // zmiany kart / Wi-Fi odebrane z serwera
   CRUMB(22); checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
   CRUMB(23); checkKeypad();  // obsługa matrycy klawiatury PIN
+
+  // WATCHDOG KONTAKTU Z SERWEREM (v3.2.4). Wi-Fi bywa skojarzone ("online" na OLED), a odpytania
+  // nie wychodzą — 15.09.2026 centralka milczała 17 h bez restartu. Sprawdzamy z rdzenia 1, więc
+  // zadziała także przy zawieszonym zadaniu sieciowym. Restart po 10 min ciszy; jeśli to nie
+  // pomaga (kolejne restarty bez ani jednego udanego odpytania), odstęp rośnie do 60 min, żeby
+  // przy długiej awarii internetu nie restartować drzwi co 10 minut. Karty i PIN-y z pamięci
+  // działają w trakcie restartu z przerwą kilku sekund. Nie w AP, nie w trakcie OTA/uczenia.
+  if (!isOfflineStandby && !provisioningMode && !learningMode && !doorOpen && lastSuccessfulPollTime > 0
+      && WiFi.status() == WL_CONNECTED) {
+    unsigned long limit = (rtcCrumbs.netStalls >= 3) ? 60UL * 60UL * 1000UL : 10UL * 60UL * 1000UL;
+    if (millis() - lastSuccessfulPollTime > limit) {
+      addLog("Watchdog: brak kontaktu z serwerem " + String(limit / 60000UL) + " min - restart");
+      updateDisplay("RESTART", "Brak kontaktu z serwerem");
+      rtcCrumbs.swReason = 1;
+      if (rtcCrumbs.netStalls < 250) rtcCrumbs.netStalls++;
+      delay(1500);
+      ESP.restart();
+    }
+  }
 
   if (millis() - lastFrameTick > 150) {   // było 80 ms — rzadszy render OLED = mniej dławienia pętli/skanu RFID
     lastFrameTick = millis();
