@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="320" viewBox="0 0 1120 320">
   <title>Ctrlable</title>
-  <rect width="1120" height="320" fill="#0A131F"/>
+  
   <g transform="translate(132.346 39.346) scale(2.01369)">
     <path d="M88.3 93.7 A44 44 0 1 1 88.3 26.3" stroke="#F2F6FA" stroke-width="9.5" fill="none" stroke-linecap="round"/>
     <path d="M78.6 82.2 A29 29 0 1 1 78.6 37.8" stroke="#F2F6FA" stroke-width="9.5" fill="none" stroke-linecap="round"/>

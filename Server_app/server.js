@@ -3166,7 +3166,7 @@ const server = http.createServer(async (req, res) => {
                 sendPushNotification(
                   accountData.push_token,
                   "Ktoś wszedł do domu",
-                  `Użytkownik ${credentialRes.rows[0].holder_name} właśnie otworzył drzwi.`
+                  `Użytkownik ${credentialRes.rows[0].holder_name} właśnie otworzył(a) drzwi.`
                 );
               }
             }
