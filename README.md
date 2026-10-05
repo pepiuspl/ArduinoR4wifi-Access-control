@@ -1,6 +1,6 @@
 # CTRLABLE Node — Full System Documentation
 
-**Last updated:** September 14, 2026 — documentation audit (limits enforcement §3.7, env §3.2, endpoints §3.6, custom PCB rev 0.2 §5.1b, offline licence dormant §5.12); security hardening of 2026-09-11 (§7)
+**Last updated:** September 29, 2026 — **v3.3.0**: offline PIN verification (§5.4b) and card/PIN ceilings raised to **500 each**. Earlier, v3.2.7: rev 0.3 is now the default build (§5.1), partition table reworked (§5.4, core dumps finally have somewhere to go — §5.13), four code defects fixed (§9). Earlier: September 14, 2026 documentation audit (limits enforcement §3.7, env §3.2, endpoints §3.6, custom PCB rev 0.2 §5.1b, offline licence dormant §5.12); security hardening of 2026-09-11 (§7)
 
 ---
 
@@ -355,6 +355,55 @@ The production board (KiCad 9 project one folder above the repo, ordered from JL
 
 CI (`compile-ESP32.yml`) builds the dev-kit variant until the fleet moves to the PCB; build the PCB variant locally with `--build-property "build.extra_flags=-DBOARD_PCB_REV02=1"` (arduino-cli) or by flipping the default. Everything else on the PCB works with the unchanged firmware: exit button on J8 pin 1 (NO → R18 pull-up → IO33, COM = GND), relay via Q1 on IO13 (HIGH = energised), buzzer via Q2 on IO27, tamper on IO32, factory reset SW3 on IO39. Reserved for later firmware work: `BTN_NC` (IO36, NC contact of the exit button, R31 pull-up) and `BTN_LED` (IO12, open-collector LED drive). Board-level details, BOM and JLCPCB ordering pitfalls: `../CTRLABLE-Node-PCB/README.md`.
 
+**PCB rev 0.3 — panel on an RS-485 bus (`-DPANEL_RS485=1`).** From 27.09.2026 the reader,
+keypad, display and door-side buzzer live on a separate board with its own MCU
+(`panel-firmware/`, ESP32-C3), connected to the controller by four wires (+12V, GND, A, B)
+running **OSDP with Secure Channel**. The controller is the OSDP **CP**, the panel is the **PD**;
+the access decision stays in the controller and the panel only reports events.
+
+**From v3.2.7 rev 0.3 is the default build.** The switch lives in **`panel_cp.h` and nowhere else**
+(`#ifndef PANEL_RS485 / #define PANEL_RS485 1`); `access_control.ino` includes that header as its
+first project include and no longer carries its own copy of the default.
+
+```bash
+# rev 0.3 — peripherals behind the bus. This is now the default, no flags needed.
+arduino-cli compile --fqbn esp32:esp32:esp32 access_control.ino
+
+# rev 0.2 (own PCB) — peripherals on the controller
+arduino-cli compile --fqbn esp32:esp32:esp32   --build-property "build.extra_flags=-DPANEL_RS485=0" access_control.ino
+
+# dev kit
+arduino-cli compile --fqbn esp32:esp32:esp32   --build-property "build.extra_flags=-DPANEL_RS485=0 -DBOARD_PCB_REV02=0" access_control.ino
+```
+
+⚠️ **`compile-ESP32.yml` builds with no flags, so it now produces a rev 0.3 image and will fail
+until LibOSDP is installed in the workflow** (`arduino-cli lib install --git-url https://github.com/goToMain/libosdp.git`).
+A failing build is the intended outcome here — the alternative would be publishing a signed
+release that no existing board can run.
+
+⚠️ **The default had to move into `panel_cp.h` to be correct.** Both that header and the sketch used
+to carry the same `#ifndef PANEL_RS485` block. With an explicit `-DPANEL_RS485=1` that was harmless,
+but the moment the default became 1 the two translation units disagreed: the sketch compiled the
+bus paths while `panel_cp.cpp` — which only ever sees the header — compiled the **empty stubs**.
+The result linked without a single warning, was 56 KB smaller, and every `panel::…` call silently
+did nothing. Caught by the image being 1,203,768 B instead of 1,260,648 B.
+
+With `-DPANEL_RS485=0` every function in `panel_cp.h` compiles to nothing, so boards in the field
+keep building from the same branch. The bus uses **UART2: TX=IO17, RX=IO16, DE+/RE=IO4** — the pins
+freed by moving the keypad and reader off the controller. **CI needs `arduino-cli lib install
+--git-url https://github.com/goToMain/libosdp.git` before the rev 0.3 variant will build**
+(LibOSDP is not in the Arduino Library Manager). Full description of the change, the cable and
+the key provisioning: `../CTRLABLE-Node-PCB/MIGRACJA_NA_RS485.md`.
+
+**Those three pins are shared with rev 0.2 hardware, and `setup()` used to configure them
+regardless of the flag** (fixed 28.09.2026). `RST_PIN` (MFRC522 reset) is the same GPIO4 that
+drives DE/RE of the transceiver, and `KP_COL1`/`KP_COL2` are IO16/IO17 — the bus RX and TX.
+On a rev 0.3 board the controller therefore enabled the RS-485 driver and drove IO16 as an
+output against the transceiver's own `RO` pin for the first tens of milliseconds of every boot,
+until `panel::begin()` took the pins back. Both blocks (and the serial keypad-row diagnostics,
+which described a matrix that is not there) are now behind `#if !PANEL_RS485`. The rev 0.2
+build is unaffected: after the change its function set and every function size are identical.
+
 ### 5.2 Server connection — architecture note (important)
 ```cpp
 #define PROXMOX_SERVER "node.ctrlable.pl"
@@ -405,7 +454,7 @@ Firmware additionally writes `0` to offset 480 on factory reset and zeroes impla
 
 ### 5.4 On-device storage — LittleFS (cards) + EEPROM (config)
 
-**Cards no longer live in EEPROM.** They are stored in **LittleFS `/cards.db`** as fixed-length `FsCard` records (~40 B), capacity `HW_MAX_CARDS = 200`, loaded into `users[]`/`isCardActive[]` at boot. `/pins.db` (`FsPin`, ~73 B) is reserved for stage 2 (local PIN verification) and not used yet.
+**Cards no longer live in EEPROM.** They are stored in **LittleFS `/cards.db`** as fixed-length `FsCard` records (~40 B), capacity `HW_MAX_CARDS = 500`, loaded into `users[]`/`isCardActive[]` at boot. `/pins.db` (`FsPin`, **76 B**, `static_assert`-ed) holds the PIN hashes — live since v3.3.0, §5.4b. Ceiling `HW_MAX_PINS = 500`.
 
 **EEPROM (512 B) still holds the configuration** — and, in a degraded mode, cards:
 
@@ -421,9 +470,68 @@ Firmware additionally writes `0` to offset 480 on factory reset and zeroes impla
 
 **Degradation is deliberate:** if `LittleFS.begin()` fails, `fsMounted = false` and the firmware falls back to the old EEPROM path (10-card cap) instead of losing cards entirely — a lock must never lose its credentials. `persistCards()` dispatches to whichever store is active; on first boot with an existing EEPROM card set it migrates them into `/cards.db` (`[FS] Migracja kart EEPROM->LittleFS`).
 
+**Note on "EEPROM":** in Arduino-ESP32 **3.x the `EEPROM.h` library is emulated over NVS** (`EEPROM.cpp`: "Uses a nvs byte array to emulate EEPROM") — it does not touch a flash partition. The `eeprom` partition (subtype `0x99`) that the old partition table carried was a leftover from core 2.x and was removed on Sep 28 2026; the 512 configuration bytes live in the `nvs` partition as a blob.
+
+**Partition table (`partitions.csv`, active — see the correction in §9).** Changing it does **not** travel over OTA (the table sits at 0x8000; an update only writes the app image to the spare slot), so a new layout needs one USB flash. `nvs` keeps its offset and size, so the device key, the AP password and the EEPROM-emulated configuration survive that flash — **the cards in `/cards.db` do not**, because the filesystem moves.
+
+| Partition | Offset | Size | |
+|---|---|---|---|
+| `nvs` | 0x9000 | 20 KB | device secrets + EEPROM emulation |
+| `otadata` | 0xE000 | 8 KB | |
+| `app0` / `app1` | 0x10000 / 0x1D0000 | **1792 KB** each | raised from 1536 KB on Sep 28 2026 |
+| `coredump` | 0x390000 | 64 KB | **added** Sep 28 2026 — see §5.13 |
+| `littlefs` | 0x3A0000 | 384 KB | was 956 KB; actual need is ~32 KB (200 cards × 40 B + 200 PINs × 73 B) |
+
 **NVS (Preferences, namespace `ctrlsec`)** holds the device secrets that deliberately **survive a factory reset**: `dkey` (device key, §7.2) and `appw` (WPA2 password of `CTRLABLE_SETUP`, §7.1). Keeping the key means a factory-reset device re-attaches to its existing server record instead of being rejected; an ownership change goes through deregistration anyway.
 
 `factoryResetSettings()` clears **both**: `0xFF` across all 512 EEPROM bytes (plus `totalCards = 0`, and `0` written back to offset 480) **and** removal of `/cards.db` + `/pins.db`.
+
+### 5.4b Offline PIN verification — `/pins.db` (stage 2, v3.3.0)
+
+Until v3.2.7 a PIN was checked by the server (`POST /api/auth/keypad`), so **no Wi-Fi meant a dead
+keypad**. From v3.3.0 the controller holds the hashes itself and decides locally; the server is only
+needed to create and change codes. Code lives in `pin_store.h` / `pin_store.cpp` — a separate module
+because Arduino emits function prototypes at the top of the `.ino`, before a type defined in its
+middle exists.
+
+**Hashing: PBKDF2-HMAC-SHA256, one salt per device, 20 000 iterations.** Not bcrypt like the server,
+and the reason is structural: bcrypt salts every record separately, so checking N codes costs N full
+derivations — minutes at 500 PINs. A single device salt lets the controller derive **once** and then
+compare against every record in constant time. The salt is not a secret (it is a salt): it goes out
+with every poll as `X-Pin-Salt`, together with `X-Pin-Iter` and `X-Pin-Count`, and lives in NVS
+(`ctrlsec/pinsalt`).
+
+**What the controller enforces locally:** active flag, `expiresAt`, `maxUses` / `useCount` (the counter
+is written back to flash, so it survives a restart), and the day/hour schedule. No clock (no NTP) with
+an expiry or a schedule set → **denied**, the same fail-closed rule as cards. Each refusal names itself
+on the display: `PIN ZABLOKOWANY`, `PIN WYGASL`, `LIMIT UZYC PIN`, `POZA HARMONOGRAMEM`, `BRAK CZASU (NTP)`.
+
+**Order of checks in `verifyKeypadPIN()`:** local first (works offline and is faster than a TLS round
+trip) → if the code is known but refused, the reason is reported without asking the server → if it is
+not in local storage at all and Wi-Fi is up, the old server path still runs.
+
+#### What the server has to add
+
+1. **Store the salt.** Read `X-Pin-Salt` and `X-Pin-Iter` from the poll and keep them on the device row.
+2. **Push a hash whenever a PIN is created or changed**, as a queued command (§7.3):
+   `P|<id>|<hash 64 hex>|<active>|<schEnabled>|<schDays>|<schStart>|<schEnd>|<expiresAt>|<maxUses>|<useCount>|<name hex>`
+   where `hash = PBKDF2-HMAC-SHA256(pin, salt, iter, 32 B)`. Deleting is `P|<id>` with no further fields.
+   The plaintext PIN never reaches the device.
+3. **Reconcile `useCount`** — the controller increments it locally while offline and reports nothing back
+   yet; a push from the server overwrites it.
+
+> **No migration path exists, and none is needed.** The server stores bcrypt (`keypad_pins.pin_hash`)
+> and cannot recover the plaintext, so it cannot derive the new hash for a PIN created earlier. That
+> would have mattered with devices in the field — there are none: no controller has shipped and the app
+> is not released, so every customer starts on v3.3.0 with PINs that work offline from the first one
+> they set. The alternative design — keeping a reversible copy of every PIN on the server so devices
+> could be provisioned at any time — was rejected on its own merits: it would make every customer's PINs
+> recoverable by whoever holds the database, which is the opposite of what this product sells.
+>
+> **Until the server implements the `P` command, no PIN works offline** — the keypad still falls back to
+> `POST /api/auth/keypad`, exactly as in v3.2.7. That fallback stays in the firmware on purpose: it is
+> the only path while the server side is outstanding, and afterwards it covers a device whose `/pins.db`
+> was wiped but which still has network.
 
 ### 5.5 Compiling
 - Board: ESP32 Dev Module, core 3.3.10
@@ -520,7 +628,7 @@ Offline-standalone devices are capped at **`OFFLINE_FREE_CARDS = 2`** cards with
 
 ### 5.13 Crash diagnostics — reset reason and core dump in the boot log (v3.2.1)
 
-Every boot sends the `[FS] LittleFS …` line; since v3.2.1 it ends with ` reset=<code>/<name> heap_min=<bytes>` and, when the previous run died in a panic or watchdog, ` CRASH task=<name> pc=0x… cause=<n> bt=0x…,0x…`. The ESP32 core writes an ELF core dump to the `coredump` partition (default 4 MB partition table; `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` in the Arduino core) — the firmware reads `esp_core_dump_get_summary()`, sends it once and erases the dump. Reset codes: 1 POWERON, 3 SW (OTA/ESP.restart), 4 PANIC, 5 INT_WDT (interrupts blocked > 300 ms), 6 TASK_WDT, 9 BROWNOUT.
+Every boot sends the `[FS] LittleFS …` line; since v3.2.1 it ends with ` reset=<code>/<name> heap_min=<bytes>` and, when the previous run died in a panic or watchdog, ` CRASH task=<name> pc=0x… cause=<n> bt=0x…,0x…`. The ESP32 core writes an ELF core dump to the `coredump` partition (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` in the Arduino core) — the firmware reads `esp_core_dump_get_summary()`, sends it once and erases the dump. **⚠️ This never worked before Sep 28 2026.** The active `partitions.csv` (§5.4) had no `coredump` partition, so `esp_core_dump_image_check()` always returned an error and no dump was ever stored — which is why the Sep 14–16 2026 `INT_WDT` restarts produced breadcrumbs but no core dump. The partition exists as of the table below; the feature is still **unverified on hardware**, because it needs a re-flash over USB and a crash to prove itself. Reset codes: 1 POWERON, 3 SW (OTA/ESP.restart), 4 PANIC, 5 INT_WDT (interrupts blocked > 300 ms), 6 TASK_WDT, 9 BROWNOUT.
 
 **Breadcrumbs (v3.2.3):** because a crash that hits during a flash operation leaves no core dump (the panic handler cannot write flash then), both cores continuously stamp their current phase into RTC memory (`RTC_NOINIT_ATTR`, survives every reset except power-on) and every flash write sets a marker. After an unexpected reset the boot line also carries ` crumbs c0=<phase>@<ms before death> c1=<phase>@<ms> flash=<op> up=<s>`. Core 0 (netTask) phases: 1 loop, 2 poll connect, 3 poll send, 4 poll read, 5 poll parse, 6 card upload, 7 diagnostic report, 8 button log, 9 sendRemoteLog. Core 1 (loop) phases: 20 loop start, 21 pending commands, 22 tamper, 23 keypad, 24 OLED render, 25 RFID reset, 26 Wi-Fi rescue, 27 RFID scan, 28 button, 29 openDoor, 30 OTA. Flash ops: 1 EEPROM.commit, 2 /cards.db write, 3 NVS, 4 OTA write, 5 self-test, 6 coredump erase (`flash=0` = no flash op in progress). A phase with a large `@ms` age means that core had been stuck there. Since v3.2.6 the report is kept in RTC memory until the boot line has actually been sent: a boot that itself dies before writing any marker (first ~1.5 s: driver init, radio power-up) no longer wipes it but increments ` early_crashes=<n>`, and ` crash_reset=<code>/<name>` names the reset that ended the reported run (Sep 16 2026: every reset produced two boots and the second one reported all zeros). Since v3.2.4 the boot line also carries ` sw=NET_STALL(n)` when the **server-contact watchdog** fired: with Wi-Fi associated but no successful poll for 10 min (60 min once three such restarts happened in a row without a single successful poll) `loop()` — core 1, so it works even with the network task hung — restarts the device (not in AP/provisioning, learning mode, with the door open or during OTA). Sep 15 2026: a v3.2.2 unit sat 17 h "online" on the OLED without a single poll — and woke up with an INT_WDT the moment its cables were moved, i.e. a loose contact. v3.2.5 adds a **task watchdog on `loop()`** (60 s, `esp_task_wdt`): a hung main loop (I2C/SPI bus stuck) now ends in a `6/TASK_WDT` reset with breadcrumbs instead of hanging forever; the OTA receive loop and a held exit button feed it explicitly.
 
@@ -902,8 +1010,17 @@ The server rejects its key (`Auth Rejection … bad_key` in the log). Causes: th
 - **RFID schedule enforcement — DONE (Aug 18 2026, §5.7).** Schedules sync to the device and are checked locally before unlocking. Remaining gap: they are pushed only when changed in the app, so pre-existing schedules (or a factory-reset device) need one re-save; there is no reconciliation sweep yet.
 - ~~**ESP32 firmware transport is unencrypted HTTP**~~ — **migrated to TLS in firmware (Aug 13 2026, §5.2):** `WiFiClientSecure` on 443 through NPM, root-CA pinned. ISRG Root X1 PEM is embedded in `ROOT_CA_LE`. Fully closed: TLS bench-tested and verified in the field (§5.2), router port-3000 forward removed (§2.3).
 - **EEPROM/database sync has no automatic reconciliation** (§5.8) — currently a manual process if they drift.
-- **LittleFS card storage — DONE (Aug 17 2026), verified on hardware** (`[FS] LittleFS OK … selftest=PASS`). Cards live in `/cards.db`, cap raised 10 → **200**, with EEPROM fallback if the mount fails (§5.4). It deployed over normal OTA as predicted — the default `esp32:esp32:esp32` partition scheme already has a `spiffs` partition, so no partition change / USB / re-provision was needed; `partitions.csv` remains an unused fallback.
-- **Local (offline) PIN verification — STILL OPEN** (stage 2). PINs are verified server-side, so they don't work offline and the check is one of the last blocking TLS calls left in `loop()` (§5.2b). *(Its security aspect — anyone knowing the MAC could brute-force PINs remotely through `/api/auth/keypad` — is closed by the device key, §7.2; what remains is the availability/latency feature.)* Plan: PBKDF2-HMAC-SHA256 hashes in `/pins.db` (struct already defined and sized). Full model in `LICENSING.md`.
+- **LittleFS card storage — DONE (Aug 17 2026), verified on hardware** (`[FS] LittleFS OK … selftest=PASS`). Cards live in `/cards.db`, cap raised 10 → 200 → **500** (Sep 29 2026), with EEPROM fallback if the mount fails (§5.4). It deployed over normal OTA as predicted — no partition change / USB / re-provision was needed. **Correction (Sep 28 2026): `partitions.csv` was never an "unused fallback".** ESP32 core 3.x copies a `partitions.csv` sitting next to the sketch into the build unconditionally (`platform.txt`, `recipe.hooks.prebuild.1`) — no `--board-options` involved — so that file has been the active table in every CI and IDE build all along. The `spiffs`-subtype partition LittleFS mounts came from *it*, not from the stock scheme.
+- **Code audit Sep 28 2026 — four defects fixed, released as `v3.2.7`:**
+  - **`urlEncode()` overflowed its buffer.** `char hex[3]` with `sprintf(hex, "%%%02X", c)` — the format produces `%XX` plus a terminating NUL, i.e. 4 bytes. Compiler-confirmed (`-Wformat-overflow`). It has been writing one byte past the array on every non-alphanumeric character of every poll URL (card names, owner e-mail). Harmless in practice only because `char` is *unsigned* on xtensa-esp32, so a byte ≥ 0x80 still prints two digits; with a signed `char` it would have printed eight and smashed the stack properly. Buffer widened to 4 and the argument cast to `unsigned char`.
+  - **`EEPROM.put(480, latestFirmwareReleaseId)`** passed a `volatile int` where the other three accesses to offset 480 use `unsigned long`. Same width on ESP32, so no corruption, but the template dropped the `volatile` qualifier (compiler-confirmed). Now cast explicitly.
+  - **`millis()` overflow in 17 deadline comparisons.** `millis() < deadline` breaks every ~49.7 days: a deadline computed just before the wrap becomes a small number and the test is false immediately. The one that mattered is the **5-failed-attempt lockout** (`lockoutEndTime`, local API and card/PIN paths) — it would have been skipped for a ~5-minute window on each wrap, i.e. brute-force protection silently off. All converted to a `timeReached()` helper comparing the *signed difference*, which wraps correctly (valid for deadlines up to ~24.8 days; the longest here is the 15-minute service code).
+  - **`PANEL_RS485` had two defaults.** The same `#ifndef PANEL_RS485` block stood in both
+    `panel_cp.h` and `access_control.ino`. Harmless while the flag was always passed explicitly;
+    the moment rev 0.3 became the default it split the build in two — the sketch compiled the bus
+    paths, `panel_cp.cpp` compiled empty stubs, and nothing warned. Details in §5.1.
+- **Note on the `"KP_COL3" redefined` warning** in the PlatformIO harness: the built value is correct. Read back from the image, `KP_COLS = {16, 17, 2}` — IO2 as intended for PCB rev 0.2, not the dev-kit IO12. The warning is an artefact of PlatformIO's `.ino`→`.cpp` conversion, not a real double definition.
+- **Local (offline) PIN verification — DONE (Sep 29 2026, v3.3.0), not yet run on hardware.** `/pins.db` + PBKDF2 with a per-device salt; see §5.4b for the format, the `P` command and the server-side work that is still outstanding. Untested in practice: the ~0,2 s derivation time is an estimate, not a measurement, and no board has run this code.
 - ~~**Offline license key (future idea)**~~ — **BUILT 2026-09-11, WITHDRAWN FROM SALE 2026-09-14 (§5.12, dormant):** signed per-device token, perpetual, same tiers as online; the free offline cap of 2 cards is now enforced in firmware. Not yet tested on hardware. Remaining: offline PIN verification (below), prices.
 - ~~**Keypad PINs are account-scoped, not device-scoped**~~ — **FIXED (Aug 13, 2026).** `keypad_pins` now has a `mac_address` column; PINs are scoped per centralka and verify by `mac_address` (any PIN on a device verifies regardless of which account — owner or co-admin — created it). Add/list/manage authorize by device access (owner OR co-admin via `device_shares`). See §4.1.
 - ~~Data export / account deletion~~ — **DONE (Sep 2026):** `GET /api/account/export`, `POST /api/account/delete_request|confirm` with device factory reset and an `erasure_requests` tombstone (§3.6, `LICENSING.md` §6.0). Still open: 2FA for the app login; firmware `BTN_NC`/`BTN_LED` for the custom PCB (§5.1b); PN532 reader with DESFire for clone-resistant cards (evaluation). The old "features PDF" is superseded by this list.

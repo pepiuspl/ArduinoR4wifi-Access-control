@@ -1,8 +1,17 @@
-#include <Wire.h> 
+#include <Wire.h>
+// PANEL_RS485 pochodzi z panel_cp.h i TYLKO stamtad (uzasadnienie w tym naglowku).
+// Od v3.2.7 domyslna jest plytka rev 0.3: czytnik, klawiatura i ekran sa w panelu
+// za magistrala RS-485 (OSDP). Stary uklad buduje sie jawnie: -DPANEL_RS485=0,
+// a dla dev kitu dodatkowo -DBOARD_PCB_REV02=0.
+// Ten #include MUSI stac przed warunkowymi #include peryferiow ponizej.
+#include "panel_cp.h"
+#include "pin_store.h"     // /pins.db + PBKDF2: PIN dziala takze bez Wi-Fi (etap 2)
+#if !PANEL_RS485
 #include <Adafruit_GFX.h> 
 #include <Adafruit_SH110X.h>  
 #include <SPI.h> 
-#include <MFRC522.h> 
+#include <MFRC522.h>
+#endif 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <LittleFS.h>
@@ -44,6 +53,9 @@ static const char* resetReasonName(int r);
 #define FLASH_OP_BEGIN(k) do { rtcCrumbs.flash = (k); rtcCrumbs.upMs = millis(); } while (0)
 #define FLASH_OP_END()    do { rtcCrumbs.flash = 0; } while (0)
 static void eepromCommitTracked() { FLASH_OP_BEGIN(1); EEPROM.commit(); FLASH_OP_END(); }
+// Mostki dla modulow poza szkicem (pin_store.cpp) — okruszki RTC zostaja tutaj.
+void flashOpBegin(uint8_t kind) { FLASH_OP_BEGIN(kind); }
+void flashOpEnd() { FLASH_OP_END(); }
 static String crumbsToString(const RtcCrumbs& c) {
   String o = " crumbs c0=" + String(c.ph[0]) + "@" + String((long)(c.upMs - c.at[0])) +
              "ms c1=" + String(c.ph[1]) + "@" + String((long)(c.upMs - c.at[1])) +
@@ -244,12 +256,21 @@ bool verifyFirmwareSignature(const uint8_t hash[32], const String& sigB64) {
   return rc == 0;
 }
 
+// Licznik millis() przepelnia sie co ~49,7 dnia. Porownanie "millis() < termin"
+// przestaje wtedy dzialac: termin policzony tuz przed przepelnieniem zawija sie do
+// malej liczby i warunek jest falszywy od razu. Roznica dwoch znacznikow zawija sie
+// poprawnie, wiec porownujemy roznice ze znakiem. Dziala dla terminow do ~24,8 dnia
+// w przod — najdluzszy w tym pliku to 15 minut (kod serwisowy).
+static inline bool timeReached(unsigned long deadline) {
+  return (long)(millis() - deadline) >= 0;
+}
+
 unsigned long lastOtaCheck = 0;
 const unsigned long otaInterval = 10000;
 volatile int latestFirmwareReleaseId = 0;
 unsigned long installedReleaseId = 0;
 volatile unsigned long autoLockDelayMs = 3000;  // domyslne 3s, nadpisywane z serwera (networkTask)
-const char* app_version = "v3.2.6";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
+const char* app_version = "v3.3.0";   // JEDYNE zrodlo wersji: CI bierze ja stad do tagu, nazwy wydania i pliku .bin (README §5.3)
 
 struct User { 
   byte uid[4]; 
@@ -268,7 +289,6 @@ void addLog(String msg);
 void openDoor(String source); 
 void forceHardwareRFIDReset(); 
 void displayProvisioningInstructions(String errorContext = "");
-void saveConfiguration(String newSSID, String newPass); 
 void factoryResetSettings(); 
 void loadConfiguration(); 
 void loadCards();
@@ -277,6 +297,7 @@ void deleteUser(int index);
 void initStorage();          // LittleFS (etap 1)
 void storageSelfTest();
 void updateDisplay(String status, String info = ""); 
+void panelText(const String& txt, uint8_t seconds); 
 void renderSystemUI(); 
 void handleLocalHttp();
 void serveProvisioning(WiFiClient& client, const String& reqHeader);
@@ -309,7 +330,7 @@ String urlEncode(String str);
 String urlEncode(String str) { 
   String encoded = ""; 
   char c; 
-  char hex[3];
+  char hex[4];        // "%XX" to trzy znaki PLUS koncowe zero
   for (unsigned int i = 0; i < str.length(); i++) { 
     c = str[i];
     if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') { 
@@ -317,7 +338,9 @@ String urlEncode(String str) {
     } else if (c == ' ') { 
       encoded += '+';
     } else { 
-      sprintf(hex, "%%%02X", c); 
+      sprintf(hex, "%%%02X", (unsigned char)c);   // bez rzutowania bajt >= 0x80
+                                                 // wypisalby sie jako 8 cyfr,
+                                                 // gdyby char byl ze znakiem
       encoded += hex;
     } 
   } 
@@ -345,20 +368,18 @@ char owner_email[64] = "";
 #define RESET_BTN_PIN   39
 
 // ─── ANTI-TAMPER ─────────────────────────────────────────────────────────────
-//   Ustaw TAMPER_INSTALLED na true dopiero PO fizycznym zamontowaniu przełącznika NC.
-//   Bez przełącznika: IO14 = floating HIGH → fałszywy alarm przy każdym starcie!
+//   TAMPER_INSTALLED/KEYPAD_INSTALLED to przelaczniki kompilacji dla plytek bez
+//   zamontowanego czujnika lub klawiatury. Oba sa dzis wlaczone; przy false cala
+//   obsluga jest pomijana (checkTamper/checkKeypad wychodza od razu).
 // Czujnik sabotażu NC do GND na IO32 (INPUT_PULLUP). Historyczna uwaga o IO36 nieaktualna —
 // IO36 jest zarezerwowane pod BTN_NC na własnej PCB (README §5.1b).
 #define TAMPER_PIN       32  // IO32 — zwykłe GPIO z wewnętrznym pull-upem, bez konfliktu z RELAY_PIN 13
-#define TAMPER_INSTALLED true   // ← zmień na true gdy przełącznik NC jest zainstalowany
+#define TAMPER_INSTALLED true    // czujnik sabotazu NC zamontowany
 #define KEYPAD_INSTALLED true    // klawiatura podłączona
-//  Pin 1 → IO16 (kol: 1 4 7 *)
-//  Pin 2 → IO17 (kol: 2 5 8 0)
-//  Pin 3 → IO12 (kol: 3 6 9 #)  ← był IO2 (dioda!), teraz IO12
-//  Pin 4 → IO2  (wiersz: 1 2 3, INPUT_PULLUP — dioda praktycznie wygaszona)  ← był IO12
-//  Pin 5 → IO15 (wiersz: 4 5 6, wewn. pull-up)
-//  Pin 6 → IO35 (wiersz: 7 8 9, ZEWN. 10kΩ do 3.3V!)
-//  Pin 7 → IO34 (wiersz: * 0 #, ZEWN. 10kΩ do 3.3V!)
+// Matryca klawiatury (tylko rev 0.2 — na rev 0.3 klawiature obsluguje panel):
+//  kolumny: KP_COL1 IO16, KP_COL2 IO17, KP_COL3 IO2 (PCB) / IO12 (dev kit)
+//  wiersze: KP_ROW1 IO14, KP_ROW2 IO15, KP_ROW3 IO34, KP_ROW4 IO35
+//  IO34 i IO35 sa wejsciowe-tylko i wymagaja ZEWNETRZNYCH 10 kΩ do 3,3 V.
 #define KP_COL1  16
 #define KP_COL2  17
 // Własna PCB rev 0.2 (folder CTRLABLE-Node-PCB): kolumna 3 klawiatury jest na IO2, bo IO12 (strap
@@ -366,17 +387,16 @@ char owner_email[64] = "";
 // (IO2 ma tam wbudowaną diodę). Kompilacja pod nową płytkę: -DBOARD_PCB_REV02=1 (CI buduje dev kit,
 // dopóki flota nie przejdzie na PCB). Reszta pinów jest identyczna na obu płytkach.
 #ifndef BOARD_PCB_REV02
-#define BOARD_PCB_REV02 0
+// Domyslnie wlasna PCB (od v3.2.7). Dev kit: -DBOARD_PCB_REV02=0.
+#define BOARD_PCB_REV02 1
 #endif
 #if BOARD_PCB_REV02
 #define KP_COL3  2    // PCB rev 0.2: connector pin 5 — col right (3 6 9 #)
 #else
 #define KP_COL3  12   // dev kit: connector pin 5 — col right (3 6 9 #)  [was IO2 = LED pin!]
 #endif
-#define KP_ROW1  14   // connector pin 2 — row 1 (1 2 3)  ← MOVE WIRE from IO2 to IO14
-                      // IO2 has the onboard blue LED; its LED circuit pulls IO2 to ~2V
-                      // which is below ESP32's HIGH threshold → always reads LOW → constant beeping
-                      // IO14 has no LED, internal pull-up works correctly
+#define KP_ROW1  14   // nie IO2: wbudowana dioda ciagnie IO2 do ~2 V, czyli ponizej
+                      // progu HIGH — wiersz czytalby sie zawsze jako wcisniety
 #define KP_ROW2  15
 #define KP_ROW3  34   // IO34 — external 10kΩ to 3.3V (or use INPUT_PULLUP)
 #define KP_ROW4  35   // IO35 — external 10kΩ to 3.3V (or use INPUT_PULLUP)
@@ -393,8 +413,10 @@ const char    KP_MAP[4][3] = {
 #define MAX_LOGS 30  
 #define OLED_RESET -1  
 
+#if !PANEL_RS485
 Adafruit_SH1106G display = Adafruit_SH1106G(128, 64, &Wire, OLED_RESET);
-MFRC522 rfid(SS_PIN, RST_PIN); 
+MFRC522 rfid(SS_PIN, RST_PIN);
+#endif 
 WiFiUDP ntpUDP; 
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 7200);
 WiFiServer server(80);  
@@ -406,11 +428,14 @@ bool provisioningMode = false;
 bool isOfflineStandby = false;  
 bool hasSavedConfig = false;
 bool oledConnected = false; 
-// Sufit sprzętowy kart w trybie online (magazyn LittleFS). Prowizorycznie 200 =
-// górny tier "individual"; do walidacji na bench (RAM/czas skanu). Realny limit
-// i tak narzuca licencja serwera. Przy braku LittleFS spadamy do starego limitu
-// 10 (EEPROM) — patrz loadCards()/saveNewCard().
-#define HW_MAX_CARDS 200
+// Sufit sprzetowy kart i PIN-ow (magazyn LittleFS). Od v3.3.0 po 500 — konkurencja
+// (TT Lock) daje 200/200, a koszt jest znany i maly: karty siedza w RAM-ie
+// (500 x 27 B = 13,5 KB z 320 KB), PIN-y wylacznie na flashu (500 x 76 B = 38 KB
+// z 384 KB partycji). Skan kart to liniowe memcmp po 4 bajtach, wiec 500 rekordow
+// jest nie do odroznienia od 200. Realny limit i tak narzuca licencja serwera.
+// Przy braku LittleFS spadamy do starego limitu 10 (EEPROM) — patrz loadCards()/saveNewCard().
+#define HW_MAX_CARDS 500
+// HW_MAX_PINS mieszka w pin_store.h razem z reszta magazynu PIN-ow.
 User users[HW_MAX_CARDS];
 bool isCardActive[HW_MAX_CARDS];
 // Harmonogramy kart trzymamy w RÓWNOLEGŁYCH tablicach, a nie w strukturze User —
@@ -453,7 +478,7 @@ char req_username[40] = "";
 // tutaj, a WYKONUJE ją loop (rdzeń 1), bo dotyka tablic kart używanych przy skanie.
 // cmdAckId = najwyższy wykonany id; wysyłany w każdym pollu jako ack.
 volatile bool req_cmdsPending = false;
-char req_cmds[1024] = "";
+char req_cmds[2048] = "";   // jedna komenda PIN-u to ~140 znakow (hash 64 hex + nazwa)
 volatile unsigned long cmdAckId = 0;
 volatile unsigned long restartAfterAckId = 0;   // po komendzie Wi-Fi/restart: restart dopiero, gdy serwer dostał ack
 // Tryb serwisowy (README §7.15): kod obecności z serwera pokazywany na OLED przez 15 min.
@@ -481,6 +506,11 @@ TaskHandle_t networkTaskHandle = NULL;
 unsigned long lastSuccessfulPollTime = 0;
 int globalAnimFrame = 0; 
 unsigned long lastFrameTick = 0; 
+// Krotkotrwaly komunikat odmowy na OLED. Ustawia go denyNotice() przy KAZDEJ odmowie
+// (nieznana / zablokowana / poza harmonogramem / limit kart). Ekran wraca do LOCKED
+// sam, gdy millis() przekroczy ten znacznik - bez ZADNEGO delay() w petli.
+unsigned long deniedUntilMs = 0;
+const unsigned long DENY_NOTICE_MS = 2200;
 
 bool blockTelemetry = false;
 bool systemWasOnline = false;
@@ -613,19 +643,8 @@ struct FsCard {
   uint16_t schStart;      // minuty od północy
   uint16_t schEnd;
 };                        // ~40 B
-struct FsPin {
-  uint8_t  hash[32];      // PBKDF2-HMAC-SHA256(pin, sól per-urządzenie)
-  char     name[24];
-  uint8_t  active;
-  uint8_t  isGuest;       // kod gościnny (tylko licencja) — flaga informacyjna
-  uint8_t  schEnabled;
-  uint8_t  schDays;
-  uint16_t schStart;
-  uint16_t schEnd;
-  uint32_t expiresAt;     // epoch, 0 = bez wygasania
-  uint16_t maxUses;       // 0 = bez limitu
-  uint16_t useCount;
-};                        // ~73 B
+// struct FsPin — przeniesiona do pin_store.h (Arduino generuje prototypy funkcji
+// na gorze pliku .ino, wiec typ uzywany w ich sygnaturach musi byc w naglowku).
 
 // --- Magazyn kart: LittleFS (etap 1b) z degradacją do EEPROM ---------------
 // Format na dysku: /cards.db = sekwencja rekordów FsCard (stała długość).
@@ -941,10 +960,14 @@ void initStorage() {
 }
 
 void forceHardwareRFIDReset() {
-  digitalWrite(RST_PIN, LOW); 
-  delay(30); 
-  digitalWrite(RST_PIN, HIGH); 
-  delay(30); 
+#if PANEL_RS485
+  // Czytnik jest w panelu i tam ma własny nadzór — tutaj nie ma czego resetować.
+  return;
+#else
+  digitalWrite(RST_PIN, LOW);
+  delay(30);
+  digitalWrite(RST_PIN, HIGH);
+  delay(30);
   rfid.PCD_Init();
   // Maksymalne wzmocnienie odbiornika anteny (48dB) - domyślna wartość
   // biblioteki jest zachowawcza. Pomaga przy słabszych tagach (breloki)
@@ -953,7 +976,8 @@ void forceHardwareRFIDReset() {
   Serial.println("RFID INIT");
   byte v = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   Serial.printf("MFRC522 version: 0x%02X\n", v);
-} 
+#endif
+}
 
 String getFormattedSystemTime() { 
   time_t now;
@@ -967,7 +991,39 @@ String getFormattedSystemTime() {
   return String(timeBuffer); 
 } 
 
+// Ekran ma 128 px, a czcionka rozmiaru 1 to 6 px na znak -> 21 znakow w linii.
+// "POZA HARMONOGRAMEM" (18 zn.) miesci sie na styk, wiec dluzsze komunikaty lamiemy
+// na dwie linie po spacji (a gdy sie nie da - twardo) i centrujemy obie.
+void drawCenteredWrapped(String txt, int y) {
+#if PANEL_RS485
+  (void)txt; (void)y;   // ekran jest w panelu
+#else
+  const int MAXC = 21;
+  String l1 = txt, l2 = "";
+  if ((int)txt.length() > MAXC) {
+    int cut = txt.lastIndexOf(' ', MAXC);
+    if (cut <= 0) cut = MAXC;
+    l1 = txt.substring(0, cut);
+    l2 = txt.substring(cut);
+    l1.trim();
+    l2.trim();
+    if ((int)l2.length() > MAXC) l2 = l2.substring(0, MAXC);
+  }
+  display.setCursor(max(0, (128 - (int)l1.length() * 6) / 2), y);
+  display.print(l1);
+  if (l2.length() > 0) {
+    display.setCursor(max(0, (128 - (int)l2.length() * 6) / 2), y + 9);
+    display.print(l2);
+  }
+#endif
+}
+
 void renderSystemUI() {
+#if PANEL_RS485
+  // rev 0.3: ekran przy drzwiach jest w panelu i dostaje treść komendami OSDP
+  // (patrz denyNotice/openDoor). Centralka nie ma czego rysować.
+  return;
+#else
   if (!oledConnected) return; 
   display.clearDisplay(); 
   display.setTextSize(1); 
@@ -986,7 +1042,7 @@ void renderSystemUI() {
     display.setCursor(0, 18); 
     display.println(globalDisplayInfo);
   }   
-  else if (serviceCodeUntil > millis() && serviceCode[0]) {
+  else if (!timeReached(serviceCodeUntil) && serviceCode[0]) {
     // Kod obecności dla serwisanta — przepisuje go do aplikacji, dowodząc, że stoi
     // przy centralce. Znika po 15 min, po restarcie albo po komendzie "V|" z serwera.
     display.setCursor(10, 16);
@@ -998,7 +1054,10 @@ void renderSystemUI() {
     display.print(serviceCode);
     display.setTextSize(1);
   }
-  else if (learningMode) {
+  else if (learningMode && timeReached(deniedUntilMs)) {
+    // W trybie nauki odmowa "LIMIT KART" ma pierwszenstwo nad ekranem LEARNING - inaczej
+    // instalator nie dowiedzialby sie przy centralce, dlaczego karta sie nie zapisala.
+    // Alarm sabotazu zostaje WYZEJ w tym lancuchu, wiec on odmowy nie przepusci.
     display.setCursor(20, 20);
     display.setTextSize(2);
     display.print("LEARNING"); 
@@ -1032,11 +1091,14 @@ void renderSystemUI() {
   }   
   else if (tamperActive) {
     display.setTextSize(1);
+    // Dwie ostatnie linie byly na y=48 i y=56 — czyli POD kreska stopki (y=53) i DOKLADNIE
+    // na jej napisach: "ZABLOKOWANE" nakladalo sie na "ONLINE" i wychodzilo z tego
+    // nieczytelne "OMABNUDKOWANE". Stopke rysujemy dla kazdej galezi (nizej, w. 1129+),
+    // wiec ekran alarmu musi zmiescic sie nad nia: ostatnia linia konczy sie na y=51.
     display.setCursor(4, 16);  display.print("!! ALARM SABOTAZU !!");
-    display.setCursor(4, 28);  display.print("Obudowa panelu RFID");
-    display.setCursor(4, 38);  display.print("jest OTWARTA!");
-    display.setCursor(0, 48);  display.print("Otwarto");
-    display.setCursor(12, 56); display.print("ZABLOKOWANE");
+    display.setCursor(4, 27);  display.print("Obudowa panelu RFID");
+    display.setCursor(4, 37);  display.print("jest OTWARTA!");
+    display.setCursor(4, 45);  display.print("Otwarcie ZABLOKOWANE");   // 20 znakow: 4+120 = 124 px
    } else if (kpBuffer.length() > 0 || kpChecking) {
     display.setCursor(28, 14); display.print("Wpisz PIN:");
     display.setTextSize(2);    display.setCursor(10, 26);
@@ -1048,6 +1110,17 @@ void renderSystemUI() {
     }
     display.setTextSize(1);
     display.setCursor(4, 44);  display.print("#=OK *=Czyszczenie");
+  } else if (!timeReached(deniedUntilMs)) {
+    // ODMOWA: przez ~2 s zamiast klodki LOCKED pokazujemy POWOD, zeby czlowiek przy
+    // drzwiach wiedzial, czy karta jest nieznana, zablokowana, czy poza harmonogramem
+    // (dotad ta informacja byla widoczna wylacznie w aplikacji). Ramka miga co ~300 ms
+    // (globalAnimFrame tyka co 150 ms) - tak samo nieblokujaco jak animacja w doorOpen.
+    if ((globalAnimFrame / 2) % 2 == 0) display.drawRoundRect(0, 14, 128, 38, 3, SH110X_WHITE);
+    display.setTextSize(2);
+    display.setCursor(28, 17);
+    display.print("ODMOWA");
+    display.setTextSize(1);
+    drawCenteredWrapped(globalDisplayInfo, 34);   // 1. linia 34-41, ewentualna 2. linia 43-50 - obie w ramce (14-51)
   } else { 
     display.fillRoundRect(14, 32, 22, 18, 2, SH110X_WHITE);
     display.fillCircle(25, 39, 2, SH110X_BLACK); 
@@ -1075,11 +1148,29 @@ void renderSystemUI() {
   display.setCursor(94, 56); 
   display.print(liveTime); 
   display.display();
+#endif
 } 
 
 void updateDisplay(String status, String info) { 
   globalDisplayInfo = info; 
+  deniedUntilMs = 0;   // nowy komunikat ma pierwszenstwo nad dogasajaca odmowa
   renderSystemUI();
+  panelText(info.length() ? info : status, 5);
+} 
+
+// Wysyla komunikat na ekran PANELU (rev 0.3). OSDP TEXT ma 32 znaki i jedna
+// wiadomosc, wiec bierzemy pierwsza linie i przycinamy; wielolinijkowe instrukcje
+// (np. dane sieci konfiguracyjnej) i tak sa w aplikacji, nie na ekranie przy drzwiach.
+void panelText(const String& txt, uint8_t seconds) {
+#if PANEL_RS485
+  int nl = txt.indexOf('\n');
+  String line = (nl >= 0) ? txt.substring(0, nl) : txt;
+  line.trim();
+  if (line.length() > 32) line = line.substring(0, 32);
+  if (line.length()) panel::showText(line, seconds);
+#else
+  (void)txt; (void)seconds;
+#endif
 } 
 
 void displayProvisioningInstructions(String errorContext) {
@@ -1089,6 +1180,7 @@ void displayProvisioningInstructions(String errorContext) {
   String head = (errorContext != "") ? errorContext : "INITIAL CONFIG!";
   if (provisioningMode) globalDisplayInfo = head + "\nSSID: CTRLABLE_SETUP\nHaslo: " + apPassword + "\nIP: 192.168.4.1";
   else globalDisplayInfo = head + "\nSiec: CTRLABLE_SETUP\n(haslo z instalacji)";
+  deniedUntilMs = 0;
   renderSystemUI();
 } 
 
@@ -1217,6 +1309,21 @@ void playSound(int id) {
   buzzerAdvanceNote();
 }
 
+// Jedna sciezka dla KAZDEJ odmowy: log robi wywolujacy, a tutaj ustawiamy to, co widzi
+// czlowiek przy drzwiach - powod na OLED przez DENY_NOTICE_MS + sygnal dzwiekowy.
+// Wczesniej powod trafial wylacznie do aplikacji, bo renderSystemUI() drukowal
+// globalDisplayInfo tylko w galezi doorOpen.
+void denyNotice(String reason) {
+  globalDisplayInfo = reason;
+  deniedUntilMs = millis() + DENY_NOTICE_MS;
+  globalAnimFrame = 0;
+  playSound(SND_ACCESS_DENIED);
+  // Ekran i brzęczyk PRZY DRZWIACH są na panelu — powód odmowy musi tam
+  // dojechać magistralą, inaczej człowiek pod drzwiami znowu nic nie wie.
+  panel::showText(reason, 2);
+  panel::beep(2, 2, 2);
+}
+
 // Musi być wywoływane w KAŻDEJ iteracji loop() - zero delay(). To jest to,
 // co odlicza czas trwania nuty/przerwy i przechodzi do kolejnej nuty w tle,
 // bez blokowania RFID, przycisku ani obsługi sieci.
@@ -1256,12 +1363,15 @@ void openDoor(String source) {
   CRUMB(29);
   doorOpen = true;  
   globalAnimFrame = 0;  
+  deniedUntilMs = 0;   // wazna karta kasuje dogasajaca odmowe - inaczej jej wygaszenie zdjeloby imie z ekranu OPEN
   accessEndTime = millis() + autoLockDelayMs;
   globalDisplayInfo = source; 
   relayActivate();
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, HIGH); 
   playSound(SND_ACCESS_GRANTED); 
+  panel::showText("OTWARTE: " + source, 3);
+  panel::beep(5, 0, 1);
   forceSyncNow = true; // nie czekamy do następnego cyklu pollingu - zgłoś "opened" natychmiast
   addLog("Otwarto: " + source);
 } 
@@ -1299,7 +1409,7 @@ void handleLocalHttp() {
   if (!client) return;
   String reqHeader = "";
   unsigned long webTimeout = millis() + 1000;
-  while (client.connected() && millis() < webTimeout) {
+  while (client.connected() && !timeReached(webTimeout)) {
     if (client.available()) {
       char c = client.read();
       reqHeader += c;
@@ -1388,7 +1498,7 @@ void serveProvisioning(WiFiClient& client, const String& reqHeader) {
 void serveLocalApi(WiFiClient& client, const String& reqHeader) {
   blockTelemetry = true;
 
-  if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) {
+  if (failedLoginAttempts >= 5 && !timeReached(lockoutEndTime)) {
     client.println("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n[ALERT] LOCKOUT ACTIVE.");
     delay(1); client.stop(); blockTelemetry = false; return;
   }
@@ -1580,6 +1690,10 @@ void executeCloudSynchronization() {
   CRUMB(3);
   httpCheck.print("Host: "); httpCheck.println(PROXMOX_SERVER);
   printDeviceAuthHeader(httpCheck);
+  // Sol jest jawna; serwer potrzebuje jej, zeby policzyc hash PIN-u tak samo jak my.
+  httpCheck.print("X-Pin-Salt: "); httpCheck.println(pinSaltHex());
+  httpCheck.print("X-Pin-Iter: "); httpCheck.println(PIN_PBKDF2_ITER);
+  httpCheck.print("X-Pin-Count: "); httpCheck.println(pinCount());
   httpCheck.println("Connection: close\r\n");  
   // ODCZYT: kończymy, gdy ciało JSON jest KOMPLETNE — nie czekamy, aż serwer zamknie
   // połączenie. Przy TLS connected() bywa prawdziwe jeszcze długo po odebraniu treści,
@@ -1592,7 +1706,7 @@ void executeCloudSynchronization() {
   int braceDepth = 0;
   bool bodyStarted = false;
   CRUMB(4);
-  while ((httpCheck.available() || httpCheck.connected()) && millis() < deadline) {
+  while ((httpCheck.available() || httpCheck.connected()) && !timeReached(deadline)) {
     if (!httpCheck.available()) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
     char c = httpCheck.read();
     payloadResponse += c;
@@ -1788,7 +1902,7 @@ void performLocalFirmwareUpdate() {
           }
         } 
         
-        if (millis() > receiveDeadline) {
+        if (timeReached(receiveDeadline)) {
           addLog("[OTA PULL ERR] Timeout transmisji.");
           break;
         }
@@ -1816,7 +1930,9 @@ void performLocalFirmwareUpdate() {
           updateDisplay("SUKCES OTA", "Wgrywanie i Reset...");
           sendRemoteLog("[OTA PULL SUCCESS] Aktualizacja kompletna i zweryfikowana! Restart systemu...");
           delay(2000);
-          EEPROM.put(480, latestFirmwareReleaseId);
+          // Pozostale zapisy pod 480 i odczyt do installedReleaseId uzywaja
+          // unsigned long; volatile int zdejmowal kwalifikator w szablonie put().
+          EEPROM.put(480, (unsigned long)latestFirmwareReleaseId);
           eepromCommitTracked();
           ESP.restart();
         }
@@ -1860,7 +1976,7 @@ void transmitCardPayloadToCloud(String uidStr, String nameStr, int slot, bool ru
   // połączenia tylko opóźniało kolejny poll, czyli raportowanie stanu rygla.
   // Wystarczy dać żądaniu dojść do serwera i zamknąć gniazdo.
   unsigned long deadline = millis() + 600;
-  while (!httpPost.available() && httpPost.connected() && millis() < deadline) {
+  while (!httpPost.available() && httpPost.connected() && !timeReached(deadline)) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
   httpPost.stop();
@@ -1891,7 +2007,12 @@ void sendTamperAlert(bool active) {
 void checkTamper() {
   if (!TAMPER_INSTALLED) return;    // wyłączone do czasu fizycznej instalacji przełącznika
   if (WiFi.status() != WL_CONNECTED) return;
+  // rev 0.3: sabotaż przychodzi z panelu przez OSDP; J7 zostaje jako styk
+  // obudowy SAMEJ centralki. Alarm podnosi którykolwiek z nich.
   bool currentlyOpen = (digitalRead(TAMPER_PIN) == HIGH);
+#if PANEL_RS485
+  if (panel::tamperOpen()) currentlyOpen = true;
+#endif
   if (currentlyOpen && !tamperActive) {
     tamperActive = true;
     addLog("!! TAMPER: obudowa drugiej plytki otwarta !!");
@@ -1913,6 +2034,12 @@ void checkTamper() {
 // KLAWIATURA PIN — 4×3 matrix keypad
 // =========================================================================
 char scanKeypad() {
+#if PANEL_RS485
+  // Klawiatura wisi na panelu: matrycy nie ma czego skanować, klawisze
+  // przychodzą zdarzeniami OSDP. Debounce zrobił już panel.
+  char k = 0;
+  return panel::takeKey(&k) ? k : 0;
+#else
   for (int c = 0; c < 3; c++) {
     digitalWrite(KP_COLS[c], LOW);
     delayMicroseconds(50);
@@ -1925,16 +2052,46 @@ char scanKeypad() {
     digitalWrite(KP_COLS[c], HIGH);
   }
   return 0;
+#endif
 }
 
 void verifyKeypadPIN(const String& pin) {
   kpChecking = true; renderSystemUI();
-  if (WiFi.status() != WL_CONNECTED) {
-    logKeypadEvent("Keypad: offline - brak weryfikacji PIN"); playSound(SND_ACCESS_DENIED);
-    kpChecking = false; renderSystemUI(); return;
-  }
   if (tamperActive) {
     logKeypadEvent("Keypad: BLOKADA - aktywny alarm sabotazu"); playSound(SND_ACCESS_DENIED);
+    kpChecking = false; renderSystemUI(); return;
+  }
+
+  // 1) NAJPIERW LOKALNIE. Dziala bez Wi-Fi i jest szybsze niz zapytanie do chmury.
+  String owner = "";
+  PinResult lr = verifyPinLocal(pin, owner);
+  if (lr == PIN_OK) {
+    logKeypadEvent("Keypad: ZAAKCEPTOWANO [" + owner + "] - otwieranie (lokalnie)");
+    playSound(SND_ACCESS_GRANTED);
+    kpChecking = false;
+    if (!doorOpen) openDoor("Keypad: " + owner);
+    else renderSystemUI();
+    return;
+  }
+  if (lr != PIN_BRAK) {
+    // Kod rozpoznany, ale odrzucony — powod znamy lokalnie, nie pytamy serwera.
+    String powod = "PIN ODRZUCONY";
+    if (lr == PIN_NIEAKTYWNY)      powod = "PIN ZABLOKOWANY";
+    else if (lr == PIN_WYGASL)     powod = "PIN WYGASL";
+    else if (lr == PIN_LIMIT_UZYC) powod = "LIMIT UZYC PIN";
+    else if (lr == PIN_HARMONOGRAM) powod = "POZA HARMONOGRAMEM";
+    else if (lr == PIN_BRAK_CZASU) powod = "BRAK CZASU (NTP)";
+    logKeypadEvent("Keypad: " + powod + " [" + owner + "]");
+    denyNotice(powod);
+    kpChecking = false; renderSystemUI(); return;
+  }
+
+  // 2) Kodu nie ma w pamieci lokalnej — to albo zly kod, albo kod zalozony przed
+  //    etapem 2 (serwer nie umie odtworzyc jawnego PIN-u z bcrypta, wiec stare kody
+  //    trzeba raz ustawic na nowo w aplikacji). Dopoki jest siec, pytamy serwera.
+  if (WiFi.status() != WL_CONNECTED) {
+    logKeypadEvent("Keypad: PIN ODRZUCONY (offline, kodu nie ma lokalnie)");
+    denyNotice("BLEDNY PIN");
     kpChecking = false; renderSystemUI(); return;
   }
   WiFiClientSecure kc; configureSecure(kc);
@@ -1952,7 +2109,7 @@ void verifyKeypadPIN(const String& pin) {
   kc.print("Content-Length: "); kc.println(body.length());
   kc.println("Connection: close\r\n"); kc.print(body);
   unsigned long deadline = millis() + 3000; String resp = "";
-  while ((kc.connected() || kc.available()) && millis() < deadline) { if (kc.available()) resp += (char)kc.read(); }
+  while ((kc.connected() || kc.available()) && !timeReached(deadline)) { if (kc.available()) resp += (char)kc.read(); }
   kc.stop();
   if (resp.indexOf("\"granted\":true") != -1) {
     // Extract the PIN owner's name from the server response
@@ -1969,6 +2126,8 @@ void verifyKeypadPIN(const String& pin) {
   } else {
     logKeypadEvent("Keypad: PIN ODRZUCONY");
     playSound(SND_ACCESS_DENIED);
+    panel::showText("BLEDNY PIN", 2);
+    panel::beep(2, 2, 2);
     for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
   }
   kpChecking = false; renderSystemUI();
@@ -1982,6 +2141,7 @@ void handleKeypress(char key) {
     if (kpBuffer.length() == 0) return;
     if ((int)kpBuffer.length() < 4) {
       logKeypadEvent("Keypad: PIN za krotki (min 4 cyfry)"); playSound(SND_ACCESS_DENIED);
+      panel::showText("PIN ZA KROTKI", 2);
       kpBuffer = ""; renderSystemUI(); return;
     }
     String pin = kpBuffer; kpBuffer = ""; verifyKeypadPIN(pin);
@@ -2006,7 +2166,12 @@ void checkKeypad() {
   }
   char key = scanKeypad();
   if (key == 0) { kpLastChar = 0; return; }
+#if !PANEL_RS485
+  // Przy lokalnej matrycy ten sam klawisz w krótkim odstępie to drganie styku.
+  // Przy panelu każde zdarzenie to osobne, już odfiltrowane naciśnięcie —
+  // inaczej gubilibyśmy PIN-y z powtórzoną cyfrą (np. 1123).
   if (key == kpLastChar && (millis() - kpLastPress < KP_DEBOUNCE_MS)) return;
+#endif
   kpLastChar = key; kpLastPress = millis();
   handleKeypress(key);
 }
@@ -2024,6 +2189,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);   // bez modem-sleep: najczęstsza przyczyna rwących się połączeń ESP32 z częścią routerów; na zasilaniu sieciowym bez kosztu
   loadOrCreateDeviceSecrets();
+  loadOrCreatePinSalt();          // sol do lokalnych hashy PIN-ow (etap 2)
   loadLocalAdminPass();
   loadLicense();
   EEPROM.get(480, installedReleaseId);  // restore flashed release ID
@@ -2044,6 +2210,9 @@ void setup() {
   // Klawiatura — tylko gdy KEYPAD_INSTALLED == true
   // Bez flagi: IO2 nie jest ustawiany jako OUTPUT (nie zapala się niebieska LED),
   //            IO34/IO35 nie są inicjowane (nie pływają, brak fałszywych wciśnięć)
+#if !PANEL_RS485
+  // Na rev 0.3 klawiatura jest w panelu, a KP_COL1/KP_COL2 to IO16/IO17 —
+  // RX i TX magistrali. Ustawienie ich na OUTPUT zwiera wyjscie RO nadajnika.
   if (KEYPAD_INSTALLED) {
     for (int c = 0; c < 3; c++) { pinMode(KP_COLS[c], OUTPUT); digitalWrite(KP_COLS[c], HIGH); }
     pinMode(KP_ROW1, INPUT_PULLUP);  // IO14 — wewnętrzny pull-up, brak diody LED
@@ -2052,9 +2221,14 @@ void setup() {
     pinMode(KP_ROW4, INPUT_PULLUP);  // IO35 — internal pull-up
     delay(50);
   }
+#endif
   Wire.begin();
   Wire.setClock(400000);   // I2C 400 kHz zamiast domyślnych 100 kHz — pełny render OLED
                            // ~4× szybszy (~25 ms zamiast ~90 ms), pętla nie siada do 40/s
+#if PANEL_RS485
+  // rev 0.3: centralka nie ma ekranu — jest w panelu, sterowany komendami OSDP.
+  oledConnected = false;
+#else
   Wire.beginTransmission(0x3C);
   if (Wire.endTransmission() == 0) {
     display.begin(0x3C, true);
@@ -2065,22 +2239,33 @@ void setup() {
     oledConnected = false;
     Serial.println("[WARN] Brak ekranu OLED. Ekran wyłączony bezpiecznie.");
   }
+#endif
 
   // Relay idle: OUTPUT LOW → pull-down dominates → IN ~0V → NPN OFF → relay releases
   relayDeactivate();
   
   pinMode(LED_GREEN, OUTPUT); 
   pinMode(LED_RED, OUTPUT); 
+  pinMode(BUZZER_PIN, OUTPUT);
+#if !PANEL_RS485
+  // RST czytnika MFRC522. Na rev 0.3 ten sam GPIO4 to DE/RE nadajnika RS-485 —
+  // ustawienie go tutaj na OUTPUT HIGH wlaczaloby nadajnik na czas startu.
   pinMode(RST_PIN, OUTPUT);
-  pinMode(BUZZER_PIN, OUTPUT); 
-  digitalWrite(RST_PIN, HIGH); 
+  digitalWrite(RST_PIN, HIGH);
+#endif
   delay(50);
   
   digitalWrite(LED_GREEN, LOW); 
   digitalWrite(LED_RED, LOW); 
 
+#if PANEL_RS485
+  // rev 0.3: czytnik, klawiatura i ekran są w panelu za magistralą RS-485.
+  // SPI i matryca zostają nieużywane — te GPIO są na nowej płytce wolne.
+  panel::begin();
+#else
   SPI.begin(); 
   rfid.PCD_Init();
+#endif
 
   // 5. Ładowanie konfiguracji z pamięci
   loadConfiguration(); 
@@ -2189,6 +2374,7 @@ void setup() {
   tone(BUZZER_PIN, 1800, 80); delay(150);
 
   // ── Late keypad diagnostics — printed AFTER WiFi (Serial Monitor definitely open) ──
+#if !PANEL_RS485
   if (KEYPAD_INSTALLED) {
     delay(200);
     Serial.println("\n======= KEYPAD ROW DIAGNOSTICS =======");
@@ -2204,6 +2390,7 @@ void setup() {
     Serial.println(digitalRead(KP_ROW4) ? "HIGH - OK" : "LOW  - PROBLEM (10k to 3.3V missing or wired to GND)");
     Serial.println("======================================\n");
   }
+#endif
 
   // Start taska SIECIOWEGO na rdzeniu 0. Cały sprzęt (RFID/przekaźnik/dźwięk/OLED)
   // zostaje na rdzeniu 1 (loop). Stos 12 KB — TLS/mbedTLS + String są pamięciożerne.
@@ -2343,6 +2530,32 @@ void loop() {
     else if (!doorOpen) openDoor("Otwarte");
   }
   CRUMB(21); applyPendingCommands();   // zmiany kart / Wi-Fi odebrane z serwera
+#if PANEL_RS485
+  // Protokół obsługujemy PRZED resztą pętli — LibOSDP musi dostać ramki
+  // w oknie odpowiedzi PD, inaczej sesja się rozjeżdża.
+  CRUMB(21); panel::tick();
+  {
+    static bool panelWasOnline = false;
+    static uint32_t panelDownSince = 0;
+    bool up = panel::online();
+    if (up != panelWasOnline) {
+      panelWasOnline = up;
+      if (up) {
+        addLog("Panel: polaczony" + String(panel::secureChannel() ? " (kanal szyfrowany)" : ""));
+        panelDownSince = 0;
+      } else {
+        addLog("!! Panel nie odpowiada na magistrali RS-485 !!");
+        panelDownSince = millis();
+      }
+    }
+    // Brak panelu = brak czytnika i klawiatury. To stan alarmowy, nie awaria
+    // centralki: rygiel, przycisk wyjścia i chmura działają dalej.
+    if (!up && panelDownSince && (millis() - panelDownSince > 60000UL)) {
+      panelDownSince = millis();           // powtarzaj wpis raz na minutę
+      addLog("Panel nadal milczy - sprawdz kabel/zasilanie panelu");
+    }
+  }
+#endif
   CRUMB(22); checkTamper();  // anti-tamper (brak efektu gdy TAMPER_INSTALLED == false)
   CRUMB(23); checkKeypad();  // obsługa matrycy klawiatury PIN
 
@@ -2365,16 +2578,38 @@ void loop() {
     }
   }
 
+#if PANEL_RS485
+  // Kod serwisowy wygaszamy sami po 15 minutach: w rev 0.2 robil to warunek
+  // w renderSystemUI(), ktory w tym wariancie nic nie rysuje.
+  {
+    static bool svcShown = false;
+    bool svcNow = !timeReached(serviceCodeUntil) && serviceCode[0];
+    if (svcShown && !svcNow) panel::showText("", 1);
+    svcShown = svcNow;
+  }
+#endif
+
+  // Komunikat odmowy gasnie sam - ekran wraca do LOCKED bez delay() w petli.
+  if (deniedUntilMs != 0 && timeReached(deniedUntilMs)) {
+    deniedUntilMs = 0;
+    globalDisplayInfo = "";
+  }
+
   if (millis() - lastFrameTick > 150) {   // było 80 ms — rzadszy render OLED = mniej dławienia pętli/skanu RFID
     lastFrameTick = millis();
     globalAnimFrame++;
     CRUMB(24); renderSystemUI();
   }
 
+#if !PANEL_RS485
+  // Czytnik zawiesza się po godzinach pracy — cykliczny reset sprzętowy.
+  // Przy magistrali czytnik jest w panelu i pilnuje go firmware panelu;
+  // tutaj nie ma czego resetować (SPI nie jest nawet podłączone).
   if (!doorOpen && !learningMode && (millis() - lastRfidWatchdogTime > 120000)) { 
     lastRfidWatchdogTime = millis();
     CRUMB(25); forceHardwareRFIDReset(); 
   } 
+#endif
 
   if (isOfflineStandby) {
     CRUMB(26);
@@ -2420,11 +2655,24 @@ void loop() {
     rfidResetPending = false; 
     if (learningMode) { 
       globalAnimFrame = 0;
-    } else { 
+    } else if (timeReached(deniedUntilMs)) {   // trwajacy komunikat odmowy gasnie wlasnym licznikiem, nie tutaj
       globalDisplayInfo = "";
     } 
   } 
 
+#if PANEL_RS485
+  // Tryb nauki: na centralce sygnalizowaly go migajace diody i ekran. Przy drzwiach
+  // jest tylko panel, wiec komunikat musi tam dojechac - inaczej instalator stoi
+  // przed panelem, ktory wyglada jak w spoczynku.
+  {
+    static bool learnWasOn = false;
+    if (learningMode != learnWasOn) {
+      learnWasOn = learningMode;
+      if (learningMode) panelText("PRZYLOZ NOWA KARTE", 0);
+      else              panel::showText("", 1);   // pusty tekst = powrot do ekranu spoczynkowego
+    }
+  }
+#endif
   if (learningMode) { 
     if (millis() % 500 < 250) { 
       digitalWrite(LED_RED, HIGH);
@@ -2434,7 +2682,7 @@ void loop() {
       digitalWrite(LED_GREEN, HIGH);
     } 
   } else if (!doorOpen) { 
-    if (failedLoginAttempts >= 5 && millis() < lockoutEndTime) { 
+    if (failedLoginAttempts >= 5 && !timeReached(lockoutEndTime)) { 
       digitalWrite(LED_RED, millis() % 200 < 100 ? HIGH : LOW);
       digitalWrite(LED_GREEN, LOW); 
     } else { 
@@ -2448,17 +2696,38 @@ void loop() {
   } 
 
   CRUMB(27);
-  if (!rfidResetPending && !doorOpen && (failedLoginAttempts < 5 || millis() > lockoutEndTime) && rfid.PICC_IsNewCardPresent()) { 
+  // ŹRÓDŁO KARTY. rev 0.2: czytnik wisi lokalnie na SPI. rev 0.3 (PANEL_RS485):
+  // czytnik siedzi w panelu przy drzwiach i przysyła UID zdarzeniem OSDP —
+  // dalsza część kodu (decyzja, harmonogram, licencje, zgłoszenie do chmury)
+  // jest identyczna dla obu wariantów i operuje na cardUid/cardUidLen.
+  uint8_t cardUid[10];
+  uint8_t cardUidLen = 0;
+  bool haveCard = false;
+#if PANEL_RS485
+  if (!doorOpen && (failedLoginAttempts < 5 || timeReached(lockoutEndTime))) {
+    haveCard = panel::takeCard(cardUid, &cardUidLen);
+    if (haveCard) lastRfidWatchdogTime = millis();
+  }
+#else
+  if (!rfidResetPending && !doorOpen && (failedLoginAttempts < 5 || timeReached(lockoutEndTime)) && rfid.PICC_IsNewCardPresent()) {
     delay(20);
-    if (rfid.PICC_ReadCardSerial()) { 
-      lastRfidWatchdogTime = millis(); 
+    if (rfid.PICC_ReadCardSerial()) {
+      lastRfidWatchdogTime = millis();
+      cardUidLen = rfid.uid.size > 10 ? 10 : rfid.uid.size;
+      memcpy(cardUid, rfid.uid.uidByte, cardUidLen);
+      haveCard = true;
+    }
+  }
+#endif
+  if (haveCard) {
+    {
       String uidStr = "";
-      for (byte i = 0; i < rfid.uid.size; i++) { 
-        if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
-        uidStr += String(rfid.uid.uidByte[i], HEX); 
-        if (i < rfid.uid.size - 1) uidStr += " ";
-      } 
-      uidStr.toUpperCase(); 
+      for (byte i = 0; i < cardUidLen; i++) {
+        if (cardUid[i] < 0x10) uidStr += "0";
+        uidStr += String(cardUid[i], HEX);
+        if (i < cardUidLen - 1) uidStr += " ";
+      }
+      uidStr.toUpperCase();
       // Zgłoszenie do chmury NIE blokuje już pętli: odkładamy je do kolejki, a pełny
       // handshake TLS wykona networkTask na rdzeniu 0. Kolejkujemy PO ewentualnym
       // zapisie karty (niżej), żeby wysłać właściwy numer slotu.
@@ -2466,19 +2735,19 @@ void loop() {
       bool skipUpload = false;
       int savedSlot = -1;
       if (learningMode) {
-        savedSlot = saveNewCard(rfid.uid.uidByte, pendingUsername);
+        savedSlot = saveNewCard(cardUid, pendingUsername);
         if (savedSlot < 0) {
           // Limit magazynu / licencji offline — wcześniej -1 był ignorowany i ekran mówił „DODANO".
           int cap = isOfflineStandalone() ? offlineCardCap() : (fsMounted ? HW_MAX_CARDS : 10);
           addLog("Odmowa: limit kart (" + String(cap) + ")" + (isOfflineStandalone() && licCards == 0 ? " - brak licencji" : ""));
-          globalAnimFrame = 0;
-          globalDisplayInfo = "LIMIT KART: " + String(cap);
-          playSound(SND_ACCESS_DENIED);
+          denyNotice("LIMIT KART: " + String(cap));
           skipUpload = true;
         } else {
         addLog("Przypisano: " + pendingUsername + " [" + uidStr + "]");
         globalAnimFrame = 0;
         globalDisplayInfo = "DODANO KARTE";
+        panelText("DODANO KARTE", 3);
+        panel::beep(2, 1, 2);
         digitalWrite(LED_RED, LOW);
         digitalWrite(LED_GREEN, HIGH);
         playSound(SND_CARD_ENROLLED);
@@ -2491,7 +2760,7 @@ void loop() {
         bool valid = false;
         int matchedIndex = -1; 
         for (int i = 0; i < totalCards; i++) { 
-          if (memcmp(rfid.uid.uidByte, users[i].uid, 4) == 0) { 
+          if (memcmp(cardUid, users[i].uid, 4) == 0) { 
             valid = true;
             matchedIndex = i; 
             break; 
@@ -2500,20 +2769,23 @@ void loop() {
         if (valid) {
           if (!isCardActive[matchedIndex]) {
             addLog("Odmowa: Zablokowana [" + String(users[matchedIndex].name) + "]");
-            playSound(SND_ACCESS_DENIED);
+            denyNotice("KARTA ZABLOKOWANA");
             for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
           } else if (!cardAllowedNow(matchedIndex)) {
             // Karta poprawna, ale poza swoim oknem czasowym — egzekwowane LOKALNIE.
             addLog("Odmowa: Poza harmonogramem [" + String(users[matchedIndex].name) + "]");
-            globalDisplayInfo = "POZA HARMONOGRAMEM";
-            playSound(SND_ACCESS_DENIED);
+            // Ta sama galaz lapie dwa powody: okno czasowe ORAZ nieustawiony zegar
+            // (cardAllowedNow() odrzuca karte z harmonogramem, gdy brak NTP - README §fail-closed).
+            // Na ekranie rozdzielamy je, bo instalator inaczej szukalby bledu w harmonogramie.
+            time_t nowChk; time(&nowChk);
+            denyNotice(nowChk < 100000000 ? "BRAK CZASU (NTP)" : "POZA HARMONOGRAMEM");
             for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
           } else {
             openDoor(String(users[matchedIndex].name));
           }
         } else {
           addLog("Odmowa: Nieznany [" + uidStr + "]");
-          playSound(SND_ACCESS_DENIED); 
+          denyNotice("NIEZNANA KARTA");
           for (int i = 0; i < 2; i++) { digitalWrite(LED_RED, HIGH); delay(120); digitalWrite(LED_RED, LOW); delay(80); }
         } 
       } 
@@ -2530,8 +2802,10 @@ void loop() {
         req_cardUpload = true;
       }
 
+#if !PANEL_RS485
       rfid.PICC_HaltA();
       rfidResetPending = true;
+#endif
       lastScanTime = millis();
     }
   }
@@ -2598,7 +2872,7 @@ void loop() {
     if (rstWarned) globalDisplayInfo = "";  // puszczono przed 3s → anuluj, wyczyść ekran
   }
 
-  if (doorOpen && millis() > accessEndTime) {
+  if (doorOpen && timeReached(accessEndTime)) {
     doorOpen = false;
     relayDeactivate();
     delay(100); 
@@ -2681,8 +2955,10 @@ void applyPendingCommands() {
     unsigned long id = strtoul(item.substring(0, colon).c_str(), NULL, 10);
     if (id == 0 || id <= cmdAckId) continue;           // już wykonana (powtórne doręczenie)
     String cmd = item.substring(colon + 1);
-    String f[6]; int nf = 0; int st = 0;
-    while (nf < 6) {
+    // 12 pol: komenda PIN-u (P) ma id, hash, aktywnosc, harmonogram, waznosc,
+    // limit uzyc i nazwe. Pozostale komendy uzywaja pierwszych kilku.
+    String f[12]; int nf = 0; int st = 0;
+    while (nf < 12) {
       int bar = cmd.indexOf('|', st);
       if (bar == -1) { f[nf++] = cmd.substring(st); break; }
       f[nf++] = cmd.substring(st, bar);
@@ -2696,6 +2972,9 @@ void applyPendingCommands() {
         // zakończeniu sesji, odłączeniu serwisu albo odebraniu mu dostępu).
         serviceCode[0] = 0;
         serviceCodeUntil = 0;
+#if PANEL_RS485
+        panel::showText("", 1);          // zdejmij kod z ekranu panelu
+#endif
         addLog("Sesja serwisowa: ekran przywrocony");
       } else {
         // Kod obecności serwisu — tylko na ekranie, nigdy do logu ani do serwera.
@@ -2703,10 +2982,51 @@ void applyPendingCommands() {
         serviceCodeUntil = millis() + 15UL * 60UL * 1000UL;
         globalAnimFrame = 0;
         playSound(SND_CLICK_CONFIRM);
+#if PANEL_RS485
+        // OSDP TEXT bez limitu czasu: kod ma wisiec do potwierdzenia albo do komendy "V|".
+        // Panel sam go nie zdejmie, bo 15-minutowy licznik jest tutaj (patrz loop()).
+        panel::showText("SERWIS: " + String(serviceCode), 0);
+        panel::beep(1, 0, 1);
+#endif
         addLog("Sesja serwisowa: kod na ekranie");
       }
     } else if (type == 'G' && nf >= 2) {
       buildDiagnosticReport(f[1].toInt());
+    } else if (type == 'P') {
+      // PIN-y: "P|<id>" kasuje rekord, dluzsza postac dodaje albo podmienia.
+      // Hash liczy SERWER, ta sama sola i liczba iteracji co centralka (naglowki
+      // X-Pin-Salt / X-Pin-Iter w pollu) — jawny PIN nigdy tu nie dociera.
+      uint32_t pid = (uint32_t)strtoul(f[1].c_str(), NULL, 10);
+      if (pid == 0) {
+        addLog("Komenda PIN bez id - pominieta");
+      } else if (nf == 2) {
+        if (pinDeleteById(pid)) addLog("Usunieto PIN #" + String(pid));
+      } else if (nf >= 11) {
+        FsPin r; memset(&r, 0, sizeof(r));
+        uint8_t hb[32]; int hl = 0;
+        if (f[2].length() == 64 && hexToBytes(f[2], hb, 32, hl) && hl == 32) {
+          r.id = pid;
+          memcpy(r.hash, hb, 32);
+          r.active     = f[3].toInt() ? 1 : 0;
+          r.schEnabled = f[4].toInt() ? 1 : 0;
+          int d = f[5].toInt();
+          r.schDays  = (uint8_t)(d < 0 ? 127 : (d > 127 ? 127 : d));
+          int a = f[6].toInt(), b = f[7].toInt();
+          r.schStart = (uint16_t)(a < 0 ? 0 : (a > 1440 ? 1440 : a));
+          r.schEnd   = (uint16_t)(b < 0 ? 0 : (b > 1440 ? 1440 : b));
+          r.expiresAt = (uint32_t)strtoul(f[8].c_str(), NULL, 10);
+          r.maxUses   = (uint16_t)f[9].toInt();
+          r.useCount  = (uint16_t)f[10].toInt();
+          if (nf >= 12) {
+            uint8_t nb[24]; int nl = 0;
+            if (hexToBytes(f[11], nb, 23, nl) && nl > 0) memcpy(r.name, nb, nl);
+          }
+          if (!r.name[0]) strncpy(r.name, "PIN", sizeof(r.name) - 1);
+          if (pinUpsert(r)) addLog("Zapisano PIN #" + String(pid) + " [" + String(r.name) + "]");
+        } else {
+          addLog("Komenda PIN #" + String(pid) + ": zly hash - pominieta");
+        }
+      }
     } else if (type == 'R') {
       addLog("Restart na zlecenie serwisu");
       restartAfterAckId = id;   // jak przy Wi-Fi: najpierw ack do serwera, potem restart
@@ -2778,7 +3098,11 @@ void buildDiagnosticReport(int mode) {
   if (mode < 0 || mode > 2) mode = 0;
 
   // Czytnik RFID: rejestr wersji 0x91/0x92 = MFRC522 odpowiada; 0x00/0xFF = brak układu/SPI.
+#if PANEL_RS485
+  byte rfidVer = 0;    // czytnik jest w panelu; jego stan raportuje sekcja "panel"
+#else
   byte rfidVer = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+#endif
 
   // Klawiatura: w spoczynku (kolumny HIGH) każdy wiersz musi czytać HIGH. LOW = zwarcie
   // do masy albo brak zewnętrznego rezystora na IO34/IO35.
@@ -2812,6 +3136,10 @@ void buildDiagnosticReport(int mode) {
   j += "\"fs_selftest\":" + String(fsSelfTestPass ? "true" : "false") + ",";
   j += "\"fs_total\":" + String(fsTotalBytes) + ",\"fs_used\":" + String(fsMounted ? LittleFS.usedBytes() : 0) + ",";
   j += "\"kp_installed\":" + String(KEYPAD_INSTALLED ? "true" : "false") + ",";
+  j += "\"cards\":" + String(totalCards) + ",\"cards_max\":" + String(HW_MAX_CARDS) + ",";
+  j += "\"pins\":" + String(pinCount()) + ",\"pins_max\":" + String(HW_MAX_PINS) + ",";
+  j += "\"pin_local\":" + String(pinCount() > 0 ? "true" : "false") + ",";
+  j += "\"panel\":" + panel::statusJson() + ",";     // stan magistrali RS-485 (albo {"enabled":false})
   j += "\"kp_rows\":[" + String(kpRows[0] ? "true" : "false") + "," + String(kpRows[1] ? "true" : "false") + "," +
        String(kpRows[2] ? "true" : "false") + "," + String(kpRows[3] ? "true" : "false") + "],";
   j += "\"tamper_installed\":" + String(TAMPER_INSTALLED ? "true" : "false") + ",";
@@ -2855,7 +3183,7 @@ void sendDiagnosticReport() {
   dc.println("Connection: close\r\n");
   dc.print(diagPayload);
   unsigned long deadline = millis() + 1500;
-  while (!dc.available() && dc.connected() && millis() < deadline) vTaskDelay(pdMS_TO_TICKS(10));
+  while (!dc.available() && dc.connected() && !timeReached(deadline)) vTaskDelay(pdMS_TO_TICKS(10));
   dc.stop();
 }
 

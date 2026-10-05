@@ -1,20 +1,34 @@
-# CTRLABLE Node — tablica partycji (ESP32, flash 4 MB) — PLIK FALLBACK
+# CTRLABLE Node — tablica partycji (ESP32, flash 4 MB).
 #
-# ⚠️ Najczęściej NIEPOTRZEBNY. Domyślny schemat `esp32:esp32:esp32` ("Default 4MB
-# with spiffs"), którego używa build arduino-cli, MA już partycję `spiffs` (~1.5 MB),
-# z której korzysta LittleFS — plus OTA i EEPROM. Czyli LittleFS wchodzi zwykłym OTA,
-# bez zmiany partycji, USB ani re-prowizjonowania.
+# TEN PLIK JEST AKTYWNY. Rdzeń ESP32 3.x kopiuje `partitions.csv` leżący obok szkicu do
+# katalogu buildu bez żadnych dodatkowych opcji (platform.txt, `recipe.hooks.prebuild.1`),
+# więc używa go tak Arduino IDE, jak i `arduino-cli` w CI. Poprzedni nagłówek tego pliku
+# twierdził, że to tylko fallback wymagający `--board-options PartitionScheme=custom` —
+# dla rdzenia 3.x to nieprawda i tablica działała przez cały czas.
 #
-# Ten plik jest tylko FALLBACKIEM, gdyby `LittleFS.begin()` się nie zamontował
-# (self-test = FAIL). Wtedy w CI (compile-ESP32.yml) dołóż do arduino-cli:
-#   --board-options PartitionScheme=custom
-# i umieść ten plik jako partitions.csv obok szkicu. Uwaga: własna partycja =
-# jednorazowy flash przez USB + re-prowizjonowanie (kasuje EEPROM).
+# Zmiana tej tablicy NIE wchodzi zwykłym OTA: aktualizacja zapisuje wyłącznie obraz
+# aplikacji do drugiego slotu, a tablica leży pod 0x8000 i zostaje stara. Nowy układ
+# wymaga jednorazowego wgrania przez USB.
+#
+# Co przeżywa takie wgranie: `nvs` zostaje pod tym samym adresem i w tym samym rozmiarze,
+# więc klucz urządzenia, hasło sieci CTRLABLE_SETUP oraz konfiguracja spod EEPROM.h
+# (SSID, hasło, e-mail, hasło lokalnego API, installedReleaseId) są nienaruszone.
+# Przesuwa się natomiast system plików, więc **karty w `/cards.db` trzeba dodać ponownie**.
+#
+# Względem poprzedniego układu (app 0x180000, eeprom 0x99, littlefs 0xEF000):
+#   * doszła partycja `coredump`. Bez niej `esp_core_dump_image_check()` zawsze zwracał
+#     błąd, więc zrzuty po panice i watchdogu nigdy nie powstawały, mimo że firmware je
+#     odczytuje i wysyła (README §5.13, `bootDiagnostics()`),
+#   * zniknęła partycja `eeprom` (subtyp 0x99). W rdzeniu 3.x `EEPROM.h` jest emulowane
+#     na NVS (`EEPROM.cpp`: „Uses a nvs byte array to emulate EEPROM”) i tej partycji
+#     nie dotyka — była pozostałością po rdzeniu 2.x,
+#   * sloty aplikacji rosną 1536 KB → 1792 KB kosztem systemu plików, który miał 956 KB
+#     przy realnym zapotrzebowaniu ~32 KB (200 kart × 40 B + 200 PIN-ów × 73 B).
 #
 # Name,     Type, SubType,  Offset,   Size,     Flags
 nvs,        data, nvs,      0x9000,   0x5000,
 otadata,    data, ota,      0xe000,   0x2000,
-app0,       app,  ota_0,    0x10000,  0x180000,
-app1,       app,  ota_1,    0x190000, 0x180000,
-eeprom,     data, 0x99,     0x310000, 0x1000,
-littlefs,   data, spiffs,   0x311000, 0xEF000,
+app0,       app,  ota_0,    0x10000,  0x1C0000,
+app1,       app,  ota_1,    0x1D0000, 0x1C0000,
+coredump,   data, coredump, 0x390000, 0x10000,
+littlefs,   data, spiffs,   0x3A0000, 0x60000,
