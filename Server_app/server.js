@@ -3546,9 +3546,14 @@ const TIER_PRESETS = {
   // poziom był dla nich rozczarowaniem od pierwszego dnia (decyzja 2026-09-09,
   // LICENSING.md §3.1). Multi-admin jako upsell działa dopiero od 3. osoby.
   free:       { max_cards: 2,   max_pins: 2,   max_admins: 2,  max_devices: null, log_retention_days: 15, guest_codes_enabled: false, pin_changes_per_month: 4 },
-  silver:     { max_cards: 10,  max_pins: 10,  max_admins: 3,  max_devices: null, log_retention_days: 45, guest_codes_enabled: true,  pin_changes_per_month: null },
-  gold:       { max_cards: 50,  max_pins: 50,  max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
-  individual: { max_cards: 200, max_pins: 200, max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
+  // Drabinka 50 / 100 / 500 zatwierdzona 2026-10-05, po podniesieniu sufitu sprzetowego
+  // (200 -> 500 kart i PIN-ow, firmware v3.3.0) i po uruchomieniu PIN-ow offline.
+  // Stara (10/50/200) powstala przy sufcie 200 i przy zalozeniu, ze PIN-y offline nie
+  // dzialaja. Swiadomie NIE rownamy do konkurencji liczba poswiadczen — uzasadnienie
+  // w LICENSING.md par. 3.3.
+  silver:     { max_cards: 50,  max_pins: 50,  max_admins: 3,  max_devices: null, log_retention_days: 45, guest_codes_enabled: true,  pin_changes_per_month: null },
+  gold:       { max_cards: 100, max_pins: 100, max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
+  individual: { max_cards: 500, max_pins: 500, max_admins: 99, max_devices: null, log_retention_days: 90, guest_codes_enabled: true,  pin_changes_per_month: null },
 };
 
 // Odczyt efektywnych uprawnień konta. Wygasła licencja (license_valid_until w

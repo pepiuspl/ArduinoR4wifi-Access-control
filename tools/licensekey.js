@@ -31,8 +31,13 @@ const PERIODS = { month: 30, quarter: 90, halfyear: 182, year: 365, '2y': 730, '
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // bez mylących 0/O/1/I/L
 const PREFIX = { silver: 'SLVR', gold: 'GOLD', individual: 'INDV' };
 // Te same poziomy co online (LICENSING.md §3); offline jednorazowo i taniej — brak kosztu serwera.
-const OFFLINE_TIERS = { silver: { cards: 10, pins: 10, code: 1 }, gold: { cards: 50, pins: 50, code: 2 }, individual: { cards: null, pins: null, code: 3 } };
-const HW_MAX_CARDS = 200;
+const OFFLINE_TIERS = { silver: { cards: 50, pins: 50, code: 1 }, gold: { cards: 100, pins: 100, code: 2 }, individual: { cards: null, pins: null, code: 3 } };
+// Sufit sprzetowy centralki to 500 (firmware v3.3.0), ale TOKEN OFFLINE nie umie
+// tego wyrazic: payload trzyma liczbe kart i PIN-ow w POJEDYNCZYCH bajtach (p[7], p[8]),
+// wiec maksimum wynosi 255. Gold (200) sie miesci, Indywidualna powyzej 255 wymagalaby
+// nowej wersji formatu tokenu. Tryb offline jest usypiony (decyzja 14.09.2026), wiec
+// zostawiamy to jako znany limit, a nie jako blad.
+const OFFLINE_TOKEN_MAX = 255;
 
 function genRaw(prefix) {
   let s = prefix;
@@ -69,8 +74,8 @@ function offlineToken() {
     const [c, p] = String(custom || '').split(',').map(x => parseInt(x, 10));
     cards = c; pins = Number.isFinite(p) ? p : c;
   }
-  if (!Number.isFinite(cards) || cards < 1 || cards > HW_MAX_CARDS || !Number.isFinite(pins) || pins < 0 || pins > 255) {
-    console.error(`Zły limit (karty 1–${HW_MAX_CARDS}, PIN-y 0–255).`); process.exit(1);
+  if (!Number.isFinite(cards) || cards < 1 || cards > OFFLINE_TOKEN_MAX || !Number.isFinite(pins) || pins < 0 || pins > OFFLINE_TOKEN_MAX) {
+    console.error(`Zły limit (karty 1–${OFFLINE_TOKEN_MAX}, PIN-y 0–${OFFLINE_TOKEN_MAX}; format tokenu offline trzyma bajt na pole).`); process.exit(1);
   }
   const keyFile = process.env.LICENSE_SIGNING_KEY_FILE || '/opt/smartlock-server/license_private.pem';
   if (!fs.existsSync(keyFile)) { console.error(`Brak klucza prywatnego licencji: ${keyFile} (ustaw LICENSE_SIGNING_KEY_FILE).`); process.exit(1); }
