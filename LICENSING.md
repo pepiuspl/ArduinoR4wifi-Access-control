@@ -51,13 +51,13 @@ Wszystkie poświadczenia trzymane są **lokalnie** (LittleFS) i weryfikowane **l
 
 | Parametr | Wartość | Uwagi |
 |---|---|---|
-| **Karty — sufit sprzętowy** | **500** *(prow.)* | maks. techniczny per centralka (bezpiecznik, niezależny od licencji) |
-| **PIN‑y — sufit sprzętowy** | **500** *(prow.)* | jw. |
+| **Karty — sufit sprzętowy** | **500** | maks. techniczny per centralka (bezpiecznik, niezależny od licencji) |
+| **PIN‑y — sufit sprzętowy** | **500** | jw. |
 | **Działanie offline** | do limitu pakietu | zsynchronizowane poświadczenia działają przy zaniku łącza |
 | **Wpisy logu lokalnego** | dziesiątki tysięcy | append w LittleFS, spływają na serwer po odzyskaniu łącza |
 | **Weryfikacja** | lokalna, ~natychmiast | karty i PIN‑y (hash w urządzeniu) |
 
-Rozmiary rekordów (orientacyjnie): karta ~40 B, PIN ~73 B (hash + nazwa + harmonogram + wygasanie/limit użyć).
+Rozmiary rekordów: karta 40 B, PIN **76 B** (`static_assert` w `pin_store.cpp` pilnuje, żeby zmiana struktury nie unieważniła po cichu całego `/pins.db`).
 Przy 500+500 to ~56 KB w LittleFS i RAM — komfortowo. Sufit można podnieść po bench‑teście.
 
 Sufit sprzętowy jest **bezpiecznikiem**, nie produktem — chroni centralkę przed przeciążeniem RAM/flash/skanu, niezależnie od tego, co pozwala licencja.
@@ -71,9 +71,28 @@ Pakiety dotyczą **trybu online** (konto + serwer). Tryb **offline‑standalone*
 | Pakiet | Karty | PIN‑y | Retencja logów | Kody gościnne | Zmiany PIN / mies. | Admini | Centralki |
 |---|---|---|---|---|---|---|---|
 | **Bez licencji** (darmowy) | 2 | 2 | 15 dni | ❌ | **limit** (np. 4) *(prow.)* | **2** (właściciel + 1) | 1 |
-| **Silver** | 10 | 10 | 45 dni | ✅ | bez limitu | 3 *(prow.)* | 2 *(prow.)* |
-| **Gold** | 50 | 50 | 90 dni | ✅ | bez limitu | bez limitu | bez limitu |
-| **Indywidualna** | dowolnie (≤ sufit) | dowolnie (≤ sufit) | wg umowy | ✅ | bez limitu | wg umowy | wg umowy |
+| **Silver** | **50** | **50** | 45 dni | ✅ | bez limitu | 3 *(prow.)* | 2 *(prow.)* |
+| **Gold** | **100** | **100** | 90 dni | ✅ | bez limitu | bez limitu | bez limitu |
+| **Indywidualna** | dowolnie (≤ 500) | dowolnie (≤ 500) | wg umowy | ✅ | bez limitu | wg umowy | wg umowy |
+
+> **Ograniczenie formatu tokenu offline:** payload trzyma liczbę kart i PIN-ów w **pojedynczych bajtach**, więc licencja offline nie wyrazi wartości powyżej **255**. Silver (50) i Gold (100) się mieszczą, Indywidualna powyżej 255 wymagałaby nowej wersji formatu. Tryb offline jest uśpiony (§3.5), więc to znany limit, nie błąd.
+
+> **Drabinka zatwierdzona 05.10.2026** (decyzja właściciela). Poprzednia (Silver 10/10, Gold 50/50,
+> Indywidualna 200) powstała przy sufcie sprzętowym 200 i przy założeniu, że PIN‑y offline nie działają.
+> Dziś sufit to 500, a PIN‑y działają lokalnie od v3.3.0.
+>
+> **Silver 50** obsługuje dom, biuro do kilkunastu osób i najem krótkoterminowy — cały segment, który i tak
+> nie dobije do limitu. Dzięki temu limit przestaje być powodem do frustracji, a zostaje jako wyróżnik pakietu.
+> **Gold 100** pokrywa biuro na kilkoro drzwi z zapasem; powyżej tego idzie się do Indywidualnej, która sięga
+> sufitu sprzętowego.
+>
+> Świadomie **nie licytujemy się liczbą** z TT Lock (200 kart / 200 PIN‑ów / 200 odcisków bez żadnego pakietu).
+> Tej licytacji nie da się wygrać — u nich to też jest tylko stała w kodzie, więc jutro wpiszą 1000. Argument
+> leży gdzie indziej: szyfrowana magistrala do czytnika, podpisany firmware, decyzja o otwarciu podejmowana
+> lokalnie (także PIN‑em) i zero biometrii do wytłumaczenia przed inspektorem ochrony danych (§E11 w
+> `WYMOGI_PRAWNE_PRZED_SPRZEDAZA.md`). Liczba poświadczeń ma **nie przeszkadzać**, a nie wygrywać tabelkę.
+>
+> Upsell zostaje tam, gdzie i tak jest mocniejszy: retencja logów, kody gościnne, liczba adminów i centralek.
 
 Pakiet to nie tylko liczba użytkowników — pakietuje też **retencję logów, kody gościnne, częstotliwość zmian PIN, adminów i liczbę centralek**. To mocniejszy upsell niż sam licznik.
 
@@ -104,7 +123,7 @@ Licencje mają być **tanie względem sprzętu** — symboliczna opłata za utrz
 
 **Decyzja 14.09.2026:** licencja offline **nie jest sprzedawana**. Tryb offline to wyłącznie poziom darmowy (2 karty, bez PIN‑ów); klient, który potrzebuje więcej, przechodzi na tryb online z pakietem. Mechanizm opisany poniżej (token `OFL1`, `tools/licensekey.js offline`, karta w aplikacji) **pozostaje w kodzie w stanie uśpionym** — nie usuwać, ale też nie oferować. Opis historyczny (11.09.2026):
 
-Klient, który chce centralkę **bez konta i bez chmury**, ale z więcej niż 2 kartami, kupuje **licencję offline**: Silver (10 kart / 10 PIN‑ów), Gold (50 / 50) albo Indywidualną (dowolnie, ≤ sufit sprzętowy 200). Cena **jednorazowa i niższa niż roczny pakiet online** — nie ma kosztu serwera, łącza ani retencji danych. Kwoty: decyzja biznesowa (§7).
+Klient, który chce centralkę **bez konta i bez chmury**, ale z więcej niż 2 kartami, kupuje **licencję offline**: Silver (50 kart / 50 PIN‑ów), Gold (100 / 100) albo Indywidualną (dowolnie, ≤ sufit sprzętowy 500). Cena **jednorazowa i niższa niż roczny pakiet online** — nie ma kosztu serwera, łącza ani retencji danych. Kwoty: decyzja biznesowa (§7).
 
 **Jak to działa technicznie** (README §5.12): licencja to **podpisany token** (`OFL1.…`, ECDSA P‑256) wystawiany przez producenta osobnym kluczem licencyjnym i **związany z MAC‑em konkretnej centralki**. Firmware sprawdza podpis kluczem publicznym wszytym w oprogramowaniu — w centralce nie ma żadnego sekretu, więc tokenu nie da się ani podrobić, ani przenieść na inną sztukę. Zapis w NVS: **przeżywa reset fabryczny** (licencja jest własnością sprzętu, jak klucz urządzenia). **Bezterminowa** — centralka offline nie ma zaufanego zegara, więc terminu nie dałoby się uczciwie egzekwować, a to pasuje do brandu „płacisz raz".
 
@@ -114,7 +133,7 @@ Klient, który chce centralkę **bez konta i bez chmury**, ale z więcej niż 2 
 
 **Limity bez licencji egzekwuje firmware:** bez tokenu centralka offline przyjmie 2 karty (`OFFLINE_FREE_CARDS`); ponad limit odmawia nauki karty („LIMIT KART: 2" na ekranie). Karty zapisane wcześniej ponad limit działają dalej — w trybie offline blokujemy tylko dodawanie, bo firmware nie zna wyboru klienta (online działa inaczej: §3.4 dezaktywuje nadmiar wg wyboru właściciela). *Do 11.09.2026 ten limit istniał tylko w dokumentacji — firmware przyjmował 200 kart bez licencji.*
 
-**PIN‑y offline:** token niesie już liczbę PIN‑ów, ale PIN‑y w trybie offline nie działają, dopóki nie powstanie lokalna weryfikacja (README §9). Do tego czasu „Silver offline" oznacza 10 kart. Klienci nie będą potrzebować nowego tokenu, gdy PIN‑y offline wejdą.
+**PIN‑y offline:** działają od **v3.3.0** (29.09.2026) — hashe PBKDF2 w `/pins.db`, weryfikacja w centralce (README §5.4b). Wcześniejszy zapis, że „Silver offline" oznacza same karty, jest nieaktualny: token niósł liczbę PIN‑ów od początku i teraz ma wreszcie pokrycie w firmware. Warunek: serwer musi wysyłać komendę `P` z hashem — dopóki tego nie robi, PIN‑y działają wyłącznie przez sieć.
 
 **Klucz licencyjny** (`license_signing_private.pem`) jest osobny od klucza podpisującego firmware — rotujesz je niezależnie; przechowywanie: README §7.14.
 
@@ -142,9 +161,9 @@ Technicznie: przebieg `enforceLimitsForAllAccounts` działa przy starcie serwera
 
 - **Bez licencji, mały sklep, 2 osoby:** 2 karty + 2 PIN‑y, dwoje właścicieli z aplikacją (2 adminy), logi 15 dni, brak kodów gościnnych, ręczne zmiany PIN limitowane. Dostaje łatki bezpieczeństwa, ale nie nowe funkcje — i nie płaci nigdy nic ponad zestaw.
 - **Airbnb, „Bez licencji":** chce rotować kody dla gości → brak kodów gościnnych + limit zmian PIN/mies. wymusza wykup **Silver** (kody gościnne z wygasaniem). To celowana konwersja.
-- **Silver, 1 drzwi, 8 osób:** wszyscy zsynchronizowani do LittleFS, weryfikacja lokalna, logi 45 dni. Dodanie 11. karty → serwer odmawia (limit 10) i proponuje Gold.
-- **Gold, 3 drzwi, 40 osób:** licencja per konto = 50, mieści się. Każda centralka trzyma lokalnie użytkowników z dostępem do niej (≤ sufit sprzętowy 500).
-- **Indywidualna, 120 osób:** `max_cards=120, max_pins=120` na koncie; poniżej sufitu 500.
+- **Silver, 1 drzwi, 8 osób:** wszyscy zsynchronizowani do LittleFS, weryfikacja lokalna, logi 45 dni. Limit 50 nie jest tu tematem — do Golda popycha retencja logów i druga centralka, nie licznik kart.
+- **Gold, 3 drzwi, 40 osób:** licencja per konto = 100, mieści się z zapasem. Każda centralka trzyma lokalnie użytkowników z dostępem do niej (≤ sufit sprzętowy 500).
+- **Indywidualna, 300 osób:** `max_cards=300, max_pins=300` na koncie; poniżej sufitu 500.
 
 ---
 
@@ -174,7 +193,7 @@ Klient kupuje **plan na konto**, nie na sztukę sprzętu. Skutki:
 
 **Egzekwowanie (stan faktyczny):**
 - **Serwer**: `/api/toggle_learn` (blokuje wejście w Uczenie po wyczerpaniu `max_cards`), `/api/keypad/add` (`max_pins`, brama `guest_codes_enabled`, licznik `pin_changes_per_month`), `/api/devices/invite` (`max_admins` = współadmini + zaproszenia + właściciel). Odrzucenie to **403** z `{error, limit, used, tier, feature}`.
-- **Centralka**: sufit sprzętowy `HW_MAX_CARDS = 200` kart w LittleFS (`/cards.db`), w trybie awaryjnym EEPROM 10 — twardy bezpiecznik niezależny od serwera.
+- **Centralka**: sufit sprzętowy `HW_MAX_CARDS = 500` kart (`/cards.db`) i `HW_MAX_PINS = 500` (`/pins.db`), w trybie awaryjnym EEPROM 10 kart — twardy bezpiecznik niezależny od serwera.
 - **Aplikacja**: limity przychodzą w **każdej** odpowiedzi `/api/data` (pole `entitlements`), więc moduły są **wyszarzane zawczasu** — przy komplecie kart/PIN-ów przycisk jest nieaktywny z wyjaśnieniem i skrótem do pakietów, a kody gościnne mają kłódkę i informację „dostępne od Silver". Klient nie dowiaduje się o limicie dopiero po kliknięciu.
 
 ### 6.0 Retencja danych — DWIE niezależne osie (ważne dla RODO i dla polityki prywatności)
