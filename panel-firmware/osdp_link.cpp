@@ -207,4 +207,22 @@ uint32_t lastActivityMs() { return last_rx; }
 int address() { return pd_addr; }
 uint32_t baud() { return pd_baud; }
 
+// Własna sesja NVS, żeby dało się wołać przed begin() — tam klucz jest już
+// czytany i decyduje o OSDP_FLAG_ENFORCE_SECURE vs OSDP_FLAG_INSTALL_MODE.
+bool hasKey() {
+  nvs.begin("ctrlable", true);
+  bool k = nvs.getBytesLength("scbk") == 16;
+  nvs.end();
+  return k;
+}
+
+bool forgetKey() {
+  nvs.begin("ctrlable", false);
+  bool existed = nvs.getBytesLength("scbk") == 16;
+  if (existed) nvs.remove("scbk");
+  nvs.end();
+  have_scbk = false;
+  return existed;
+}
+
 }  // namespace link485

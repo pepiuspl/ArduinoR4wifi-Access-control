@@ -38,6 +38,46 @@ void handleKey(char k) {
   link485::sendKey(k);
 }
 
+// --- Awaryjne zerowanie parowania ---------------------------------------
+// Panel trzyma klucz Secure Channel w NVS na trwałe. Gdy centralka zostanie
+// wymieniona albo odtworzona z kopii, jej klucz przestaje pasować i łącze
+// nigdy nie wstaje: panel żąda szyfrowania starym kluczem, centralka proponuje
+// instalacyjny. Bajty latają po magistrali, ale PD nie wchodzi w ONLINE —
+// objaw mylący, bo wygląda jak usterka okablowania.
+//
+// Bez tej furtki jedynym wyjściem jest zdjęcie panelu ze ściany i wgranie
+// firmware'u przez pady SV1, z lutownicą, na drabinie.
+//
+// Skasowanie klucza NIE otwiera drzwi: rygiel jest wyłącznie w centralce,
+// więc ktoś obcy osiąga tym najwyżej odparowanie panelu — czyli dokładnie to
+// samo, co przecięciem kabla. Dlatego wystarczy sekwencja w oknie startowym.
+void serviceUnpairWindow() {
+  if (!link485::hasKey()) return;        // niesparowany — nie ma czego kasować
+
+  const char *seq = SERVICE_UNPAIR_SEQUENCE;
+  uint8_t matched = 0;
+  uint32_t start = millis();
+
+  ui::showText("SERWIS?", 0);
+  while (millis() - start < SERVICE_UNPAIR_WINDOW_MS) {
+    io::tick();
+    ui::tick();                          // brzęczyk i ekran są nieblokujące
+    char k = io::takeKey();
+    if (!k) continue;
+    ui::beep(30, 0, 1);
+    if (k == seq[matched]) matched++;
+    else                   matched = (k == seq[0]) ? 1 : 0;
+    if (seq[matched] == 0) {             // cała sekwencja trafiona
+      link485::forgetKey();
+      Serial.println("[SERWIS] Klucz Secure Channel skasowany — install mode.");
+      ui::showText("KLUCZ SKASOWANY", 3);
+      ui::beep(120, 80, 3);
+      return;
+    }
+  }
+  ui::clearText();
+}
+
 }  // namespace
 
 void setup() {
@@ -47,6 +87,7 @@ void setup() {
 
   ui::begin();          // inicjuje też I2C (używa go ekspander)
   io::begin();
+  serviceUnpairWindow();   // MUSI być przed begin() — ono czyta klucz z NVS
   link485::begin();
 
   Serial.printf("OSDP PD addr=%d baud=%lu | OLED %s | czytnik %s | ekspander %s\n",

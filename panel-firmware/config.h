@@ -59,6 +59,13 @@
 #define OSDP_PD_MODEL            1
 #define OSDP_PD_VERSION          1
 
+// Awaryjne zerowanie parowania. Sekwencja wpisana na klawiaturze w ciągu
+// SERVICE_UNPAIR_WINDOW_MS od startu kasuje klucz Secure Channel z NVS.
+// Bez tej furtki wymiana centralki wymaga zdjęcia panelu i wgrania firmware'u
+// przez pady SV1 — patrz README panelu, sekcja "Zerowanie parowania".
+#define SERVICE_UNPAIR_SEQUENCE   "*#*#"
+#define SERVICE_UNPAIR_WINDOW_MS  5000
+
 // --- czasy (wszystko na millis(), zero delay() w pętli) -------------------
 #define KEYPAD_SCAN_MS      25     // skan matrycy
 #define KEYPAD_DEBOUNCE_MS  40

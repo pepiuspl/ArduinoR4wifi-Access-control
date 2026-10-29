@@ -45,13 +45,30 @@ jobs:
         arduino-cli lib install "MFRC522"
         arduino-cli lib install "NTPClient"
         arduino-cli lib install "ArduinoOTA"
+        # LibOSDP NIE jest w Arduino Library Manager — instaluje sie ja z gita, a to
+        # arduino-cli dopuszcza dopiero po wlaczeniu unsafe install. Bez niej
+        # panel_cp.cpp nie skompiluje <osdp.h>, a wariant rev 0.3 jest domyslny
+        # od v3.2.7 — czyli bez tego kroku build centralki po prostu nie przechodzi.
+        arduino-cli config set library.enable_unsafe_install true
+        arduino-cli lib install --git-url https://github.com/goToMain/libosdp.git
+        # Zabezpieczenie przed cicha regresja: jesli biblioteki nie ma, przerwij
+        # TERAZ z czytelnym komunikatem, zamiast wywalac sie w srodku kompilacji.
+        arduino-cli lib list | grep -qi 'libosdp' || {
+          echo "❌ LibOSDP nie zainstalowala sie — rev 0.3 nie zbuduje sie. Przerywam."
+          exit 1
+        }
 
     # 5. Budowanie środowiska i kompilacja kodu bezpośrednio pod ESP32
     - name: Compile Firmware to Binary
       run: |
-        INO_FILE=$(find . -name "*.ino" | head -n 1)
-        if [ -z "$INO_FILE" ]; then
-          echo "❌ ERROR: No .ino file found anywhere in this repository layout!"
+        # Szkic podajemy WPROST. Wczesniej bylo `find . -name "*.ino" | head -n 1`,
+        # co dzialalo tylko dopoki w repo byl jeden szkic. Od czasu dolozenia
+        # panel-firmware/panel-firmware.ino sa dwa, a kolejnosc `find` zalezy od
+        # systemu plikow — jeden pechowy przebieg i CI zbudowaloby firmware PANELU,
+        # opublikowalo je jako wydanie centralki i rozeslalo OTA.
+        INO_FILE="./access_control.ino"
+        if [ ! -f "$INO_FILE" ]; then
+          echo "❌ ERROR: brak $INO_FILE w repozytorium!"
           exit 1
         fi
         

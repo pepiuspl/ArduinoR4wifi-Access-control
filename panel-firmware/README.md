@@ -11,7 +11,10 @@ a nie dostęp do zamka — to jest sedno przejścia z 19-żyłowego kabla na RS-
 ## Stan
 
 - **Kompiluje się** (ESP32-C3, rdzeń Arduino 3.x): RAM 4,2%, Flash 32,0%.
-- **Nie był uruchamiany na sprzęcie** — płytka nie jest jeszcze wyprodukowana.
+- **Płytka wyprodukowana** (29.10.2026). Łączność OSDP z centralką **jeszcze nie działa** —
+  diagnostyka w toku; na czas prób centralka miała wgrany firmware sprzed poprawki
+  z 28.09.2026, który sterował IO4/IO16/IO17 jako RST czytnika i kolumnami klawiatury,
+  czyli zagłuszał własną magistralę.
 - Nietestowane w praktyce: parowanie Secure Channel z centralką, zachowanie przy
   zerwanej magistrali, czasy odpowiedzi PD przy 115200 bps.
 
@@ -100,6 +103,43 @@ w install mode i dostaje ten sam klucz automatycznie.
 > Bez tego klucz w NVS da się odczytać po wymontowaniu układu. Włączenie tego
 > to osobna robota (eFuse, podpisywanie obrazów) i osobna decyzja — dopóki jej
 > nie ma, klucz chroni transmisję, ale nie chroni sam siebie.
+
+## Zerowanie parowania (sekwencja serwisowa)
+
+Klucz w NVS jest trwały, a obie strony wybierają tryb **niezależnie od siebie**:
+panel po obecności `scbk`, centralka po fladze `osdp_keyed`. Gdy te stany się
+rozjadą — centralka wymieniona, odtworzona z kopii albo przegrana z *Erase All
+Flash* — panel żąda szyfrowania starym kluczem, a centralka proponuje
+instalacyjny. **Łącze nigdy nie wstanie.**
+
+Objaw jest mylący: bajty lecą po magistrali, centralka melduje `Panel odpowiada`
+(bo to tylko licznik surowych bajtów), ale LibOSDP powtarza `PD is not online`.
+Wygląda jak usterka okablowania, a nie jest.
+
+**Rozwiązanie:** w ciągu **5 sekund od startu** panelu wpisz na klawiaturze
+sekwencję **`*#*#`**. Panel kasuje `scbk` i wraca do install mode, więc kolejna
+centralka sparuje się z nim normalnie.
+
+Co widzisz:
+
+| moment | ekran | brzęczyk |
+|---|---|---|
+| okno otwarte (tylko gdy panel jest sparowany) | `SERWIS?` | — |
+| każdy klawisz | — | krótkie kliknięcie |
+| sekwencja trafiona | `KLUCZ SKASOWANY` | 3 × 120 ms |
+| okno minęło | ekran spoczynkowy | — |
+
+Okno **nie otwiera się wcale**, gdy panel nie ma klucza — wtedy nie ma czego
+kasować i start przebiega normalnie.
+
+Sekwencję i długość okna zmienisz w `config.h`
+(`SERVICE_UNPAIR_SEQUENCE`, `SERVICE_UNPAIR_WINDOW_MS`).
+
+> **Dlaczego to nie osłabia bezpieczeństwa.** Skasowanie klucza nie otwiera
+> drzwi — rygiel jest wyłącznie w centralce. Ktoś obcy osiąga tym najwyżej
+> odparowanie panelu, czyli dokładnie tyle samo, co przecięciem kabla. A kto ma
+> dostęp do padów `SV1`, i tak wymaże całą pamięć. W zamian serwisant nie musi
+> zdejmować panelu ze ściany i lutować się do programatora na drabinie.
 
 ## Konfiguracja bez rekompilacji
 

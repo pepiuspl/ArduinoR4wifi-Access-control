@@ -2533,7 +2533,7 @@ void loop() {
 #if PANEL_RS485
   // Protokół obsługujemy PRZED resztą pętli — LibOSDP musi dostać ramki
   // w oknie odpowiedzi PD, inaczej sesja się rozjeżdża.
-  CRUMB(21); panel::tick();
+  CRUMB(31); panel::tick();   // wlasna faza — wczesniej dzielil 21 z applyPendingCommands()
   {
     static bool panelWasOnline = false;
     static uint32_t panelDownSince = 0;
@@ -3107,11 +3107,16 @@ void buildDiagnosticReport(int mode) {
   // Klawiatura: w spoczynku (kolumny HIGH) każdy wiersz musi czytać HIGH. LOW = zwarcie
   // do masy albo brak zewnętrznego rezystora na IO34/IO35.
   bool kpRows[4] = { true, true, true, true };
+#if !PANEL_RS485
+  // Na rev 0.3 KP_COLS to IO16/IO17, czyli RX i TX magistrali — autotest nie ma
+  // tu czego skanowac, a zapis po tych pinach jest o jeden pinMode() od zwarcia
+  // wyjscia RO nadajnika. Reszta bloku (odczyt RFID) ma straznika juz wyzej.
   if (KEYPAD_INSTALLED) {
     for (int c = 0; c < 3; c++) digitalWrite(KP_COLS[c], HIGH);
     delayMicroseconds(100);
     for (int r = 0; r < 4; r++) kpRows[r] = (digitalRead(KP_ROWS[r]) == HIGH);
   }
+#endif
 
   int relayResult = -1;
   if (mode == 2) {

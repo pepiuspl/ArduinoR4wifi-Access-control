@@ -20,6 +20,7 @@ bool keyset_sent = false;
 uint32_t last_rx = 0;
 bool link_up = false;
 uint32_t sc_since = 0;
+uint32_t keyset_at = 0;        // kiedy wyslano KEYSET (0 = nie wyslano)
 
 // --- kolejki zdarzeń (producent = callback OSDP, konsument = loop()) ------
 // Callback OSDP jest wołany z tego samego zadania co osdp_cp_refresh(),
@@ -104,12 +105,14 @@ void sendKeyset() {
   cmd.keyset.length = 16;
   memcpy(cmd.keyset.data, scbk, 16);
   if (osdp_cp_submit_command(cp_ctx, 0, &cmd) == 0) {
+    // submit == 0 znaczy tylko "komenda trafila do kolejki", NIE "panel ja wykonal".
+    // Utrwalenie osdp_keyed juz teraz powodowalo zakleszczenie: przy zerwaniu lacza
+    // centralka uznawala sie za sparowana, panel zostawal bez klucza i obie strony
+    // na zawsze zadaly innego trybu. Flage zapisujemy dopiero, gdy panel potwierdzi
+    // ja dzialajacym kanalem (patrz confirmKeyset() wolane z tick()).
     keyset_sent = true;
-    nvs.begin("ctrlable", false);
-    nvs.putBool("osdp_keyed", true);
-    nvs.end();
-    pd_keyed = true;
-    Serial.println("[OSDP] Klucz Secure Channel wgrany do panelu (KEYSET).");
+    keyset_at = millis();
+    Serial.println("[OSDP] KEYSET wyslany — czekam na potwierdzenie panelu.");
   }
 }
 
@@ -169,6 +172,24 @@ void tick() {
     if (!sc_since) sc_since = millis();
     if (millis() - sc_since > 1000) sendKeyset();   // chwila na ustabilizowanie sesji
   }
+
+  // Potwierdzenie parowania. Flage utrwalamy dopiero, gdy po wyslaniu KEYSET panel
+  // dalej z nami rozmawia przez PANEL_KEYSET_CONFIRM_MS — wtedy wiadomo, ze komenda
+  // nie zginela razem z zerwanym laczem. Jesli lacze padnie wczesniej, kasujemy
+  // keyset_sent i probujemy od nowa przy nastepnej sesji.
+  if (keyset_sent && !pd_keyed) {
+    if (!online()) {
+      keyset_sent = false; keyset_at = 0; sc_since = 0;
+      Serial.println("[OSDP] Lacze padlo przed potwierdzeniem KEYSET — parowanie od nowa.");
+    } else if (millis() - keyset_at > PANEL_KEYSET_CONFIRM_MS) {
+      nvs.begin("ctrlable", false);
+      nvs.putBytes("osdp_scbk", scbk, 16);
+      nvs.putBool("osdp_keyed", true);
+      nvs.end();
+      pd_keyed = true;
+      Serial.println("[OSDP] Panel potwierdzil klucz — parowanie zapisane.");
+    }
+  }
 }
 
 bool takeCard(uint8_t *uid, uint8_t *len) {
@@ -195,7 +216,9 @@ bool tamperChanged() {
 }
 
 void showText(const String &txt, uint8_t seconds) {
-  if (!cp_ctx) return;
+  // Kolejkowanie komend do panelu, ktory nie jest ONLINE, zapelnia kolejke
+  // LibOSDP i zasypuje log bledami "PD is not online" z osdp_cp.c.
+  if (!cp_ctx || !online()) return;
   struct osdp_cmd cmd;
   memset(&cmd, 0, sizeof(cmd));
   cmd.id = OSDP_CMD_TEXT;
@@ -213,7 +236,7 @@ void showText(const String &txt, uint8_t seconds) {
 }
 
 void beep(uint8_t on_100ms, uint8_t off_100ms, uint8_t count) {
-  if (!cp_ctx) return;
+  if (!cp_ctx || !online()) return;   // jak wyzej
   struct osdp_cmd cmd;
   memset(&cmd, 0, sizeof(cmd));
   cmd.id = OSDP_CMD_BUZZER;
@@ -225,7 +248,18 @@ void beep(uint8_t on_100ms, uint8_t off_100ms, uint8_t count) {
   osdp_cp_submit_command(cp_ctx, 0, &cmd);
 }
 
-bool online() { return link_up; }
+// UWAGA: link_up mowi tylko tyle, ze z magistrali przyszly JAKIEKOLWIEK bajty —
+// szum tez go odswieza. O tym, czy panel naprawde odpowiada na odpytywanie,
+// wie wylacznie LibOSDP. Mylenie tych dwoch rzeczy kosztowalo cala sesje
+// diagnostyki ("Panel odpowiada" przy martwym panelu).
+bool online() {
+  if (!cp_ctx) return false;
+  uint8_t mask = 0;
+  osdp_get_status_mask(cp_ctx, &mask);
+  return mask & 0x01;
+}
+
+bool busActivity() { return link_up; }   // surowy ruch na magistrali — tylko do diagnostyki
 
 bool secureChannel() {
   if (!cp_ctx) return false;
@@ -240,6 +274,7 @@ uint32_t lastSeenMs() { return last_rx; }
 String statusJson() {
   String j = "{";
   j += "\"online\":" + String(online() ? "true" : "false") + ",";
+  j += "\"bus_activity\":" + String(busActivity() ? "true" : "false") + ",";
   j += "\"secure\":" + String(secureChannel() ? "true" : "false") + ",";
   j += "\"keyed\":" + String(provisioned() ? "true" : "false") + ",";
   j += "\"tamper\":" + String(tamperOpen() ? "true" : "false") + ",";
@@ -262,6 +297,7 @@ bool tamperChanged() { return false; }
 void showText(const String &, uint8_t) {}
 void beep(uint8_t, uint8_t, uint8_t) {}
 bool online() { return false; }
+bool busActivity() { return false; }
 bool secureChannel() { return false; }
 bool provisioned() { return false; }
 uint32_t lastSeenMs() { return 0; }

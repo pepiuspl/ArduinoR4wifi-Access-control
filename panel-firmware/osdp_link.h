@@ -21,4 +21,9 @@ uint32_t lastActivityMs();
 int  address();
 uint32_t baud();
 
+// --- serwis ---------------------------------------------------------------
+// Obie działają także PRZED begin() — otwierają własną sesję NVS.
+bool hasKey();      // czy panel ma zapisany klucz Secure Channel
+bool forgetKey();   // kasuje klucz; true gdy było co kasować
+
 }  // namespace link485

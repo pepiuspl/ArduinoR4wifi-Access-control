@@ -39,6 +39,11 @@
 #ifndef PANEL_BAUD
 #define PANEL_BAUD 115200
 #endif
+// Jak dlugo panel musi byc ONLINE po wyslaniu KEYSET, zanim uznamy parowanie
+// za potwierdzone i utrwalimy je w NVS.
+#ifndef PANEL_KEYSET_CONFIRM_MS
+#define PANEL_KEYSET_CONFIRM_MS 3000
+#endif
 
 namespace panel {
 
@@ -56,7 +61,8 @@ void showText(const String &txt, uint8_t seconds);  // 0 = do odwołania
 void beep(uint8_t on_100ms, uint8_t off_100ms, uint8_t count);
 
 // --- diagnostyka ----------------------------------------------------------
-bool online();                             // panel odpowiada na odpytywanie
+bool online();                             // panel odpowiada na odpytywanie (stan PD wg LibOSDP)
+bool busActivity();                        // surowe bajty na magistrali — TYLKO diagnostyka
 bool secureChannel();                      // sesja szyfrowana AES-128
 bool provisioned();                        // klucz panelu już wgrany
 uint32_t lastSeenMs();                     // millis() ostatniej odpowiedzi
