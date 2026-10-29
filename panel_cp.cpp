@@ -33,7 +33,23 @@ volatile uint8_t key_head = 0, key_tail = 0;
 bool tamper_state = false, tamper_flag = false;
 
 int ch_send(void *data, uint8_t *buf, int len) {
-  return bus.write(buf, len);
+  int n = bus.write(buf, len);
+  // ESP32 w trybie UART_MODE_RS485_HALF_DUPLEX zawraca nadawane bajty do wlasnego
+  // FIFO odbiorczego (sprzetowy mechanizm wykrywania kolizji). LibOSDP czytalo wtedy
+  // WLASNA ramke jako odpowiedz PD, nie znajdowalo w niej odpowiedzi i konczylo na
+  // "Response timeout for CMD: ID" -> "Going offline for 300 seconds".
+  //
+  // Potwierdzone na sprzecie 29.10.2026: centralka odbierala bajty przy FIZYCZNIE
+  // ODPIETEJ magistrali, a nastepnie przy ZWARTYCH A i B. Zwarcie wymusza zerowe
+  // napiecie roznicowe, wiec odbiornik nie moglby wyprodukowac bajtow — echo
+  // powstaje wewnatrz ukladu, nie na magistrali.
+  //
+  // flush() czeka, az ostatni bit opusci nadajnik, wiec po jego powrocie cale echo
+  // jest juz w FIFO i mozna je wyrzucic. Odpowiedz panelu przychodzi pozniej:
+  // OSDP wymaga od PD minimalnej zwloki przed nadaniem.
+  bus.flush();
+  while (bus.available()) bus.read();
+  return n;
 }
 
 int ch_recv(void *data, uint8_t *buf, int maxlen) {
@@ -124,9 +140,16 @@ void begin() {
   bus.begin(PANEL_BAUD, SERIAL_8N1, PANEL_RS485_RX, PANEL_RS485_TX);
   // Sprzętowy half-duplex: sterownik UART sam steruje DE na czas nadawania.
   // Ręczne przełączanie pinu w kodzie kończy się uciętym pierwszym bajtem.
-  uart_set_pin(UART_NUM_2, PANEL_RS485_TX, PANEL_RS485_RX,
-               PANEL_RS485_DE, UART_PIN_NO_CHANGE);
-  uart_set_mode(UART_NUM_2, UART_MODE_RS485_HALF_DUPLEX);
+  esp_err_t rc_pin  = uart_set_pin(UART_NUM_2, PANEL_RS485_TX, PANEL_RS485_RX,
+                                   PANEL_RS485_DE, UART_PIN_NO_CHANGE);
+  esp_err_t rc_mode = uart_set_mode(UART_NUM_2, UART_MODE_RS485_HALF_DUPLEX);
+  // Obie funkcje moga cicho odmowic (np. gdy sterownik UART nie jest zainstalowany
+  // tak, jak zaklada IDF) i wtedy DE nie jest sterowane wcale. Bez tego komunikatu
+  // objawy sa nie do odroznienia od usterki okablowania — kosztowalo to jedna sesje.
+  if (rc_pin != ESP_OK || rc_mode != ESP_OK) {
+    Serial.printf("[OSDP] UWAGA: uart_set_pin=%d uart_set_mode=%d — sterowanie DE moze nie dzialac\n",
+                  (int)rc_pin, (int)rc_mode);
+  }
 
   static osdp_pd_info_t info;
   memset(&info, 0, sizeof(info));
